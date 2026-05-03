@@ -2,11 +2,12 @@
 // (Auto-save is handled by the tabs module now.)
 
 import { GIFEncoder, quantize, applyPalette } from 'https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm';
+import { encodeShareV1, decodeShareV1 } from './share-codec.js?v=1.8.4';
 
 let graph, paper, canvasModule;
 const NAMED_SAVE_PREFIX = 'sfdiag::save::';
 const SAVE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const APP_VERSION = '1.8.2';
+const APP_VERSION = '1.8.4';
 export { APP_VERSION };
 
 // Maximum number of cells to accept from external sources (share URLs, JSON import)
@@ -913,16 +914,11 @@ export function shareAsURL() {
     graph: graph.toJSON(),
   };
   try {
-    const json = JSON.stringify(data);
-    const compressed = pako.deflateRaw(json);
-    // Build base64 in chunks to avoid call-stack overflow on large arrays
-    let binaryStr = '';
-    for (let i = 0; i < compressed.length; i++) binaryStr += String.fromCharCode(compressed[i]);
-    const base64 = btoa(binaryStr);
-    // Use URL-safe base64
-    const urlSafe = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const url = `${window.location.origin}${window.location.pathname}#diagram=${urlSafe}`;
-
+    // v1 codec: structural-key minification + zlib preset dictionary, ~40-50%
+    // smaller than the legacy raw-deflate path. Output starts with `v1.`;
+    // loadFromURL detects the prefix and routes accordingly.
+    const payload = encodeShareV1(data);
+    const url = `${window.location.origin}${window.location.pathname}#diagram=${payload}`;
     showShareModal(url);
   } catch (err) {
     console.error('SF Diagrams: Share URL failed:', err);
@@ -934,27 +930,36 @@ export async function loadFromURL() {
   const hash = window.location.hash;
   if (!hash || !hash.includes('diagram=')) return false;
 
-  const match = hash.match(/diagram=([A-Za-z0-9_-]+)/);
-  // Hash is present but the payload contains characters outside the
-  // url-safe-base64 alphabet — almost always a copy/paste truncation.
-  if (!match) {
+  // Versioned codec match (`v1.<base64url>`) takes precedence; falls through
+  // to the legacy raw-deflate path for URLs created before this codec landed.
+  const verMatch = hash.match(/diagram=v(\d+)\.([A-Za-z0-9_-]+)/);
+  const legacyMatch = !verMatch && hash.match(/diagram=([A-Za-z0-9_-]+)/);
+  if (!verMatch && !legacyMatch) {
     showShareLoadError('This share link is invalid. Please check that you copied the whole link, or ask the sender for a new one.');
     history.replaceState(null, '', window.location.pathname);
     return false;
   }
 
   try {
-    // Restore standard base64 from URL-safe encoding
-    let base64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
-    // Re-add padding
-    while (base64.length % 4) base64 += '=';
-
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-    const json = pako.inflateRaw(bytes, { to: 'string' });
-    const data = JSON.parse(json);
+    let data;
+    if (verMatch) {
+      const ver = parseInt(verMatch[1], 10);
+      if (ver !== 1) {
+        showShareLoadError('This share link was created by a newer version of Diagramforce. Please ask the sender to update their link.');
+        history.replaceState(null, '', window.location.pathname);
+        return false;
+      }
+      data = decodeShareV1(`v1.${verMatch[2]}`);
+    } else {
+      // Legacy: raw deflate, no preset dictionary, no key minification.
+      let base64 = legacyMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (base64.length % 4) base64 += '=';
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const json = pako.inflateRaw(bytes, { to: 'string' });
+      data = JSON.parse(json);
+    }
 
     if (!data.graph || !data.type) {
       showShareLoadError('This share link is invalid. Please check that you copied the whole link, or ask the sender for a new one.');

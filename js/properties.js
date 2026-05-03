@@ -1,10 +1,10 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.8.2';
-import { Z_BASE, Z_TIER_SPAN, updateSimpleNodeLayout, syncMobilePanelHeight } from './canvas.js?v=1.8.2';
-import * as stencilModule from './stencil.js?v=1.8.2';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.8.2';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.8.4';
+import { Z_BASE, Z_TIER_SPAN, updateSimpleNodeLayout, syncMobilePanelHeight } from './canvas.js?v=1.8.4';
+import * as stencilModule from './stencil.js?v=1.8.4';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.8.4';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -13,8 +13,8 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.8.2';
-import * as history from './history.js?v=1.8.2';
+} from './clipboard.js?v=1.8.4';
+import * as history from './history.js?v=1.8.4';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
@@ -2920,8 +2920,15 @@ function renderLinkProps(cell) {
     </svg>
     Simplify path`;
   simplifyBtn.addEventListener('click', () => {
-    cell.vertices([]);
-    cell.connector('rounded', { radius: 8 });
+    // Two prop changes collapsed into one history command — Cmd+Z restores both
+    // the prior vertices AND the prior connector in a single undo step.
+    history.startBatch();
+    try {
+      cell.vertices([]);
+      cell.connector('rounded', { radius: 8 });
+    } finally {
+      history.endBatch();
+    }
   });
   appearance.appendChild(simplifyBtn);
 

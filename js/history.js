@@ -105,6 +105,44 @@ export function init(_graph) {
     });
   });
 
+  // Link vertices — added/dragged/cleared via `cell.vertices(...)`. Stored on
+  // the link model directly, so neither `change:attrs` nor `change:labels`
+  // captures changes. Without this handler the "Simplify path" action and any
+  // user drag that creates or removes vertices is invisible to undo/redo.
+  graph.on('change:vertices', (cell) => {
+    if (isUndoRedoing) return;
+    const oldV = cell.previous('vertices') ?? [];
+    const newV = cell.get('vertices') ?? [];
+    const oldStr = JSON.stringify(oldV);
+    const newStr = JSON.stringify(newV);
+    if (oldStr === newStr) return;
+    const oldCopy = JSON.parse(oldStr);
+    const newCopy = JSON.parse(newStr);
+    const id = cell.id;
+    pushCommand({
+      undo: () => { const c = graph.getCell(id); if (c) c.vertices(oldCopy); },
+      redo: () => { const c = graph.getCell(id); if (c) c.vertices(newCopy); },
+    });
+  });
+
+  // Link connector — `cell.connector(name, args)` swaps how the line is drawn
+  // (e.g. straight vs rounded). Same blind-spot as vertices above.
+  graph.on('change:connector', (cell) => {
+    if (isUndoRedoing) return;
+    const oldC = cell.previous('connector') ?? null;
+    const newC = cell.get('connector') ?? null;
+    const oldStr = JSON.stringify(oldC);
+    const newStr = JSON.stringify(newC);
+    if (oldStr === newStr) return;
+    const oldCopy = oldC ? JSON.parse(oldStr) : null;
+    const newCopy = newC ? JSON.parse(newStr) : null;
+    const id = cell.id;
+    pushCommand({
+      undo: () => { const c = graph.getCell(id); if (c) c.prop('connector', oldCopy); },
+      redo: () => { const c = graph.getCell(id); if (c) c.prop('connector', newCopy); },
+    });
+  });
+
   // Custom `lineStyle` prop (Safari-safe dashed/dotted connectors).
   // Stored separately from `line/strokeDasharray` so the real line never
   // carries a dasharray; see canvas.js → startLineStyleOverlays().
