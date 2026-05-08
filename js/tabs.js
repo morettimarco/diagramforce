@@ -1,7 +1,7 @@
 // Tabs — multi-diagram tab management
 // Each tab holds its own graph JSON, viewport, and undo/redo history.
 
-import { escHtml, APP_VERSION, classifyVersionDiff, normalizeDiagramType } from './persistence.js?v=1.11.7';
+import { escHtml, APP_VERSION, classifyVersionDiff, normalizeDiagramType } from './persistence.js?v=1.11.8';
 
 let graph, paper, canvasModule, selectionModule, historyModule, persistenceModule, stencilModule;
 let tabListEl;
@@ -759,10 +759,11 @@ function showSessionVersionWarning(savedVersion, diff) {
     const isMajor = diff === 'major';
     const title = isMajor ? 'Compatibility Warning' : 'Session Restored';
     const githubLink = `<a href="https://github.com/MateuszDabrowski/diagramforce" target="_blank" rel="noopener" style="color:var(--color-primary)">GitHub</a>`;
+    const releasesLink = `<a href="https://github.com/MateuszDabrowski/diagramforce/releases" target="_blank" rel="noopener" style="color:var(--color-primary)">some changes</a>`;
     const message = isMajor
       ? `There were significant changes introduced since your last session.
          Your open tabs probably won't load correctly.`
-      : `There have been some changes (check on ${githubLink}) since your last session, but it should still work.
+      : `There have been ${releasesLink} since your last session, but it should still work.
          If anything looks off, try re-adding the affected elements.`;
     const footerNote = isMajor
       ? `<p style="margin:0;color:var(--text-secondary)">

@@ -1,10 +1,10 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.11.7';
-import { Z_BASE, Z_TIER_SPAN, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.11.7';
-import * as stencilModule from './stencil.js?v=1.11.7';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.11.7';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.11.8';
+import { Z_BASE, Z_TIER_SPAN, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.11.8';
+import * as stencilModule from './stencil.js?v=1.11.8';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.11.8';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -13,9 +13,9 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.11.7';
-import * as history from './history.js?v=1.11.7';
-import { startImageAddFlow } from './image-component.js?v=1.11.7';
+} from './clipboard.js?v=1.11.8';
+import * as history from './history.js?v=1.11.8';
+import { startImageAddFlow } from './image-component.js?v=1.11.8';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
