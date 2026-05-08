@@ -1,21 +1,21 @@
 // SF Diagrams — App bootstrap
 // Initializes all modules in order. JointJS is a global (loaded via CDN script tag).
 
-import * as theme       from './theme.js?v=1.10.0';
-import * as icons       from './icons.js?v=1.10.0';
-import { getAllStencilSvgs } from './templates.js?v=1.10.0';
-import * as shapes      from './shapes.js?v=1.10.0';
-import * as canvas      from './canvas.js?v=1.10.0';
-import * as stencil     from './stencil.js?v=1.10.0';
-import * as selection   from './selection.js?v=1.10.0';
-import * as history     from './history.js?v=1.10.0';
-import * as clipboard   from './clipboard.js?v=1.10.0';
-import * as keyboard    from './keyboard.js?v=1.10.0';
-import * as toolbar     from './toolbar.js?v=1.10.0';
-import * as properties  from './properties.js?v=1.10.0';
-import * as persistence from './persistence.js?v=1.10.0';
-import * as tabs        from './tabs.js?v=1.10.0';
-import * as mermaidImport from './mermaid-import.js?v=1.10.0';
+import * as theme       from './theme.js?v=1.11.7';
+import * as icons       from './icons.js?v=1.11.7';
+import { getAllStencilSvgs } from './templates.js?v=1.11.7';
+import * as shapes      from './shapes.js?v=1.11.7';
+import * as canvas      from './canvas.js?v=1.11.7';
+import * as stencil     from './stencil.js?v=1.11.7';
+import * as selection   from './selection.js?v=1.11.7';
+import * as history     from './history.js?v=1.11.7';
+import * as clipboard   from './clipboard.js?v=1.11.7';
+import * as keyboard    from './keyboard.js?v=1.11.7';
+import * as toolbar     from './toolbar.js?v=1.11.7';
+import * as properties  from './properties.js?v=1.11.7';
+import * as persistence from './persistence.js?v=1.11.7';
+import * as tabs        from './tabs.js?v=1.11.7';
+import * as mermaidImport from './mermaid-import.js?v=1.11.7';
 
 async function main() {
   // Set app version in About modal
@@ -89,3 +89,18 @@ async function main() {
 main().catch(err => {
   console.error('SF Diagrams: Initialization failed', err);
 });
+
+// --- Service worker (offline support) ---
+// Same-origin only; falls through gracefully if the browser doesn't support it
+// or the registration fails. Cache invalidation is handled inside sw.js by
+// keying on APP_VERSION — a version bump lands in a fresh cache and old
+// caches are purged on activation.
+if ('serviceWorker' in navigator) {
+  // Defer registration until after the load event so it doesn't compete with
+  // the initial paint or app bootstrap.
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(err => {
+      console.warn('SF Diagrams: Service worker registration failed', err);
+    });
+  });
+}

@@ -1,14 +1,14 @@
 // Persistence — named saves, JSON import/export, PNG/GIF export
 // (Auto-save is handled by the tabs module now.)
 
-import { GIFEncoder, quantize, applyPalette } from 'https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm';
-import { encodeShareV1, decodeShareV1 } from './share-codec.js?v=1.10.0';
-import { diagramHasImage } from './image-component.js?v=1.10.0';
+import { GIFEncoder, quantize, applyPalette } from '../assets/vendor/gifenc.esm.js?v=1.11.7';
+import { encodeShareV1, decodeShareV1 } from './share-codec.js?v=1.11.7';
+import { diagramHasImage } from './image-component.js?v=1.11.7';
 
 let graph, paper, canvasModule;
 const NAMED_SAVE_PREFIX = 'sfdiag::save::';
-const SAVE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const APP_VERSION = '1.10.0';
+const SAVE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+const APP_VERSION = '1.11.7';
 export { APP_VERSION };
 
 // Maximum number of cells to accept from external sources (share URLs, JSON import)
@@ -593,6 +593,12 @@ function exportRaster(transparent, format) {
     // Resolve CSS custom properties — standalone SVG images can't access page CSS vars
     resolveCssVars(svgClone);
 
+    // Bake the runtime overlay-based dashing into the standalone SVG.
+    // For transparent export we fall back to inline stroke-dasharray on
+    // the line; non-transparent uses the bg-coloured overlay technique to
+    // avoid leaking the pattern into open-stroke markers in Safari.
+    applyLineStyleInline(svgClone, transparent);
+
     const svgStr = new XMLSerializer().serializeToString(svgClone);
     const svgBlob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
     const svgUrl = URL.createObjectURL(svgBlob);
@@ -678,6 +684,7 @@ export async function exportGIF(transparent = false) {
       }
       replaceForeignObjects(svgClone);
       resolveCssVars(svgClone);
+      applyLineStyleInline(svgClone, transparent);
       return svgClone;
     }
 
@@ -903,6 +910,53 @@ function resolveCssVars(svgRoot) {
   }
 }
 
+/**
+ * Bake the runtime "bg-coloured overlay clone" dashing technique into a
+ * standalone SVG export. The runtime overlays rely on a CSS rule
+ * (`.sf-line-style-overlay { stroke: var(--bg-canvas) !important; }`) which
+ * doesn't apply in a Blob-URL SVG, so the overlay would either lose its
+ * stroke or render in the line's own colour. We resolve the canvas bg
+ * colour and set it inline on every overlay clone so the same masking
+ * effect that works on canvas survives rasterisation.
+ *
+ * For transparent exports there is no background colour to "blend" the
+ * dashes into; we strip the overlays and fall back to writing
+ * `stroke-dasharray` inline on the link <path>. This is the only way to
+ * produce true transparent gaps in the stroke. Trade-off: in Safari, the
+ * line's dasharray can leak into open-stroke markers (lineArrow, ER
+ * notation) — a documented Safari quirk that doesn't surface on
+ * non-transparent exports because we don't put dasharray on the line at all.
+ */
+function applyLineStyleInline(svgRoot, transparent) {
+  if (!graph) return;
+
+  if (transparent) {
+    // True transparent gaps require dasharray on the line itself.
+    svgRoot.querySelectorAll('.sf-line-style-overlay').forEach(el => el.remove());
+    for (const link of graph.getLinks()) {
+      const style = link.prop('lineStyle');
+      if (!style || style === 'none') continue;
+      const linkEl = svgRoot.querySelector(`.joint-link[model-id="${link.id}"]`);
+      if (!linkEl) continue;
+      const lineEl = linkEl.querySelector('[joint-selector="line"]');
+      if (!lineEl) continue;
+      lineEl.setAttribute('stroke-dasharray', style);
+    }
+    return;
+  }
+
+  // Non-transparent: preserve the overlay-based technique. Resolve the
+  // canvas bg colour once and bake it into every overlay's stroke attribute
+  // so the standalone SVG renders the dashes correctly.
+  const root = document.documentElement;
+  const theme = root.getAttribute('data-theme');
+  const cs = getComputedStyle(root);
+  const bgCanvas = cs.getPropertyValue('--bg-canvas').trim() || (theme === 'dark' ? '#1A1A1A' : '#FAFAFA');
+  svgRoot.querySelectorAll('.sf-line-style-overlay').forEach(overlay => {
+    overlay.setAttribute('stroke', bgCanvas);
+  });
+}
+
 // ── URL Sharing ─────────────────────────────────────────────────────
 
 export function shareAsURL() {
@@ -911,10 +965,7 @@ export function shareAsURL() {
   // present, but keyboard shortcut / hamburger entry / `share` action route
   // straight into this function and need the same gate.
   if (diagramHasImage(graph)) {
-    showShareLoadError(
-      'URL sharing is unavailable while this diagram contains images. Use Save → Save to JSON to share, or remove every image to re-enable URL sharing.',
-      'Sharing unavailable',
-    );
+    showShareModal(null, { reason: 'image' });
     return;
   }
   const data = {
@@ -1028,39 +1079,58 @@ function showShareLoadError(message, title = "Couldn't load shared diagram") {
   document.body.appendChild(overlay);
 }
 
-function showShareModal(url) {
+function showShareModal(url, opts = {}) {
   document.querySelector('.sf-share-modal')?.remove();
 
   const wrapper = document.createElement('div');
   wrapper.className = 'sf-share-modal';
+
+  const isWarning = opts.reason === 'image';
+  const bodyHtml = isWarning
+    ? `
+        <div class="sf-share-modal__warning">
+          <p style="margin:0 0 var(--spacing-sm);font-weight:600;color:var(--text-primary)">Diagrams containing images exceed URL size limits.</p>
+          <p style="margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">Please use Save → Save to JSON to share this diagram, or remove every image to re-enable URL sharing.</p>
+        </div>`
+    : `
+        <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
+          Anyone with this link can open a copy of your diagram:
+        </p>
+        <input type="text" class="sf-share-modal__url" readonly spellcheck="false">`;
+
+  const footerHtml = isWarning
+    ? `<button class="sf-close-confirm__btn sf-share-modal__close-btn">Close</button>`
+    : `<button class="sf-close-confirm__btn sf-share-modal__close-btn">Close</button>
+       <button class="sf-close-confirm__btn sf-close-confirm__btn--save sf-share-modal__copy-btn">Copy Link</button>`;
+
   wrapper.innerHTML = `
     <div class="sf-modal" style="z-index:3000">
       <div class="sf-modal__overlay"></div>
       <div class="sf-modal__dialog" style="width:520px">
         <div class="sf-modal__header">
-          <h2 class="sf-modal__title">Share Diagram</h2>
+          <h2 class="sf-modal__title">${isWarning ? 'Sharing unavailable' : 'Share Diagram'}</h2>
         </div>
         <div class="sf-modal__body" style="padding:var(--spacing-md) var(--spacing-lg)">
-          <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
-            Anyone with this link can open a copy of your diagram:
-          </p>
-          <input type="text" class="sf-share-modal__url" readonly spellcheck="false">
+          ${bodyHtml}
         </div>
         <div style="display:flex;gap:var(--spacing-sm);padding:var(--spacing-sm) var(--spacing-lg) var(--spacing-md);justify-content:flex-end">
-          <button class="sf-close-confirm__btn sf-share-modal__close-btn">Close</button>
-          <button class="sf-close-confirm__btn sf-close-confirm__btn--save sf-share-modal__copy-btn">Copy Link</button>
+          ${footerHtml}
         </div>
       </div>
     </div>`;
 
   document.body.appendChild(wrapper);
 
+  const close = () => wrapper.remove();
+  wrapper.querySelector('.sf-share-modal__close-btn').addEventListener('click', close);
+  wrapper.querySelector('.sf-modal__overlay').addEventListener('click', close);
+
+  if (isWarning) return;
+
   const urlInput = wrapper.querySelector('.sf-share-modal__url');
   urlInput.value = url;
 
-  const close = () => wrapper.remove();
   const copyBtn = wrapper.querySelector('.sf-share-modal__copy-btn');
-
   copyBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(url).then(() => {
       copyBtn.textContent = 'Copied!';
@@ -1072,9 +1142,6 @@ function showShareModal(url) {
       urlInput.select();
     });
   });
-
-  wrapper.querySelector('.sf-share-modal__close-btn').addEventListener('click', close);
-  wrapper.querySelector('.sf-modal__overlay').addEventListener('click', close);
 
   // Select the URL text for easy manual copy
   setTimeout(() => urlInput.select(), 50);

@@ -73,6 +73,24 @@
   font-size: var(--font-size-sm);
 }
 
+.sf-share-modal__warning {
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--bg-elevated, rgba(127, 127, 127, 0.08));
+  border-left: 3px solid var(--color-accent, #F6B355);
+  border-radius: 4px;
+}
+
+.sf-modal__advisory {
+  margin: 0 0 var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--bg-elevated, rgba(127, 127, 127, 0.08));
+  border-left: 3px solid var(--color-accent, #F6B355);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+  border-radius: 4px;
+}
+
 /* Legacy save-item aliases — now handled by .sf-modal__row */
 
 .sf-modal__btn {

@@ -1,7 +1,7 @@
 // Pre-built Salesforce architecture templates
 // Each template is a config object describing a diagram element
 
-import { getIconDataUri } from './icons.js?v=1.10.0';
+import { getIconDataUri } from './icons.js?v=1.11.7';
 
 /** Convert inline stencilSvg markup to a data URI for use as a canvas icon.
  *  Each child element must carry its own fill/stroke — the wrapper SVG sets NO
@@ -945,7 +945,11 @@ export const DATAMODEL_CATEGORIES = [
   },
 ];
 
-// Helper: resize a DataObject element to fit its fields
+// Helper: resize a DataObject element to fit its fields. If the element is
+// embedded in a parent, the parent's bottom edge follows automatically via
+// the canvas-level `change:size` hook (`fitParentToChildren` in canvas.js),
+// which both grows and shrinks the parent to keep one grid dot of padding
+// below the lowest embedded child.
 export function resizeDataObjectToFit(cell) {
   const fields = cell.get('fields') || [];
   const keyFieldsOnly = cell.get('keyFieldsOnly');

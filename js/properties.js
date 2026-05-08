@@ -1,10 +1,10 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.10.0';
-import { Z_BASE, Z_TIER_SPAN, updateSimpleNodeLayout, syncMobilePanelHeight } from './canvas.js?v=1.10.0';
-import * as stencilModule from './stencil.js?v=1.10.0';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.10.0';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.11.7';
+import { Z_BASE, Z_TIER_SPAN, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.11.7';
+import * as stencilModule from './stencil.js?v=1.11.7';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.11.7';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -13,9 +13,9 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.10.0';
-import * as history from './history.js?v=1.10.0';
-import { startImageAddFlow } from './image-component.js?v=1.10.0';
+} from './clipboard.js?v=1.11.7';
+import * as history from './history.js?v=1.11.7';
+import { startImageAddFlow } from './image-component.js?v=1.11.7';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
@@ -2998,7 +2998,8 @@ function renderLinkProps(cell) {
       if (tm && tm.stroke && tm.stroke !== 'none') tm.stroke = v;
       cell.set('attrs', allAttrs);
       paper.updateViews();
-      // Safari SVG marker cache workaround
+      // Safari SVG marker cache workaround — see applyMarker() below for the
+      // why. Same DOM re-insert pattern.
       const view = paper.findViewByModel(cell);
       if (view?.el?.parentNode) {
         const parent = view.el.parentNode;
@@ -3106,9 +3107,15 @@ function renderLinkProps(cell) {
     cell.set('attrs', allAttrs);
     // Flush JointJS async view update queue synchronously.
     paper.updateViews();
-    // Safari SVG marker cache workaround: Safari caches marker renderings
-    // and doesn't repaint when <marker> content changes. Re-inserting the
-    // link's SVG group element into the DOM forces a full re-render.
+    // Safari SVG marker cache workaround: Safari caches the link <path>'s
+    // rendering keyed on the path element identity, and does NOT repaint when
+    // a referenced <marker> changes — even when `marker-end` is updated to
+    // point at a fresh marker id. The v1.11.0 attempt at minting a new
+    // marker id via null → flush → set looked clean, but JointJS deduplicates
+    // <marker> elements in <defs>: the second `set` would often re-bind to an
+    // orphan marker from a previous swap, leaving Safari's cache valid and
+    // the user staring at a stale arrowhead until reload. Re-inserting the
+    // link's whole group invalidates the cache outright.
     const view = paper.findViewByModel(cell);
     if (view?.el?.parentNode) {
       const parent = view.el.parentNode;
@@ -4369,6 +4376,23 @@ function reconnectLinks(connections, newId) {
   });
 }
 
+/**
+ * After replacing `oldCell` with `newCell`, re-embed `newCell` in the same
+ * parent IF the embedding rules allow it (e.g. a SimpleNode → Container
+ * conversion stays embedded when the parent is a Zone, but not when the
+ * parent is another Container). Call AFTER `graph.addCell(newCell)` but
+ * BEFORE `oldCell.remove()` so the parent's `embeds` array is consistent
+ * throughout. Silent no-op when there's no parent or canEmbed says no.
+ */
+function preserveParentEmbedding(oldCell, newCell) {
+  const parentId = oldCell.get('parent');
+  if (!parentId) return;
+  const parent = graph.getCell(parentId);
+  if (!parent) return;
+  if (!canEmbed(parent.get('type'), newCell.get('type'))) return;
+  parent.embed(newCell);
+}
+
 function convertToContainer(cell) {
   const pos = cell.position();
   const size = cell.size();
@@ -4387,6 +4411,7 @@ function convertToContainer(cell) {
     },
   });
   graph.addCell(container);
+  preserveParentEmbedding(cell, container);
   reconnectLinks(connections, container.id);
   cell.remove();
   selection.selectOnly(container.id);
@@ -4411,6 +4436,7 @@ function convertToNode(cell) {
   });
   graph.addCell(node);
   updateSimpleNodeLayout(node);
+  preserveParentEmbedding(cell, node);
   reconnectLinks(connections, node.id);
   cell.remove();
   selection.selectOnly(node.id);
@@ -4438,6 +4464,7 @@ function convertToIcon(cell) {
     },
   });
   graph.addCell(node);
+  preserveParentEmbedding(cell, node);
   reconnectLinks(connections, node.id);
   cell.remove();
   selection.selectOnly(node.id);
@@ -4464,6 +4491,7 @@ function convertContainerToIcon(cell) {
     },
   });
   graph.addCell(node);
+  preserveParentEmbedding(cell, node);
   reconnectLinks(connections, node.id);
   cell.remove();
   selection.selectOnly(node.id);
@@ -4490,6 +4518,7 @@ function convertFromIcon(cell) {
     },
   });
   graph.addCell(node);
+  preserveParentEmbedding(cell, node);
   reconnectLinks(connections, node.id);
   cell.remove();
   selection.selectOnly(node.id);

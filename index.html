@@ -6,7 +6,7 @@
   <meta name="description" content="Visual Salesforce architecture diagram editor for data models, process flows, org charts, Gantt charts, and UML sequence diagrams. Free, browser-based, no sign-up required.">
   <meta name="theme-color" content="#1D73C9" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#DA4E55" media="(prefers-color-scheme: dark)">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self';">
   <title>Diagramforce</title>
 
   <!-- Open Graph -->
@@ -24,21 +24,18 @@
 
   <link rel="icon" type="image/png" href="assets/favicon.png">
   <link rel="apple-touch-icon" href="assets/favicon.png">
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-
-  <!-- JointJS v4 -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@joint/core@4.0.4/dist/joint.min.css" integrity="sha384-W68LL3jsbqfNeDZD23ZWpZ6cMqF7EWlc5Bp5uVXIDJAQ4IT21p8irMFyAmrunfCU" crossorigin="anonymous">
 
   <!-- App CSS (order matters) -->
-  <link rel="stylesheet" href="css/variables.css?v=1.10.0">
-  <link rel="stylesheet" href="css/theme.css?v=1.10.0">
-  <link rel="stylesheet" href="css/layout.css?v=1.10.0">
-  <link rel="stylesheet" href="css/toolbar.css?v=1.10.0">
-  <link rel="stylesheet" href="css/stencil.css?v=1.10.0">
-  <link rel="stylesheet" href="css/properties.css?v=1.10.0">
-  <link rel="stylesheet" href="css/tabs.css?v=1.10.0">
-  <link rel="stylesheet" href="css/canvas.css?v=1.10.0">
-  <link rel="stylesheet" href="css/modals.css?v=1.10.0">
+  <!-- Note: JointJS v4 ships no separate stylesheet; vendored JS is loaded below. -->
+  <link rel="stylesheet" href="css/variables.css?v=1.11.7">
+  <link rel="stylesheet" href="css/theme.css?v=1.11.7">
+  <link rel="stylesheet" href="css/layout.css?v=1.11.7">
+  <link rel="stylesheet" href="css/toolbar.css?v=1.11.7">
+  <link rel="stylesheet" href="css/stencil.css?v=1.11.7">
+  <link rel="stylesheet" href="css/properties.css?v=1.11.7">
+  <link rel="stylesheet" href="css/tabs.css?v=1.11.7">
+  <link rel="stylesheet" href="css/canvas.css?v=1.11.7">
+  <link rel="stylesheet" href="css/modals.css?v=1.11.7">
 </head>
 <body>
   <!-- Hidden SLDS icon sprites (loaded by js/icons.js) -->
@@ -93,6 +90,8 @@
               <svg class="sf-toolbar__chevron" aria-hidden="true" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             </button>
             <div class="sf-toolbar__menu">
+              <button id="btn-display-auto-size" class="sf-toolbar__menu-item">Disable Auto Sizing</button>
+              <div id="display-auto-size-separator" style="border-top:1px solid var(--border-color);margin:4px 0"></div>
               <button id="btn-display-api" class="sf-toolbar__menu-item">Show API Names</button>
               <button id="btn-display-lengths" class="sf-toolbar__menu-item">Show Field Lengths</button>
               <button id="btn-display-keys-only" class="sf-toolbar__menu-item">Show Key Fields Only</button>
@@ -357,9 +356,11 @@
   <!-- Hidden file input for JSON import -->
   <input type="file" id="file-input" accept=".json" multiple style="display:none" aria-label="Import JSON file">
 
-  <!-- Scripts: JointJS as global, then app as ES module -->
-  <script defer src="https://cdn.jsdelivr.net/npm/@joint/core@4.0.4/dist/joint.min.js" integrity="sha384-fNdkeEn04ykjJJcUJiNFCANrCKn6m3AJgdpkIqgUF2hbTHQMCXbxsldLijUxJEEb" crossorigin="anonymous"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js" integrity="sha384-rNlaE5fs9dGIjmxWDALQh/RBAaGRYT5ChrzHo6tRfgrZ36iRFAiquP5g41Jsv+0j" crossorigin="anonymous"></script>
-  <script type="module" src="js/app.js?v=1.10.0"></script>
+  <!-- Scripts: JointJS as global, then app as ES module.
+       Libraries are vendored in assets/vendor/ and served same-origin so the
+       app works fully offline once the service worker has cached them. -->
+  <script defer src="assets/vendor/joint.min.js?v=1.11.7"></script>
+  <script defer src="assets/vendor/pako.min.js?v=1.11.7"></script>
+  <script type="module" src="js/app.js?v=1.11.7"></script>
 </body>
 </html>

@@ -1,7 +1,9 @@
 // Toolbar — wires all button clicks to module actions
 // Also keeps undo/redo button states in sync
 
-import { diagramHasImage } from './image-component.js?v=1.10.0';
+import { diagramHasImage } from './image-component.js?v=1.11.7';
+import { resizeDataObjectToFit } from './templates.js?v=1.11.7';
+import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents } from './canvas.js?v=1.11.7';
 
 let modules = {};
 
@@ -76,9 +78,38 @@ export function init(_modules) {
     applyDisplayFlagToAll('showFieldLengths', !current);
     updateDisplayToggleLabels();
   });
+  // Auto Sizing toggle (v1.11.6) — applies to all diagram types that support
+  // embedding. Flipping the flag immediately re-fits every parent against its
+  // current children (so re-enabling tightens everything that drifted while
+  // disabled), or no-ops if the user just disabled it.
+  const btnAutoSize = document.getElementById('btn-display-auto-size');
+  const refreshAutoSizeLabel = () => {
+    if (btnAutoSize) btnAutoSize.textContent = isAutoSizingEnabled() ? 'Disable Auto Sizing' : 'Enable Auto Sizing';
+  };
+  refreshAutoSizeLabel();
+  btnAutoSize?.addEventListener('click', () => {
+    const next = !isAutoSizingEnabled();
+    setAutoSizingEnabled(next);
+    refreshAutoSizeLabel();
+    // On re-enable, refit every embedding parent against its current children
+    // so anything that drifted while auto-sizing was off snaps back.
+    if (next) refitAllParents();
+  });
+
   btnKeysOnly.addEventListener('click', () => {
     const current = isDisplayFlagOn('keyFieldsOnly');
     applyDisplayFlagToAll('keyFieldsOnly', !current);
+    // Toggling keyFieldsOnly changes how many field rows render → height needs
+    // to follow, and any DataObject embedded in a Container/Zone may now
+    // overflow / underflow its parent. resizeDataObjectToFit runs the same
+    // height calc as a field add/remove and triggers the v1.11.0 downward
+    // parent-grow when applicable.
+    const graph = modules.graph;
+    if (graph) {
+      graph.getElements().forEach(el => {
+        if (el.get('type') === 'sf.DataObject') resizeDataObjectToFit(el);
+      });
+    }
     updateDisplayToggleLabels();
   });
 
@@ -287,8 +318,19 @@ function showLoadModal() {
   // Clean up any previous footer
   document.querySelector('.sf-modal__footer--load')?.remove();
 
+  // Persistence advisory — browsers can clear localStorage under storage
+  // pressure, on profile reset, or via privacy settings. Saves are kept for
+  // 90 days; for permanent storage, users should export to JSON.
+  const advisory = document.createElement('p');
+  advisory.className = 'sf-modal__advisory';
+  advisory.textContent = 'Browsers may periodically clear this list. For permanent storage, always Export as JSON.';
+  bodyEl.appendChild(advisory);
+
   if (saves.length === 0) {
-    bodyEl.innerHTML = '<p class="sf-modal__empty">No saved diagrams found.</p>';
+    const empty = document.createElement('p');
+    empty.className = 'sf-modal__empty';
+    empty.textContent = 'No saved diagrams found.';
+    bodyEl.appendChild(empty);
   } else {
     for (const save of saves) {
       bodyEl.appendChild(buildLoadItem(save));
@@ -393,6 +435,7 @@ function showSaveModal() {
         </button>
       </div>
       <div class="sf-modal__body sf-modal__row-list">
+        <p class="sf-modal__advisory">Browsers may periodically clear this list. For permanent storage, always Export as JSON.</p>
         ${tabRows}
       </div>
       <div class="sf-modal__footer">

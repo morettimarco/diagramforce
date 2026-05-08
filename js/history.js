@@ -10,6 +10,80 @@ let isBatching = false;
 let currentBatch = null;
 const onChangeCallbacks = [];
 
+// ── Drag-aware merge for continuous position/size/vertex changes ──
+// JointJS fires `change:position` (and `change:size`, `change:vertices`) on
+// every pointer-move during an interactive drag — a 30-pixel drag can produce
+// dozens of events. Without merging, the user has to tap undo for each step
+// to walk a dragged element back to where it started.
+//
+// Strategy: when a continuous-change event fires, we record only the FIRST
+// oldValue per cell-and-property pair, keep updating the latest newValue, and
+// commit a single merged command after a short idle window (DRAG_IDLE_MS).
+// `flushPendingDragCommit()` is also invoked at the start of undo()/redo()
+// so a fast Cmd+Z immediately after a drop still finds the drag on the stack.
+const DRAG_IDLE_MS = 80;
+const pendingChanges = new Map();   // cellId → { position?, size?, vertices? }
+let pendingCommitTimer = null;
+
+function schedulePendingDragCommit() {
+  if (pendingCommitTimer) clearTimeout(pendingCommitTimer);
+  pendingCommitTimer = setTimeout(() => {
+    pendingCommitTimer = null;
+    commitPendingDrag();
+  }, DRAG_IDLE_MS);
+}
+
+function commitPendingDrag() {
+  if (pendingCommitTimer) { clearTimeout(pendingCommitTimer); pendingCommitTimer = null; }
+  if (pendingChanges.size === 0) return;
+
+  const undos = [];
+  const redos = [];
+  for (const [id, entry] of pendingChanges) {
+    if (entry.position) {
+      const { oldPos, newPos } = entry.position;
+      if (oldPos.x !== newPos.x || oldPos.y !== newPos.y) {
+        const ox = oldPos.x, oy = oldPos.y, nx = newPos.x, ny = newPos.y;
+        undos.push(() => { const c = graph.getCell(id); if (c) c.position(ox, oy); });
+        redos.push(() => { const c = graph.getCell(id); if (c) c.position(nx, ny); });
+      }
+    }
+    if (entry.size) {
+      const { oldSize, newSize } = entry.size;
+      if (oldSize.width !== newSize.width || oldSize.height !== newSize.height) {
+        const ow = oldSize.width, oh = oldSize.height, nw = newSize.width, nh = newSize.height;
+        undos.push(() => { const c = graph.getCell(id); if (c) c.resize(ow, oh); });
+        redos.push(() => { const c = graph.getCell(id); if (c) c.resize(nw, nh); });
+      }
+    }
+    if (entry.vertices) {
+      const { oldV, newV } = entry.vertices;
+      const oldStr = JSON.stringify(oldV), newStr = JSON.stringify(newV);
+      if (oldStr !== newStr) {
+        const oc = JSON.parse(oldStr), nc = JSON.parse(newStr);
+        undos.push(() => { const c = graph.getCell(id); if (c) c.vertices(oc); });
+        redos.push(() => { const c = graph.getCell(id); if (c) c.vertices(nc); });
+      }
+    }
+  }
+  pendingChanges.clear();
+
+  if (undos.length === 0) return;
+  if (undos.length === 1) {
+    pushCommand({ undo: undos[0], redo: redos[0] });
+  } else {
+    // Multi-cell or multi-property drag (e.g. group move, resize-with-peers):
+    // wrap as one composite command so a single undo restores the whole motion.
+    pushCommand({
+      undo: () => { for (let i = undos.length - 1; i >= 0; i--) undos[i](); },
+      redo: () => { redos.forEach(fn => fn()); },
+    });
+  }
+}
+
+/** Public hook so callers (e.g. undo/redo) can force any pending drag merge to land first. */
+export function flushPendingDragCommit() { commitPendingDrag(); }
+
 export function init(_graph) {
   graph = _graph;
 
@@ -51,25 +125,35 @@ export function init(_graph) {
   graph.on('change:position', (cell) => {
     if (isUndoRedoing) return;
     const oldPos = cell.previous('position');
-    const newPos = { ...cell.get('position') };
     if (!oldPos) return;
+    const newPos = { ...cell.get('position') };
     const id = cell.id;
-    pushCommand({
-      undo: () => { const c = graph.getCell(id); if (c) c.position(oldPos.x, oldPos.y); },
-      redo: () => { const c = graph.getCell(id); if (c) c.position(newPos.x, newPos.y); },
-    });
+    let entry = pendingChanges.get(id);
+    if (!entry) { entry = {}; pendingChanges.set(id, entry); }
+    if (!entry.position) {
+      // First position-change for this cell in this drag — pin the original oldPos.
+      entry.position = { oldPos: { ...oldPos }, newPos };
+    } else {
+      // Subsequent move during the same drag — keep the original oldPos, refresh newPos.
+      entry.position.newPos = newPos;
+    }
+    schedulePendingDragCommit();
   });
 
   graph.on('change:size', (cell) => {
     if (isUndoRedoing) return;
     const oldSize = cell.previous('size');
-    const newSize = { ...cell.get('size') };
     if (!oldSize) return;
+    const newSize = { ...cell.get('size') };
     const id = cell.id;
-    pushCommand({
-      undo: () => { const c = graph.getCell(id); if (c) c.resize(oldSize.width, oldSize.height); },
-      redo: () => { const c = graph.getCell(id); if (c) c.resize(newSize.width, newSize.height); },
-    });
+    let entry = pendingChanges.get(id);
+    if (!entry) { entry = {}; pendingChanges.set(id, entry); }
+    if (!entry.size) {
+      entry.size = { oldSize: { ...oldSize }, newSize };
+    } else {
+      entry.size.newSize = newSize;
+    }
+    schedulePendingDragCommit();
   });
 
   graph.on('change:attrs', (cell) => {
@@ -109,20 +193,22 @@ export function init(_graph) {
   // the link model directly, so neither `change:attrs` nor `change:labels`
   // captures changes. Without this handler the "Simplify path" action and any
   // user drag that creates or removes vertices is invisible to undo/redo.
+  // Routed through the same pending-drag merge so a vertex drag collapses to
+  // one undo command instead of one per pointer-move.
   graph.on('change:vertices', (cell) => {
     if (isUndoRedoing) return;
     const oldV = cell.previous('vertices') ?? [];
     const newV = cell.get('vertices') ?? [];
-    const oldStr = JSON.stringify(oldV);
-    const newStr = JSON.stringify(newV);
-    if (oldStr === newStr) return;
-    const oldCopy = JSON.parse(oldStr);
-    const newCopy = JSON.parse(newStr);
+    if (JSON.stringify(oldV) === JSON.stringify(newV)) return;
     const id = cell.id;
-    pushCommand({
-      undo: () => { const c = graph.getCell(id); if (c) c.vertices(oldCopy); },
-      redo: () => { const c = graph.getCell(id); if (c) c.vertices(newCopy); },
-    });
+    let entry = pendingChanges.get(id);
+    if (!entry) { entry = {}; pendingChanges.set(id, entry); }
+    if (!entry.vertices) {
+      entry.vertices = { oldV: JSON.parse(JSON.stringify(oldV)), newV: JSON.parse(JSON.stringify(newV)) };
+    } else {
+      entry.vertices.newV = JSON.parse(JSON.stringify(newV));
+    }
+    schedulePendingDragCommit();
   });
 
   // Link connector — `cell.connector(name, args)` swaps how the line is drawn
@@ -171,6 +257,9 @@ function pushCommand(cmd) {
 }
 
 export function undo() {
+  // Land any in-flight drag merge first so a fast Cmd+Z right after a drop
+  // doesn't undo the wrong action (or no action at all).
+  commitPendingDrag();
   if (undoStack.length === 0) return;
   isUndoRedoing = true;
   const cmd = undoStack.pop();
@@ -188,6 +277,7 @@ export function undo() {
 }
 
 export function redo() {
+  commitPendingDrag();
   if (redoStack.length === 0) return;
   isUndoRedoing = true;
   const cmd = redoStack.pop();
@@ -205,6 +295,9 @@ export function redo() {
 }
 
 export function startBatch() {
+  // Land any in-flight drag merge before opening an explicit batch — otherwise
+  // the deferred commit could land inside the batch and disappear on undo.
+  commitPendingDrag();
   isBatching = true;
   currentBatch = [];
 }
@@ -221,6 +314,9 @@ export function endBatch() {
 }
 
 export function clear() {
+  // Drop any in-flight drag merge along with the rest of the history.
+  if (pendingCommitTimer) { clearTimeout(pendingCommitTimer); pendingCommitTimer = null; }
+  pendingChanges.clear();
   undoStack.length = 0;
   redoStack.length = 0;
   notifyChange();

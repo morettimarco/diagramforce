@@ -60,6 +60,51 @@ export const Z_LINK_BASE  = 3000;
 let _isLoadingJSON = false;
 export function setLoadingJSON(v) { _isLoadingJSON = v; }
 
+// ── Auto-sizing toggle (v1.11.6) ────────────────────────────────────
+// Controls whether `fitParentToChildren` is allowed to grow/shrink a
+// parent based on its embedded children. Default ON. Persisted in
+// localStorage so the user's choice survives reloads. The toolbar's
+// Display menu drives this via setAutoSizingEnabled().
+const AUTO_SIZE_LS_KEY = 'sfdiag::autoSizing';
+export function isAutoSizingEnabled() {
+  try {
+    const v = localStorage.getItem(AUTO_SIZE_LS_KEY);
+    return v === null ? true : v === 'true';
+  } catch { return true; }
+}
+export function setAutoSizingEnabled(v) {
+  try { localStorage.setItem(AUTO_SIZE_LS_KEY, String(!!v)); } catch {}
+}
+// Late-bound to the closure created inside init() — assigned there so the
+// helper has access to the current graph/paper. `refitAllParents()` walks
+// every embedding parent in the graph and refits each one. Used by the
+// toolbar to tighten everything up immediately after the user re-enables
+// auto sizing.
+let fitParentToChildrenImpl = null;
+export function refitAllParents() {
+  if (!fitParentToChildrenImpl) return;
+  // Built lazily so this function works regardless of when init() finished.
+  // We can't reach `graph` from outside init's closure, so we walk parent
+  // ids from the embedded children we can see here.
+  // The fit helper already iterates children itself — we just need to know
+  // which parents to feed it.
+  // Recover graph via the joint global: any cellView's `paper.model` reaches
+  // the graph, but cleaner is to expose it via the helper's own use of
+  // graph.getElements internally. So we cheat: fitParentToChildrenImpl
+  // reads `graph` from its closure, we just need to pass it the parent.
+  // Helper keeps its own ref to graph through closure capture above.
+  if (!_graphRef) return;
+  const seen = new Set();
+  _graphRef.getElements().forEach(el => {
+    const pid = el.get('parent');
+    if (!pid || seen.has(pid)) return;
+    seen.add(pid);
+    const parent = _graphRef.getCell(pid);
+    if (parent) fitParentToChildrenImpl(parent);
+  });
+}
+let _graphRef = null;
+
 let graph, paper;
 let currentZoom = 1;
 const ZOOM_MIN = 0.1;
@@ -74,6 +119,41 @@ const GRID_COLOR_LIGHT = 'rgba(0,0,0,0.25)';
 
 function getGridColor() {
   return document.documentElement.getAttribute('data-theme') === 'dark' ? GRID_COLOR_DARK : GRID_COLOR_LIGHT;
+}
+
+/**
+ * Single source of truth for embedding rules. The paper's `validateEmbedding`
+ * delegates here, and shape-conversion code in properties.js uses this to
+ * decide whether the converted cell can stay embedded in its previous parent
+ * (e.g. converting a Node to a Container should preserve embedding when the
+ * old parent is a Zone, but not when the old parent is another Container).
+ */
+export function canEmbed(parentType, childType) {
+  if (parentType === 'sf.Container') {
+    return childType !== 'sf.Container' && childType !== 'sf.Zone';
+  }
+  if (parentType === 'sf.Zone') {
+    return childType !== 'sf.Zone';
+  }
+  if (parentType === 'sf.BpmnPool') {
+    return childType !== 'sf.BpmnPool';
+  }
+  if (parentType === 'sf.BpmnSubprocess') {
+    return childType !== 'sf.BpmnPool' && childType !== 'sf.BpmnSubprocess';
+  }
+  if (parentType === 'sf.BpmnLoop') {
+    return childType !== 'sf.BpmnPool' && childType !== 'sf.BpmnSubprocess' && childType !== 'sf.BpmnLoop';
+  }
+  if (parentType === 'sf.GanttTimeline') {
+    return childType === 'sf.GanttTask' || childType === 'sf.GanttMilestone' || childType === 'sf.GanttMarker' || childType === 'sf.GanttGroup';
+  }
+  if (parentType === 'sf.SequenceParticipant' || parentType === 'sf.SequenceActor') {
+    return childType === 'sf.SequenceActivation';
+  }
+  if (parentType === 'sf.Task') {
+    return childType === 'sf.OrgPerson' || childType === 'sf.Container';
+  }
+  return false;
 }
 
 // Perpendicular-exit orthogonal router with obstacle avoidance.
@@ -575,44 +655,7 @@ export function init() {
       }
       return candidates;
     },
-    validateEmbedding: (childView, parentView) => {
-      const parentType = parentView.model.get('type');
-      const childType = childView.model.get('type');
-      // Container accepts Nodes, Notes, Texts (not other Containers or Zones)
-      if (parentType === 'sf.Container') {
-        return childType !== 'sf.Container' && childType !== 'sf.Zone';
-      }
-      // Zone accepts everything except other Zones
-      if (parentType === 'sf.Zone') {
-        return childType !== 'sf.Zone';
-      }
-      // BpmnPool accepts any BPMN/Flow shape (including subprocesses and loops)
-      if (parentType === 'sf.BpmnPool') {
-        return childType !== 'sf.BpmnPool';
-      }
-      // BpmnSubprocess accepts BPMN shapes except pools and other subprocesses
-      if (parentType === 'sf.BpmnSubprocess') {
-        return childType !== 'sf.BpmnPool' && childType !== 'sf.BpmnSubprocess';
-      }
-      // BpmnLoop accepts BPMN shapes except pools, subprocesses and other loops
-      if (parentType === 'sf.BpmnLoop') {
-        return childType !== 'sf.BpmnPool' && childType !== 'sf.BpmnSubprocess' && childType !== 'sf.BpmnLoop';
-      }
-      // GanttTimeline accepts GanttTask, GanttMilestone, GanttGroup
-      if (parentType === 'sf.GanttTimeline') {
-        return childType === 'sf.GanttTask' || childType === 'sf.GanttMilestone' || childType === 'sf.GanttMarker' || childType === 'sf.GanttGroup';
-      }
-      // Sequence: Participant and Actor lifelines capture Activations (like a
-      // Zone captures Nodes) so moving the lifeline carries the activation.
-      if (parentType === 'sf.SequenceParticipant' || parentType === 'sf.SequenceActor') {
-        return childType === 'sf.SequenceActivation';
-      }
-      // Task captures Person/Team cards as RACI assignees in its right column.
-      if (parentType === 'sf.Task') {
-        return childType === 'sf.OrgPerson' || childType === 'sf.Container';
-      }
-      return false;
-    },
+    validateEmbedding: (childView, parentView) => canEmbed(parentView.model.get('type'), childView.model.get('type')),
 
     interactive: {
       linkMove: true,
@@ -924,6 +967,101 @@ export function init() {
   // Must run after the paper is mounted so the SVG viewport exists.
   startLineStyleOverlays();
 
+  // Generalisation of v1.11.0 CR-3.2 (DataObject parent grow). When any cell
+  // is embedded in a parent (Container, Zone, BpmnPool, etc.) — whether by
+  // user drag, JSON load, or programmatic embedding — the parent's bottom
+  // edge tracks the lowest child + 1 grid dot (16 px). Top, left, and right
+  // edges are never pushed, so the parent's layout anchor stays intact and
+  // Manhattan routing above the parent doesn't shift. The fit grows AND
+  // shrinks: removing or shrinking a child also pulls the parent's bottom
+  // back up.
+  //
+  // Padding = visible grid dot spacing (gridSize × drawGrid.scaleFactor).
+  const PARENT_FIT_PADDING = (paper.options.gridSize || 4) * (paper.options.drawGrid?.args?.scaleFactor || 4);
+  // Don't shrink a parent below this height — a Container header bar is
+  // ~32 px on its own, so 48 keeps a small body strip visible even if a
+  // pathological diagram has a single tiny child near the parent's top.
+  const PARENT_FIT_MIN_HEIGHT = 48;
+
+  // Expose the fit helper + a graph reference so the toolbar can refit
+  // everything when the user re-enables auto sizing. Late-binding because
+  // the closure depends on the `graph` and `paper` instances created above.
+  fitParentToChildrenImpl = fitParentToChildren;
+  _graphRef = graph;
+
+  function fitParentToChildren(parent) {
+    if (!isAutoSizingEnabled()) return;
+    if (!parent || !parent.isElement || !parent.isElement()) return;
+    // Filter by `parent` attribute directly — `parent.getEmbeddedCells()` reads
+    // the parent's own `embeds` array, which JointJS may not have updated yet
+    // during a synchronous remove/un-embed event.
+    const children = graph.getElements().filter(c => c.get('parent') === parent.id);
+    if (children.length === 0) return; // empty parent: leave it alone
+    let maxBottom = -Infinity;
+    for (const c of children) {
+      const p = c.position();
+      const s = c.size();
+      const bottom = p.y + s.height;
+      if (bottom > maxBottom) maxBottom = bottom;
+    }
+    const parentPos = parent.position();
+    const parentSize = parent.size();
+    const requiredHeight = (maxBottom + PARENT_FIT_PADDING) - parentPos.y;
+    const targetHeight = Math.max(PARENT_FIT_MIN_HEIGHT, requiredHeight);
+    if (Math.abs(parentSize.height - targetHeight) < 1) return; // already at right size
+    parent.resize(parentSize.width, targetHeight);
+  }
+
+  // Trigger 1: a cell becomes embedded (or un-embedded). Fit both parents:
+  // the new one (may grow) and the previous one (may shrink).
+  graph.on('change:parent', (cell, newParentId) => {
+    if (_isLoadingJSON) return;
+    if (!cell.isElement || !cell.isElement()) return;
+    const prevParentId = cell.previous('parent');
+    if (newParentId) {
+      const np = graph.getCell(newParentId);
+      if (np) fitParentToChildren(np);
+    }
+    if (prevParentId && prevParentId !== newParentId) {
+      const pp = graph.getCell(prevParentId);
+      if (pp) fitParentToChildren(pp);
+    }
+  });
+
+  // Trigger 2: an embedded child resizes (e.g. DataObject after key-fields-only
+  // toggle, or any cell after manual resize). Fit the parent.
+  graph.on('change:size', (cell) => {
+    if (_isLoadingJSON) return;
+    const parentId = cell.get('parent');
+    if (!parentId) return;
+    const parent = graph.getCell(parentId);
+    if (parent) fitParentToChildren(parent);
+  });
+
+  // Trigger 3: an embedded child moves. Cascaded moves (parent dragging its
+  // children along) don't change the relative geometry, so fit is a no-op
+  // in that case — but a user dragging the child within the parent should
+  // tighten or expand the parent.
+  graph.on('change:position', (cell) => {
+    if (_isLoadingJSON) return;
+    const parentId = cell.get('parent');
+    if (!parentId) return;
+    const parent = graph.getCell(parentId);
+    if (parent) fitParentToChildren(parent);
+  });
+
+  // Trigger 4: an embedded child is removed (deleted, cut, etc.). Fit the
+  // surviving parent on the next tick — JointJS may still be cleaning up its
+  // embeds-array when this fires.
+  graph.on('remove', (cell) => {
+    if (_isLoadingJSON) return;
+    const parentId = cell.get('parent') || cell.previous('parent');
+    if (!parentId) return;
+    const parent = graph.getCell(parentId);
+    if (!parent) return;
+    setTimeout(() => fitParentToChildren(parent), 0);
+  });
+
   return { graph, paper };
 }
 
@@ -1200,6 +1338,18 @@ export function startLineStyleOverlays() {
   graph.on('add remove', (cell) => {
     if (cell.isLink && cell.isLink()) scheduleLineStyleSync();
   });
+
+  // Re-sync overlays whenever any geometry change could move a link's path.
+  // The MutationObserver above only watches childList/subtree, so JointJS's
+  // attribute-only updates (e.g. the `d` attribute on the link path during a
+  // drag of a connected element) slip past it and the overlay stays pinned to
+  // the link's old geometry — leaving the dashed line briefly solid until the
+  // user releases the pointer. RAF debouncing in scheduleLineStyleSync keeps
+  // this cheap even during a continuous drag.
+  graph.on(
+    'change:position change:size change:vertices change:source change:target',
+    scheduleLineStyleSync,
+  );
 
   scheduleLineStyleSync();
 }

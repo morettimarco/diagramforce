@@ -1,7 +1,7 @@
 // Selection manager — tracks selected elements
 // Provides single-click, shift-click, rubber-band selection, and alignment ops
 
-import * as clipboard from './clipboard.js?v=1.10.0';
+import * as clipboard from './clipboard.js?v=1.11.7';
 
 let graph, paper;
 const selectedIds = new Set();
@@ -219,8 +219,10 @@ export function init(_graph, _paper) {
 
   // Use pointerdown (not pointerclick) so selection and properties panel
   // respond immediately on the first press — no double-click needed.
-  // Helper: Cmd on Mac, Ctrl on Windows/Linux for multi-select
-  const isMultiSelectKey = (evt) => evt.metaKey || evt.ctrlKey;
+  // Multi-select bindings: Cmd/Ctrl+click (legacy) and Shift+click
+  // (industry-standard, matches Figma/Lucid). Shift+drag on the blank
+  // canvas remains rubber-band — click vs drag disambiguates the two.
+  const isMultiSelectKey = (evt) => evt.metaKey || evt.ctrlKey || evt.shiftKey;
 
   // Track touch pointers currently holding an element — enables two-finger
   // multi-select: one finger holds, second finger taps another element.
