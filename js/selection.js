@@ -1,8 +1,8 @@
 // Selection manager — tracks selected elements
 // Provides single-click, shift-click, rubber-band selection, and alignment ops
 
-import * as clipboard from './clipboard.js?v=1.12.2';
-import * as history from './history.js?v=1.12.2';
+import * as clipboard from './clipboard.js?v=1.12.3';
+import * as history from './history.js?v=1.12.3';
 
 let graph, paper;
 const selectedIds = new Set();
@@ -288,7 +288,16 @@ export function init(_graph, _paper) {
   document.addEventListener('pointercancel', (e) => { clearTouch(e); cancelLongPressMenu(); });
 
   paper.on('element:pointermove', () => {
-    didDrag = true;
+    // First drag motion → clear connection-focus dimming so the user
+    // can see all components clearly while positioning. Dimming
+    // obscures the spatial context the user is reasoning about during
+    // a drag (alignment, proximity, snap targets). We restore it on
+    // pointerup below — re-evaluating against the (possibly new)
+    // selection state via updateLinkDimming().
+    if (!didDrag) {
+      didDrag = true;
+      suspendDimmingForDrag();
+    }
     cancelLongPressMenu();
   });
 
@@ -298,6 +307,11 @@ export function init(_graph, _paper) {
       selectOnly(cellView.model.id);
     }
     pointerDownId = null;
+    if (didDrag) {
+      // Drag finished — restore dimming against the current selection
+      // (which may have been refined by a click-without-drag path above).
+      updateLinkDimming();
+    }
     didDrag = false;
   });
 
@@ -380,7 +394,147 @@ export function deleteSelected() {
 }
 
 export function onChange(cb) { onChangeCallbacks.push(cb); }
-function notifyChange() { onChangeCallbacks.forEach(cb => cb(getSelectedIds())); }
+function notifyChange() {
+  updateLinkDimming();
+  onChangeCallbacks.forEach(cb => cb(getSelectedIds()));
+}
+
+// ── Connection-focus dimming (v1.12.3) ──────────────────────────────
+// When one or more ELEMENTS are selected, fade everything in the
+// diagram that doesn't touch the selection: links not connected to a
+// selected element, AND elements that have at least one link but aren't
+// connected to any selected element. Elements with no links at all
+// (Zones, Notes, TextLabels, stray nodes) are left untouched — they
+// can't have "connection focus" so dimming them would be confusing.
+//
+// Rules:
+//   - No elements selected → clear all dimming (a bare link selection
+//     keeps the focus-highlight code path doing its thing).
+//   - One+ elements selected:
+//       • Dim every link whose source.id AND target.id are BOTH NOT in
+//         the selected-element set.
+//       • Dim every element that HAS at least one link AND is not in
+//         the connected set (= selected itself OR linked to a selected).
+//       • Leave un-linked elements alone (Zones, Notes, etc.).
+//   - A link that is itself selected stays visible even if it isn't
+//     attached to a selected element (the user picked it deliberately).
+//   - Hover overrides dim via CSS so the user can still inspect a
+//     dimmed connection on demand.
+//
+// After applying classes, dispatch `sf:selection-dim-change` so the
+// canvas bump-overlay can match opacity on its arc/restoration parts
+// — the bumps live in a separate SVG group and don't inherit the link
+// view's CSS class.
+// Clear all dim classes immediately — used at the start of a drag so the
+// user can see every component clearly while positioning. NOT a full
+// reset of selection state; just the visual dimming overlay. The matching
+// re-evaluation happens on pointerup via updateLinkDimming().
+function suspendDimmingForDrag() {
+  document.querySelectorAll('.joint-link.sf-link-dimmed').forEach(el => {
+    el.classList.remove('sf-link-dimmed');
+  });
+  document.querySelectorAll('.joint-element.sf-element-dimmed').forEach(el => {
+    el.classList.remove('sf-element-dimmed');
+  });
+  // Notify the bump-overlay so its tinted opacities clear too.
+  document.dispatchEvent(new CustomEvent('sf:selection-dim-change'));
+}
+
+function updateLinkDimming() {
+  if (!graph || !paper) return;
+  const selectedElementIds = new Set();
+  const selectedLinkIds = new Set();
+  for (const id of selectedIds) {
+    const cell = graph.getCell(id);
+    if (!cell) continue;
+    if (cell.isElement()) selectedElementIds.add(id);
+    else if (cell.isLink()) selectedLinkIds.add(id);
+  }
+
+  if (selectedElementIds.size === 0) {
+    // Pure-link or empty selection — clear every dim class so prior
+    // element-focused state doesn't linger.
+    document.querySelectorAll('.joint-link.sf-link-dimmed').forEach(el => {
+      el.classList.remove('sf-link-dimmed');
+    });
+    document.querySelectorAll('.joint-element.sf-element-dimmed').forEach(el => {
+      el.classList.remove('sf-element-dimmed');
+    });
+    document.dispatchEvent(new CustomEvent('sf:selection-dim-change'));
+    return;
+  }
+
+  // Expand the selection to include the embedded children of any
+  // selected container, AND the parent container of any selected child.
+  // This makes "select Marketing" implicitly cover Ariel inside (so
+  // Marc → Ariel link stays visible), and "select Ariel" implicitly
+  // covers Marketing (so the parent container doesn't dim out from
+  // under its selected child). Recursive: handles nested containers.
+  const expandedSelection = new Set(selectedElementIds);
+  const addChildrenRecursive = (id) => {
+    const cell = graph.getCell(id);
+    if (!cell?.get) return;
+    const embeds = cell.get('embeds') || [];
+    for (const childId of embeds) {
+      if (!expandedSelection.has(childId)) {
+        expandedSelection.add(childId);
+        addChildrenRecursive(childId);
+      }
+    }
+  };
+  const addParentChain = (id) => {
+    const cell = graph.getCell(id);
+    if (!cell?.get) return;
+    const parentId = cell.get('parent');
+    if (parentId && !expandedSelection.has(parentId)) {
+      expandedSelection.add(parentId);
+      addParentChain(parentId);
+    }
+  };
+  for (const id of [...selectedElementIds]) {
+    addChildrenRecursive(id);
+    addParentChain(id);
+  }
+
+  // One pass over the link set to compute two sets at once: which links
+  // are dim-candidates (no selected endpoint) and which elements are
+  // "connected" (= directly linked to anything in the expanded set).
+  const connectedElementIds = new Set(expandedSelection);
+  const elementsWithLinks = new Set();
+  for (const link of graph.getLinks()) {
+    const srcId = link.get('source')?.id;
+    const tgtId = link.get('target')?.id;
+    if (srcId) elementsWithLinks.add(srcId);
+    if (tgtId) elementsWithLinks.add(tgtId);
+    if (srcId && expandedSelection.has(srcId) && tgtId) connectedElementIds.add(tgtId);
+    if (tgtId && expandedSelection.has(tgtId) && srcId) connectedElementIds.add(srcId);
+  }
+
+  // Apply link dimming.
+  for (const link of graph.getLinks()) {
+    const srcId = link.get('source')?.id;
+    const tgtId = link.get('target')?.id;
+    const connected = (srcId && expandedSelection.has(srcId))
+                   || (tgtId && expandedSelection.has(tgtId));
+    const isLinkSelected = selectedLinkIds.has(link.id);
+    const view = paper.findViewByModel(link);
+    if (!view?.el) continue;
+    view.el.classList.toggle('sf-link-dimmed', !connected && !isLinkSelected);
+  }
+
+  // Apply element dimming — only elements that ALREADY participate in
+  // the link graph become candidates, so background-only shapes
+  // (Zones, Notes, TextLabels, decorative nodes) keep full opacity.
+  for (const el of graph.getElements()) {
+    const view = paper.findViewByModel(el);
+    if (!view?.el) continue;
+    const hasLinks = elementsWithLinks.has(el.id);
+    const isConnected = connectedElementIds.has(el.id);
+    view.el.classList.toggle('sf-element-dimmed', hasLinks && !isConnected);
+  }
+
+  document.dispatchEvent(new CustomEvent('sf:selection-dim-change'));
+}
 
 function applyVisual(id) {
   const view = paper.findViewByModel(id);

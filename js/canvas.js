@@ -147,15 +147,50 @@ export function isConnectorGroupingEnabled() {
 export function setConnectorGroupingEnabled(v) {
   try { localStorage.setItem(CONNECTOR_GROUP_LS_KEY, String(!!v)); } catch {}
 }
+
+// ── Bridge notation at link crossings (CR-5.2 PoC) ───────────────────
+// EDA-style "jump over" arcs at points where two orthogonal links cross
+// without being connected. The link drawn later (higher z, on top in SVG
+// paint order) stays straight; the one underneath gets a small semi-
+// circular bump arc going OVER the perpendicular line, making the non-
+// connection explicit. Pure overlay layer — no mutation of JointJS link
+// paths, so the documented Safari <marker>-cache and dasharray-bleed bugs
+// (GOTCHAS §1.x) don't apply: we use only <rect>, <line>, <path>.
+const CROSSING_BUMPS_LS_KEY = 'sfdiag::crossingBumps';
+export function isCrossingBumpsEnabled() {
+  try {
+    const v = localStorage.getItem(CROSSING_BUMPS_LS_KEY);
+    if (v === null) return true;          // default ON for the PoC
+    return v === 'true';
+  } catch { return true; }
+}
+export function setCrossingBumpsEnabled(v) {
+  try { localStorage.setItem(CROSSING_BUMPS_LS_KEY, String(!!v)); } catch {}
+  refreshCrossingBumps();
+}
+export function refreshCrossingBumps() {
+  if (typeof scheduleCrossingBumpRecompute === 'function') {
+    scheduleCrossingBumpRecompute();
+  }
+}
+
 // Synchronously re-run the router on every link in the active graph. Used by
 // the toolbar so toggling connector grouping applies instantly. LinkView.update()
 // recomputes the route (re-invoking sfManhattan) and repaints in place.
+// After every re-route the crossing-bump overlay needs to recompute too —
+// linkView.update() doesn't always trigger `paper.on('render:done')`, so
+// the bumps would otherwise stay anchored to stale route coordinates and
+// either float in empty space (where the old route used to cross) or
+// stop showing at the new crossing points.
 export function rerouteAllLinks() {
   if (!graph || !paper) return;
   graph.getLinks().forEach(l => {
     const lv = paper.findViewByModel(l);
     lv?.update?.();
   });
+  if (typeof scheduleCrossingBumpRecompute === 'function') {
+    scheduleCrossingBumpRecompute();
+  }
 }
 
 let graph, paper;
@@ -342,6 +377,17 @@ function registerSfRouter() {
     if (!portId) return null;
     const ends = gatherPortEnds(gr, cell.id, portId);
     if (ends.length < 2) return null;
+    // Opposite-direction pair skip — same condition as in linkChannelIndex.
+    // For exactly two ends with one source + one target sharing a port
+    // (e.g., one link exits the port, another link enters it), trunk
+    // separation isn't needed either — the markers on outgoing vs
+    // incoming links rarely collide visually (BPMN: outgoing has no
+    // source marker, incoming has target arrow; ER: source markers
+    // tend to be on one end only). Without the trunk Y-step the
+    // incoming line reaches the port at its natural Y, matching the
+    // outgoing line's exit, and the visible "dance" at the cell edge
+    // disappears.
+    if (ends.length === 2 && ends[0].end !== ends[1].end) return null;
 
     // Bucket each end by visual signature, and collect the far-end coordinate
     // along the relevant axis for ordering (x for top/bottom edges, y for
@@ -383,8 +429,148 @@ function registerSfRouter() {
     // router itself via a perpendicular lead-out waypoint when an offset is
     // applied (see "trunk lead-out" block in joint.routers.sfManhattan) —
     // routing, not positioning, was the actual culprit.
+    //
+    // Math.round keeps the trunk offset on integer pixels. Without it
+    // sub-pixel offsets (e.g. -0.125 * 195 = -24.375 px) put the router's
+    // stub at a fractional x while JointJS rounds the connection point
+    // to integer — the 0.5 px mismatch over the 16 px CP-to-stub segment
+    // shows as a visible 2-4° tilt on the entering line and tilts the
+    // endpoint marker accordingly. Integer offsets keep stub and CP
+    // perfectly co-axial.
     const positionFraction = (G + 1.5) / (N + 2);
-    return (positionFraction - 0.5) * edgeLen;
+    return Math.round((positionFraction - 0.5) * edgeLen);
+  }
+
+  // Channel index for parallel-bus spreading (CR-5.3).  Returns the
+  // link's index (G) within its DIRECTION-MATCHED sibling group (N
+  // total) at this port, OR null when there's nothing to spread.
+  //
+  // Direction split: siblings whose targets sit on opposite sides of
+  // the source cell's centre travel in opposite directions in the bus
+  // area and their bus X ranges don't overlap — they can share the same
+  // Y axis without visual conflict. Only same-direction siblings need
+  // channel allocation (their bus X ranges DO overlap near the source).
+  // This promotes "shared axis when no overlap" while still spreading
+  // the cases where overlap would otherwise produce close-parallel piles.
+  //
+  // Duplicates trunkAnchorOffset's bucket build because the two end up
+  // wanting different return shapes; deliberate duplication > over-
+  // abstracted shared helper that mixes concerns.
+  function trunkChannelIndex(link, end, cell, side) {
+    if (!side || !cell) return null;
+    const gr = link.graph;
+    if (!gr) return null;
+    const portId = link.get(end)?.port;
+    if (!portId) return null;
+    const ends = gatherPortEnds(gr, cell.id, portId);
+    if (ends.length < 2) return null;
+    const tangentAxis = (side === 'top' || side === 'bottom') ? 'x' : 'y';
+    const buckets = new Map();
+    for (const e of ends) {
+      const sig = endSignature(e.link, e.end);
+      let bucket = buckets.get(sig);
+      if (!bucket) { bucket = { coords: [] }; buckets.set(sig, bucket); }
+      const farRef = e.link.get(e.end === 'source' ? 'target' : 'source');
+      const farCell = farRef?.id ? gr.getCell(farRef.id) : null;
+      const farBB = farCell?.getBBox?.();
+      if (farBB) {
+        bucket.coords.push(tangentAxis === 'x'
+          ? farBB.x + farBB.width / 2
+          : farBB.y + farBB.height / 2);
+      }
+    }
+    const sigEntries = [...buckets.entries()].map(([sig, b]) => ({
+      sig,
+      mean: b.coords.length ? b.coords.reduce((a, c) => a + c, 0) / b.coords.length : Infinity,
+    }));
+    sigEntries.sort((a, b) => a.mean - b.mean || a.sig.localeCompare(b.sig));
+    if (sigEntries.length < 2) return null;
+
+    const mySig = endSignature(link, end);
+    const myEntry = sigEntries.find(e => e.sig === mySig);
+    if (!myEntry) return null;
+
+    // Split by direction relative to the cell's centre on the tangent axis.
+    const bb = cell.getBBox();
+    if (!bb) return null;
+    const cellCenter = tangentAxis === 'x'
+      ? bb.x + bb.width / 2
+      : bb.y + bb.height / 2;
+    const mySide = myEntry.mean <= cellCenter ? 'low' : 'high';
+    const sameDirEntries = sigEntries.filter(e =>
+      ((e.mean <= cellCenter) ? 'low' : 'high') === mySide
+    );
+    if (sameDirEntries.length < 2) return null;     // alone in this direction
+
+    const G = sameDirEntries.findIndex(e => e.sig === mySig);
+    if (G < 0) return null;
+    return { index: G, count: sameDirEntries.length };
+  }
+
+  // Per-LINK channel index (CR-5.3 v2). Returns this link's position
+  // among ALL link ends touching this port that head in the same
+  // direction, OR null when there's nothing to spread.
+  //
+  // Differs from trunkChannelIndex in that EVERY link gets its own
+  // channel — same-signature bundled links each receive a distinct
+  // channel index based on target position, so they fan out into
+  // visually separate buses instead of overlapping at a single shared Y.
+  // This is what makes a hub-and-spoke diagram look like 4 distinct
+  // connections instead of "1 line with a marker pile".
+  function linkChannelIndex(link, end, cell, side) {
+    if (!side || !cell) return null;
+    // Self-loops bypass channel allocation. A self-loop's source and
+    // target are on the same cell at different ports — its route
+    // already needs to exit, go around, and come back, and adding a
+    // channel offset to either end can push the lead into the cell
+    // itself or otherwise produce the weird tangle reported in user
+    // testing (two-node diagram with non-arrow trunk endings, then a
+    // self-loop from field port back to top/bottom).
+    if (link.get('source')?.id && link.get('source').id === link.get('target')?.id) return null;
+    const gr = link.graph;
+    if (!gr) return null;
+    const portId = link.get(end)?.port;
+    if (!portId) return null;
+    const ends = gatherPortEnds(gr, cell.id, portId);
+    if (ends.length < 2) return null;
+    // Opposite-direction pair skip: exactly two ends at this port,
+    // one source + one target. The trunk anchor already separates
+    // them on the cell edge; adding a channel offset would create a
+    // parallel "dance" of two lines at slightly different perpendicular
+    // distances from the cell — visually noisier than helpful since
+    // the two routes head to different targets anyway. The trunk
+    // separation alone gives all the disambiguation needed.
+    if (ends.length === 2 && ends[0].end !== ends[1].end) return null;
+    const tangentAxis = (side === 'top' || side === 'bottom') ? 'x' : 'y';
+    const bb = cell.getBBox();
+    if (!bb) return null;
+    const cellCenter = tangentAxis === 'x'
+      ? bb.x + bb.width / 2
+      : bb.y + bb.height / 2;
+    // Build a list of link-end records with target coordinate + direction.
+    const records = ends.map(e => {
+      const farRef = e.link.get(e.end === 'source' ? 'target' : 'source');
+      const farCell = farRef?.id ? gr.getCell(farRef.id) : null;
+      const farBB = farCell?.getBBox?.();
+      if (!farBB) return null;
+      const coord = tangentAxis === 'x'
+        ? farBB.x + farBB.width / 2
+        : farBB.y + farBB.height / 2;
+      return { linkEnd: e, coord, dir: coord <= cellCenter ? 'low' : 'high' };
+    }).filter(Boolean);
+    const myRec = records.find(r => r.linkEnd.link === link && r.linkEnd.end === end);
+    if (!myRec) return null;
+    // Direction-aware: only count same-direction siblings (opposite-
+    // direction lines can share Y without visual conflict).
+    const sameDir = records.filter(r => r.dir === myRec.dir);
+    if (sameDir.length < 2) return null;
+    // Sort by target coordinate so the leftmost / topmost target gets
+    // channel 0 and channels increase consistently — keeps the visual
+    // fan-out ordered with the targets it reaches.
+    sameDir.sort((a, b) => a.coord - b.coord);
+    const idx = sameDir.findIndex(r => r.linkEnd.link === link && r.linkEnd.end === end);
+    if (idx < 0) return null;
+    return { index: idx, count: sameDir.length };
   }
 
   // Shift a port's stub point along the edge tangent by `offset` so the
@@ -589,8 +775,24 @@ function registerSfRouter() {
     // stub-to-edge segment stays perpendicular and straight.
     // Hoisted so the route-building block below can read whether either end
     // has a non-trivial trunk offset and add a perpendicular lead-out.
+    //
+    // Self-loop note: trunk offset DOES apply to non-sequence self-loops
+    // (a DataObject field-to-top loop should distribute alongside the
+    // other regular links at that top port). The previous `srcCell !==
+    // tgtCell` block was too broad — it skipped trunk offset for the
+    // router but `sfConnectionPoint` still applied it, so the route's
+    // target stub sat at (cx, ...) while the visible line endpoint sat
+    // at (cx + offset, ...). The line drew diagonally between them, the
+    // ~30° angled entry you observed. Now we apply trunk offset for ALL
+    // links except the sequence-self-loop special case which is
+    // handled by the same-side override above.
+    const _isSequenceSelfLoop = srcCell === tgtCell && (
+      srcCell.get('type') === 'sf.SequenceParticipant' ||
+      srcCell.get('type') === 'sf.SequenceActor' ||
+      srcCell.get('type') === 'sf.SequenceActivation'
+    );
     let sOff = null, tOff = null;
-    if (isConnectorGroupingEnabled() && srcCell !== tgtCell) {
+    if (isConnectorGroupingEnabled() && !_isSequenceSelfLoop) {
       const sSide = getSideForPort(srcCell, srcDef.port);
       const tSide = getSideForPort(tgtCell, tgtDef.port);
       sOff = sSide ? trunkAnchorOffset(link, 'source', srcCell, sSide) : null;
@@ -663,13 +865,95 @@ function registerSfRouter() {
         default: return pt;
       }
     };
-    // Only add a lead-out when the trunk offset is non-trivial (|off| > 1).
-    // Zero-offset groups (e.g. middle of odd N) already align with the
-    // natural perpendicular exit and don't need extension.
-    const srcLead = (sOff != null && Math.abs(sOff) > 1)
-      ? extendPerp(from, srcInfo.dir, LEAD_OUT) : null;
-    const tgtLead = (tOff != null && Math.abs(tOff) > 1)
-      ? extendPerp(to, tgtInfo.dir, LEAD_OUT) : null;
+    // Per-link channel allocation (CR-5.3 v2). Each link end at a
+    // crowded port gets its own srcLead.y / tgtLead.x channel so
+    // sibling links fan out into visually distinct buses instead of
+    // sharing one Y level. The lead-out point IS the channel pivot —
+    // changing its position by N px deepens or shortens the
+    // perpendicular run-up from the cell stub to the bus, and the bus
+    // itself lands at the channel Y. The perpendicular stub stays
+    // perfectly vertical (no angle artifacts).
+    //
+    // Direction-awareness: opposite-direction siblings (one going
+    // left, one going right) skip the spread because their bus X
+    // ranges don't overlap — they can share the same Y axis safely.
+    // Match the same "all links except sequence self-loops" gating
+    // used by the trunk offset block above. linkChannelIndex itself
+    // still returns null for any self-loop (handled inside that fn).
+    const _sSide = isConnectorGroupingEnabled() && !_isSequenceSelfLoop
+      ? getSideForPort(srcCell, srcDef.port) : null;
+    const _tSide = isConnectorGroupingEnabled() && !_isSequenceSelfLoop
+      ? getSideForPort(tgtCell, tgtDef.port) : null;
+    const _srcChannel = _sSide ? linkChannelIndex(link, 'source', srcCell, _sSide) : null;
+    const _tgtChannel = _tSide ? linkChannelIndex(link, 'target', tgtCell, _tSide) : null;
+
+    // Lead-out gate: ALSO require the perpendicular gap between
+    // source and target stubs be large enough for two LEAD_OUTs +
+    // guard to fit without inversion. Without this check, close-cell
+    // pairs (gap < ~112 px) get srcLead pushed past tgtLead by the
+    // default LEAD_OUT alone — orthoRoute then routes "down past the
+    // target, sideways, and back up" producing the S-shape loop the
+    // per-link channel clamp can't fix (the channel shift is +/- 8,
+    // but the LEAD_OUT itself is +24).  When the gate fails, both
+    // leads are skipped: route falls back to direct stub-to-stub
+    // routing, which is naturally loop-free.
+    const _perpDist = (srcInfo.dir === 'bottom' || srcInfo.dir === 'top')
+      ? Math.abs(to.y - from.y)
+      : Math.abs(to.x - from.x);
+    const _leadOutSafe = _perpDist > (2 * LEAD_OUT + 16);
+
+    // Lead-out is needed when EITHER a trunk offset exists (avoid the
+    // horizontal-jog artifact at the stub root) OR a channel applies
+    // (need a lead waypoint to shift). Single-link ports with no
+    // sibling channel still skip the lead-out.
+    const _needSrcLead = _leadOutSafe && ((sOff != null && Math.abs(sOff) > 1) || (_srcChannel != null));
+    const _needTgtLead = _leadOutSafe && ((tOff != null && Math.abs(tOff) > 1) || (_tgtChannel != null));
+    let srcLead = _needSrcLead ? extendPerp(from, srcInfo.dir, LEAD_OUT) : null;
+    let tgtLead = _needTgtLead ? extendPerp(to, tgtInfo.dir, LEAD_OUT) : null;
+
+    // Per-link channel offset clamping (CR-5.5). The naive channel
+    // offset can push srcLead past the opposite stub (tgtLead/to)
+    // along the perpendicular axis, causing orthoRoute to emit an
+    // S-shape "loop" route that goes deep-past-target then doubles
+    // back. We clamp each link's offset against the OPPOSITE end's
+    // stub position so the lead can never cross it (minus a 16 px
+    // guard for the orthoRoute's first turn). Per-link is more
+    // surgical than a global "disable channels for close cells"
+    // gate: well-spaced sibling pairs in the same crowded port still
+    // get full spread; only links whose specific target geometry
+    // would cause inversion get clamped to a safe partial offset.
+    const _channelGuard = 16;
+    const applyChannelShift = (lead, side, channelInfo, oppositeStub) => {
+      if (!lead || !channelInfo) return lead;
+      let offset = (channelInfo.index - (channelInfo.count - 1) / 2) * CHANNEL_HEIGHT;
+      if (oppositeStub) {
+        if (side === 'bottom') {
+          // Lead is below source; must stay above oppositeStub.y - guard.
+          const maxOff = (oppositeStub.y - _channelGuard) - lead.y;
+          if (offset > maxOff) offset = Math.max(0, maxOff);
+        } else if (side === 'top') {
+          // Lead is above source; must stay below oppositeStub.y + guard.
+          const minOff = (oppositeStub.y + _channelGuard) - lead.y;
+          if (offset < minOff) offset = Math.min(0, minOff);
+        } else if (side === 'right') {
+          const maxOff = (oppositeStub.x - _channelGuard) - lead.x;
+          if (offset > maxOff) offset = Math.max(0, maxOff);
+        } else if (side === 'left') {
+          const minOff = (oppositeStub.x + _channelGuard) - lead.x;
+          if (offset < minOff) offset = Math.min(0, minOff);
+        }
+      }
+      if (side === 'top' || side === 'bottom') {
+        return { x: lead.x, y: lead.y + offset };
+      }
+      return { x: lead.x + offset, y: lead.y };
+    };
+    // The opposite-stub bound prevents srcLead from crossing the target
+    // stub and tgtLead from crossing the source stub. Using stubs (not
+    // leads) as the bound avoids the chicken-and-egg of "both leads
+    // depend on each other's final channel-shifted positions".
+    srcLead = applyChannelShift(srcLead, _sSide, _srcChannel, to);
+    tgtLead = applyChannelShift(tgtLead, _tSide, _tgtChannel, from);
 
     try {
       if (vertices.length > 0) {
@@ -1155,6 +1439,39 @@ export function init() {
   // (registered AFTER canvas.init by app.js) gets to add/remove .selected
   // first. Without this defer, sweeping during link:pointerdown would
   // see the just-deselected link still marked .selected and leave it tinted.
+  // Bump tinting on focus — when a link is hovered or selected, also
+  // re-stroke any bump arcs/restoration lines tagged with its id so
+  // the focus colour runs end-to-end with the line.  Mirrors the
+  // marker-tinting pattern: a per-link-id Set tracks which links are
+  // currently tinted, the sweep restores stale entries.
+  const _bumpsTinted = new Set();
+  const tintLinkBumps = (linkView) => {
+    if (!_bumpLayer) return;
+    const linkId = linkView?.model?.id;
+    if (!linkId || _bumpsTinted.has(linkId)) return;
+    _bumpsTinted.add(linkId);
+    const color = getSelectionColor();
+    _bumpLayer.querySelectorAll(`[data-link-id="${CSS.escape(String(linkId))}"]`).forEach(el => {
+      if (!el.hasAttribute('data-orig-stroke')) {
+        el.setAttribute('data-orig-stroke', el.getAttribute('stroke') ?? '');
+      }
+      el.setAttribute('stroke', color);
+    });
+  };
+  const restoreLinkBumps = (linkView) => {
+    if (!_bumpLayer) return;
+    const linkId = linkView?.model?.id;
+    if (!linkId || !_bumpsTinted.has(linkId)) return;
+    _bumpsTinted.delete(linkId);
+    _bumpLayer.querySelectorAll(`[data-link-id="${CSS.escape(String(linkId))}"]`).forEach(el => {
+      const orig = el.getAttribute('data-orig-stroke');
+      if (orig == null) return;
+      if (orig) el.setAttribute('stroke', orig);
+      else el.removeAttribute('stroke');
+      el.removeAttribute('data-orig-stroke');
+    });
+  };
+
   const sweepStaleMarkerTints = () => queueMicrotask(() => {
     for (const linkView of [...linkMarkerOriginals.keys()]) {
       const el = linkView?.el;
@@ -1165,22 +1482,32 @@ export function init() {
         restoreLinkOrder(linkView);
       }
     }
+    // Sweep stale bump tints alongside markers — same focus semantics.
+    for (const linkId of [..._bumpsTinted]) {
+      const view = paper.findViewByModel(linkId);
+      const stillFocused = view?.el?.classList.contains('selected')
+                        || view?.el?.matches(':hover');
+      if (!stillFocused) restoreLinkBumps(view || { model: { id: linkId } });
+    }
   });
 
   paper.on('link:mouseenter', (linkView) => {
     bringLinkToFront(linkView);
     tintLinkMarkers(linkView);
+    tintLinkBumps(linkView);
   });
   paper.on('link:mouseleave', (linkView) => {
     // Keep selected links lifted — selection is sustained focus.
     if (linkView?.el?.classList.contains('selected')) return;
     restoreLinkOrder(linkView);
     restoreLinkMarkers(linkView);
+    restoreLinkBumps(linkView);
   });
   paper.on('link:pointerdown', (linkView) => {
     bringLinkToFront(linkView);
     tintLinkMarkers(linkView);
-    // Clicking link A deselects link B; sweep restores B's markers.
+    tintLinkBumps(linkView);
+    // Clicking link A deselects link B; sweep restores B's markers/bumps.
     sweepStaleMarkerTints();
   });
   paper.on('blank:pointerdown', sweepStaleMarkerTints);
@@ -1331,6 +1658,242 @@ export function init() {
 
   // --- Node-edge alignment snapping (guides) ---
   const SNAP_THRESHOLD = 8; // px in model space
+  // Sequential-spacing detection (CR-6.1) — DETECTION tolerance for
+  // "show the hint" (10 px, slightly looser than edge SNAP_THRESHOLD
+  // so the dimension lines appear as the user approaches the rhythm).
+  // SNAP tolerance is tighter (4 px, the grid step) — magnetic pull
+  // only fires when the user is "fighting" the last few pixels, so it
+  // doesn't yank them off course when they're still deliberately
+  // positioning between rhythms.
+  const SPACING_TOL = 10;
+  const SPACING_SNAP_TOL = 4;
+
+  // Cache built at pointerdown so the per-frame work in pointermove is
+  // small. Cleared at pointerup. Stores only the peer elements that
+  // share the dragged element's container context — un-embedded peers
+  // when the dragged is un-embedded, or same-parent peers when it's
+  // inside a container. Skips Zones / TextLabels / Notes (background
+  // shapes that don't carry layout rhythm).
+  let _spacingDragContext = null;
+  function buildSpacingDragContext(moved) {
+    if (!moved) return null;
+    const movedParent = moved.get('parent') || null;
+    const NON_RHYTHM_TYPES = new Set([
+      'sf.Zone', 'sf.TextLabel', 'sf.Note', 'sf.BpmnPool',
+      'sf.GanttTimeline', 'sf.GanttGroup',
+    ]);
+    const peers = graph.getElements()
+      .filter(el => {
+        if (el.id === moved.id) return false;
+        if (el.isEmbeddedIn(moved)) return false;
+        if (moved.isEmbeddedIn(el)) return false;
+        if (NON_RHYTHM_TYPES.has(el.get('type'))) return false;
+        return (el.get('parent') || null) === movedParent;
+      })
+      .map(el => ({ id: el.id, bb: el.getBBox() }));
+    return peers.length >= 2 ? { peers } : null;
+  }
+
+  // Look for a sequential rhythm where the dragged element extends or
+  // sits inside a pair of peers on the given axis, with edge-to-edge
+  // gaps matching within SPACING_TOL. Returns the closest match (smallest
+  // delta) or null.
+  //
+  // Three cases handled per pair (A, B) sorted by axis-center:
+  //   A → B → Dragged    (gap on right side matches A↔B gap)
+  //   Dragged → A → B    (gap on left side matches A↔B gap)
+  //   A → Dragged → B    (Dragged sits between A and B at equal gap to each)
+  //
+  // Gaps are EDGE-TO-EDGE — the visible space between elements, not
+  // their center-to-center distance — so different-sized shapes still
+  // register a rhythm match when their visible spacing is consistent.
+  function findSequentialSpacing(movedBB, peers, axis) {
+    // Helper: get "near" and "far" edges along the axis
+    const edgeNear = (bb) => axis === 'x' ? bb.x : bb.y;
+    const edgeFar  = (bb) => axis === 'x'
+      ? bb.x + bb.width
+      : bb.y + bb.height;
+    // Row/column peers: must overlap with moved on the perpendicular axis.
+    const movedPerpMin = axis === 'x' ? movedBB.y : movedBB.x;
+    const movedPerpMax = movedPerpMin + (axis === 'x' ? movedBB.height : movedBB.width);
+    const rowPeers = [];
+    for (const p of peers) {
+      const peerPerpMin = axis === 'x' ? p.bb.y : p.bb.x;
+      const peerPerpMax = peerPerpMin + (axis === 'x' ? p.bb.height : p.bb.width);
+      if (peerPerpMin < movedPerpMax && peerPerpMax > movedPerpMin) {
+        rowPeers.push({
+          bb: p.bb,
+          near: edgeNear(p.bb),
+          far: edgeFar(p.bb),
+          center: (edgeNear(p.bb) + edgeFar(p.bb)) / 2,
+        });
+      }
+    }
+    if (rowPeers.length < 2) return null;
+    rowPeers.sort((a, b) => a.center - b.center);
+
+    const mNear = edgeNear(movedBB);
+    const mFar  = edgeFar(movedBB);
+    const mCenter = (mNear + mFar) / 2;
+
+    let best = null;
+    const considerMatch = (Apeer, Bpeer, expectedCenter, gap) => {
+      const delta = Math.abs(mCenter - expectedCenter);
+      if (delta > SPACING_TOL) return;
+      // Spatial proximity: how far the peers sit from the dragged
+      // element on the axis. Closer peers (smaller sum-of-distances)
+      // are the visually obvious rhythm — when multiple matches fall
+      // within tolerance, pick the one with the nearest peers. Without
+      // this tiebreaker, a faraway pair could "win" over the closer,
+      // visually-relevant pair just because its expected position
+      // happens to align by chance.
+      const proximity = Math.abs(mCenter - Apeer.center)
+                      + Math.abs(mCenter - Bpeer.center);
+      if (!best
+          || delta < best.delta
+          || (delta === best.delta && proximity < best.proximity)) {
+        best = { delta, expectedCenter, gap, A: Apeer.bb, B: Bpeer.bb, proximity };
+      }
+    };
+    for (let i = 0; i < rowPeers.length - 1; i++) {
+      const A = rowPeers[i];
+      const B = rowPeers[i + 1];
+      // Edge-to-edge gap between A and B (visible space).
+      const gap = B.near - A.far;
+      if (gap < 8) continue;     // pairs that touch or overlap — no rhythm
+
+      // CASE 1: dragged extends sequence past B (A → B → Dragged)
+      //   Required: D.near = B.far + gap  →  D.center = B.far + gap + D.width/2
+      if (mCenter > B.center) {
+        const expectedNear = B.far + gap;
+        const expectedCenter = expectedNear + (mFar - mNear) / 2;
+        considerMatch(A, B, expectedCenter, gap);
+      }
+      // CASE 2: dragged extends sequence before A (Dragged → A → B)
+      //   Required: D.far = A.near - gap  →  D.center = A.near - gap - D.width/2
+      if (mCenter < A.center) {
+        const expectedFar = A.near - gap;
+        const expectedCenter = expectedFar - (mFar - mNear) / 2;
+        considerMatch(A, B, expectedCenter, gap);
+      }
+      // CASE 3: dragged sits BETWEEN A and B at equal edge-gap (A → D → B)
+      //   Required: D.near - A.far = B.near - D.far
+      //   Solving: 2 * D.center = (A.far + B.near) + (D.far - D.near)
+      //          = A.far + B.near + D.width
+      //   But D.width cancels out: equal-gap means D is centered between
+      //   A.far and B.near, regardless of D's own width.
+      //   D.center = (A.far + B.near) / 2
+      //   Gap shown = ((B.near - A.far) - D.width) / 2
+      if (mCenter > A.center && mCenter < B.center) {
+        const innerSpan = B.near - A.far;
+        const dWidth = mFar - mNear;
+        const halfGap = (innerSpan - dWidth) / 2;
+        if (halfGap >= 8) {
+          considerMatch(A, B, (A.far + B.near) / 2, halfGap);
+        }
+      }
+    }
+    return best;
+  }
+
+  // Render two dimension lines + per-segment px labels showing the
+  // EDGE-TO-EDGE visible gaps. Labels reflect actual current distance
+  // — they update live as the user drags within the snap tolerance,
+  // so "180px / 180px" → "182px / 178px" → "180px / 180px" reads as
+  // continuous feedback rather than a fixed rhythm match.
+  function drawSpacingDimensions(match, axis, movedBB) {
+    const layer = getGuideLayer();
+    const amber = 'var(--brand-amber, #F6B355)';
+    const TICK = 4;
+    const LABEL_OFFSET = 4;
+
+    if (axis === 'x') {
+      // Three element near/far X edges + the dragged element's edges,
+      // sorted left→right so we can pair adjacent edges into two gaps.
+      const allEdges = [
+        { near: match.A.x,                far: match.A.x + match.A.width },
+        { near: match.B.x,                far: match.B.x + match.B.width },
+        { near: movedBB.x,                far: movedBB.x + movedBB.width },
+      ].sort((p, q) => p.near - q.near);
+
+      const baselineY = Math.max(
+        match.A.y + match.A.height,
+        match.B.y + match.B.height,
+        movedBB.y + movedBB.height,
+      ) + 18;
+
+      // Two gaps: between elements 0–1 and 1–2 in sorted order
+      const gap1 = allEdges[1].near - allEdges[0].far;
+      const gap2 = allEdges[2].near - allEdges[1].far;
+      drawDimSegment(layer, allEdges[0].far, allEdges[1].near, baselineY, gap1, 'h', amber, TICK, LABEL_OFFSET);
+      drawDimSegment(layer, allEdges[1].far, allEdges[2].near, baselineY, gap2, 'h', amber, TICK, LABEL_OFFSET);
+    } else {
+      const allEdges = [
+        { near: match.A.y,                far: match.A.y + match.A.height },
+        { near: match.B.y,                far: match.B.y + match.B.height },
+        { near: movedBB.y,                far: movedBB.y + movedBB.height },
+      ].sort((p, q) => p.near - q.near);
+
+      const baselineX = Math.max(
+        match.A.x + match.A.width,
+        match.B.x + match.B.width,
+        movedBB.x + movedBB.width,
+      ) + 18;
+
+      const gap1 = allEdges[1].near - allEdges[0].far;
+      const gap2 = allEdges[2].near - allEdges[1].far;
+      // drawDimSegment signature: (layer, p1, p2, perp, gap, orient).
+      // For 'v' orientation, p1/p2 are Y endpoints and perp is the X
+      // baseline. The previous code had them swapped, sending the
+      // baselineX through as p1 — drawing the line in arbitrary
+      // coordinates depending on whatever Y value landed in perp.
+      drawDimSegment(layer, allEdges[0].far, allEdges[1].near, baselineX, gap1, 'v', amber, TICK, LABEL_OFFSET);
+      drawDimSegment(layer, allEdges[1].far, allEdges[2].near, baselineX, gap2, 'v', amber, TICK, LABEL_OFFSET);
+    }
+  }
+
+  function drawDimSegment(layer, p1, p2, perp, gap, orient, color, tick, labelOff) {
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const line = document.createElementNS(SVG_NS, 'line');
+    const t1a = document.createElementNS(SVG_NS, 'line');
+    const t1b = document.createElementNS(SVG_NS, 'line');
+    const text = document.createElementNS(SVG_NS, 'text');
+    if (orient === 'h') {
+      // p1, p2 are X values; perp is the Y baseline.
+      line.setAttribute('x1', p1); line.setAttribute('x2', p2);
+      line.setAttribute('y1', perp); line.setAttribute('y2', perp);
+      t1a.setAttribute('x1', p1); t1a.setAttribute('x2', p1);
+      t1a.setAttribute('y1', perp - tick); t1a.setAttribute('y2', perp + tick);
+      t1b.setAttribute('x1', p2); t1b.setAttribute('x2', p2);
+      t1b.setAttribute('y1', perp - tick); t1b.setAttribute('y2', perp + tick);
+      text.setAttribute('x', (p1 + p2) / 2);
+      text.setAttribute('y', perp - labelOff);
+      text.setAttribute('text-anchor', 'middle');
+    } else {
+      // p1, p2 are Y values; perp is the X baseline.
+      line.setAttribute('x1', perp); line.setAttribute('x2', perp);
+      line.setAttribute('y1', p1); line.setAttribute('y2', p2);
+      t1a.setAttribute('x1', perp - tick); t1a.setAttribute('x2', perp + tick);
+      t1a.setAttribute('y1', p1); t1a.setAttribute('y2', p1);
+      t1b.setAttribute('x1', perp - tick); t1b.setAttribute('x2', perp + tick);
+      t1b.setAttribute('y1', p2); t1b.setAttribute('y2', p2);
+      text.setAttribute('x', perp + labelOff + 2);
+      text.setAttribute('y', (p1 + p2) / 2 + 4);
+      text.setAttribute('text-anchor', 'start');
+    }
+    for (const el of [line, t1a, t1b]) {
+      el.setAttribute('stroke', color);
+      el.setAttribute('stroke-width', 1);
+      el.setAttribute('opacity', 0.85);
+      layer.appendChild(el);
+    }
+    text.setAttribute('fill', color);
+    text.setAttribute('font-size', '11');
+    text.setAttribute('font-family', 'system-ui, -apple-system, sans-serif');
+    text.setAttribute('font-weight', '600');
+    text.textContent = `${Math.round(gap)}px`;
+    layer.appendChild(text);
+  }
   let guideLayer = null;
 
   function getGuideLayer() {
@@ -1365,12 +1928,31 @@ export function init() {
     getGuideLayer().appendChild(line);
   }
 
+  // Build the spacing-detection context at drag start (= when the
+  // first pointermove confirms a drag is happening). We use a lazy
+  // build inside the move handler so we don't pay this cost on every
+  // pointerdown — most clicks don't turn into drags.
+  paper.on('element:pointerdown', (cellView) => {
+    const moved = cellView?.model;
+    if (!moved) { _spacingDragContext = null; return; }
+    // Defer the actual build until first move to save click-only cost;
+    // tag it with the cell id so the build can be lazy and idempotent.
+    _spacingDragContext = { pendingForId: moved.id };
+  });
+  paper.on('element:pointerup', () => {
+    _spacingDragContext = null;
+  });
+
   paper.on('element:pointermove', (cellView) => {
     clearGuides();
     const movedEl = cellView.model;
     // Skip snap-to-grid for embedded children — they move with their parent
     // Also skip for elements with embedded children to prevent drift
     if (movedEl.get('parent') || movedEl.getEmbeddedCells().length) return;
+    // Lazy-build the spacing context on the first frame of the drag.
+    if (_spacingDragContext?.pendingForId === movedEl.id) {
+      _spacingDragContext = buildSpacingDragContext(movedEl);
+    }
     const movedBBox = movedEl.getBBox();
     const allElements = graph.getElements().filter(el =>
       el.id !== movedEl.id && !el.isEmbeddedIn(movedEl) && !movedEl.isEmbeddedIn(el)
@@ -1443,6 +2025,51 @@ export function init() {
             const maxX = Math.max(fR, ob.x + ob.width) + 10;
             drawGuide(minX, my, maxX, my);
           }
+        }
+      }
+    }
+
+    // Sequential-spacing hint + snap (CR-6.1) — only on axes where edge
+    // alignment didn't fire. Absolute alignment beats relative spacing
+    // per the priority matrix; we don't want both axes of guide on the
+    // same axis.
+    //
+    // Magnetic snap: when a match is found, pull the dragged element
+    // to the exact expectedCenter so the labels read "55px / 55px"
+    // instead of "54px / 56px". Same skipHistory contract as the edge
+    // alignment snap above — the move is part of the active drag, not
+    // a separate undo step.
+    if (_spacingDragContext?.peers) {
+      const peers = _spacingDragContext.peers;
+      // X-axis spacing
+      if (!bestX) {
+        const matchX = findSequentialSpacing(finalBBox, peers, 'x');
+        if (matchX) {
+          const movedCx = finalBBox.x + finalBBox.width / 2;
+          const dxSnap = matchX.expectedCenter - movedCx;
+          // Magnetic pull only within the snap tolerance — outside that
+          // range we show the hint but let the user keep deliberate
+          // placement. Inside, we pull to exact match so labels read
+          // "180px / 180px" instead of "182px / 178px".
+          if (Math.abs(dxSnap) > 0.5 && Math.abs(dxSnap) < SPACING_SNAP_TOL) {
+            const pos = movedEl.position();
+            movedEl.position(pos.x + dxSnap, pos.y, { skipHistory: true });
+          }
+          drawSpacingDimensions(matchX, 'x', movedEl.getBBox());
+        }
+      }
+      // Y-axis spacing
+      if (!bestY) {
+        const fresh = movedEl.getBBox();   // refresh in case X-snap moved us
+        const matchY = findSequentialSpacing(fresh, peers, 'y');
+        if (matchY) {
+          const movedCy = fresh.y + fresh.height / 2;
+          const dySnap = matchY.expectedCenter - movedCy;
+          if (Math.abs(dySnap) > 0.5 && Math.abs(dySnap) < SPACING_SNAP_TOL) {
+            const pos = movedEl.position();
+            movedEl.position(pos.x, pos.y + dySnap, { skipHistory: true });
+          }
+          drawSpacingDimensions(matchY, 'y', movedEl.getBBox());
         }
       }
     }
@@ -1655,7 +2282,490 @@ export function init() {
   new ResizeObserver(refreshHint).observe(paper.el);
   refreshHint();
 
+  initCrossingBumps();
+  initExternalLabelAutoplace();
+
   return { graph, paper };
+}
+
+// ── Bridge notation: crossing-bump overlay (CR-5.2 PoC) ─────────────
+// See top-of-file `isCrossingBumpsEnabled` comment block for rationale.
+// Implementation summary: collect every orthogonal segment from every
+// link, find pairwise (horizontal × vertical) intersections that aren't
+// near a vertex (T-junction at a trunk), and per crossing draw three
+// SVG primitives in a dedicated overlay group sitting above the cells
+// layer.  The link with the LOWER z bumps under the link with the
+// higher z (JointJS paints higher-z later → on top → straight). Pure
+// overlay — JointJS link paths are never touched.
+const BUMP_RADIUS = 5;             // semicircle radius — diameter 10 px matches the "O" in the zero-to-many endpoint marker (a 5 5 arc)
+const BUMP_DEBOUNCE_MS = 60;
+// Buffer sized to distinguish two specific geometries:
+//   - Stub overlap at a shared port: crossing point IS at a segment
+//     endpoint (distance 0) → skipped because the line "ends here",
+//     not actually crossing through.
+//   - Channel-gap escape: crossing point is ~16 px from the segment
+//     endpoint (one CHANNEL_HEIGHT) → still bumped because the line
+//     visually crosses through the other line (just with a short upper
+//     arm due to channel allocation).
+// Buffer 8 sits between the two — catches the 0-px stub case while
+// leaving the 16-px channel cases as legitimate visual crossings.
+const BUMP_ENDPOINT_BUFFER = 8;
+const BUMP_ORTHO_TOL = 1.5;        // tolerate up to 1.5 px of axis-drift when classifying a segment as H/V (was 0.5 — router output isn't always perfectly integer-aligned)
+// Per-link channel allocation height (CR-5.3 v2). Each link end at a
+// crowded port gets its own channel, with this many pixels between
+// adjacent channels. Sized for clearly distinct lines that the eye
+// reads as separate connections rather than a "close parallel pile".
+// Previous iterations: 6 px (looked close-parallel, user rejected),
+// 0 / disabled (merging lost the per-link distinction the user wants).
+const CHANNEL_HEIGHT = 16;
+let _bumpLayer = null;
+let _bumpRecomputeTimer = null;
+let scheduleCrossingBumpRecompute = null;
+
+// ── External-label auto-placement (CR-6.2) ──────────────────────────
+// Shapes with descriptions positioned OUTSIDE the body (Decision
+// diamond, Event circle, DataObject) get their label side picked
+// automatically based on which port sides have connecting links:
+//   1st choice:  bottom (the current default)
+//   2nd choice:  top
+//   3rd choice:  right
+//   4th choice:  left
+//   fallback:    bottom (if all four sides are in use, accept the
+//                collision rather than leave the label off-canvas)
+//
+// No save schema field — position is recomputed on every link
+// topology change (add/remove, change:source, change:target) plus
+// once at end of JSON load. Pure visual layout; the user doesn't
+// need to think about it.
+const EXTERNAL_LABEL_SHAPES = new Set([
+  'sf.BpmnEvent',
+  'sf.BpmnGateway',
+  'sf.BpmnDataObject',
+]);
+
+const LABEL_SIDE_ATTRS = {
+  bottom: { x: 'calc(0.5 * w)', y: 'calc(h + 10)', textAnchor: 'middle', textVerticalAnchor: 'top' },
+  top:    { x: 'calc(0.5 * w)', y: -10,            textAnchor: 'middle', textVerticalAnchor: 'bottom' },
+  right:  { x: 'calc(w + 10)',  y: 'calc(0.5 * h)', textAnchor: 'start', textVerticalAnchor: 'middle' },
+  left:   { x: -10,             y: 'calc(0.5 * h)', textAnchor: 'end',   textVerticalAnchor: 'middle' },
+};
+
+function computeUsedPortSides(cell) {
+  const usedSides = new Set();
+  if (!cell?.id || !graph) return usedSides;
+  const cellId = cell.id;
+  for (const link of graph.getLinks()) {
+    const src = link.get('source');
+    const tgt = link.get('target');
+    if (src?.id === cellId && src.port) {
+      const port = cell.getPort?.(src.port);
+      if (port?.group) usedSides.add(port.group);
+    }
+    if (tgt?.id === cellId && tgt.port) {
+      const port = cell.getPort?.(tgt.port);
+      if (port?.group) usedSides.add(port.group);
+    }
+  }
+  return usedSides;
+}
+
+function refreshExternalLabelPosition(cell) {
+  if (!cell?.get || !paper) return;
+  if (!EXTERNAL_LABEL_SHAPES.has(cell.get('type'))) return;
+  const used = computeUsedPortSides(cell);
+  // Priority: bottom (default) → top → right → left → bottom (fallback)
+  const preferred = ['bottom', 'top', 'right', 'left'];
+  let chosen = 'bottom';
+  for (const side of preferred) {
+    if (!used.has(side)) { chosen = side; break; }
+  }
+  const sideAttrs = LABEL_SIDE_ATTRS[chosen];
+  const existing = cell.attr('label') || {};
+  // Skip if already correct (avoids redundant attr writes that re-render
+  // unnecessarily on every link change for unaffected cells).
+  if (existing.x === sideAttrs.x && existing.y === sideAttrs.y
+      && existing.textAnchor === sideAttrs.textAnchor
+      && existing.textVerticalAnchor === sideAttrs.textVerticalAnchor) return;
+  cell.attr('label', { ...existing, ...sideAttrs }, { silent: true });
+  // silent: true keeps it out of history (auto-positioning isn't a
+  // user-initiated change), but the view doesn't re-render on its own;
+  // explicit view.update() pushes the new attrs through.
+  paper.findViewByModel(cell)?.update?.();
+}
+
+function initExternalLabelAutoplace() {
+  if (!paper || !graph) return;
+
+  const refreshFromLink = (link) => {
+    if (!link || _isLoadingJSON) return;
+    const srcId = link.get('source')?.id;
+    const tgtId = link.get('target')?.id;
+    if (srcId) refreshExternalLabelPosition(graph.getCell(srcId));
+    if (tgtId) refreshExternalLabelPosition(graph.getCell(tgtId));
+  };
+
+  graph.on('add', (cell) => {
+    if (_isLoadingJSON) return;
+    if (cell.isLink()) refreshFromLink(cell);
+    else refreshExternalLabelPosition(cell);
+  });
+  graph.on('remove', (cell) => {
+    if (_isLoadingJSON) return;
+    if (cell.isLink()) {
+      // Link's endpoints are still on the model at removal time, so
+      // refreshFromLink reads them before the GC sweeps the references.
+      refreshFromLink(cell);
+    }
+  });
+  graph.on('change:source change:target', refreshFromLink);
+
+  // Initial pass — covers JSON-loaded diagrams and freshly-instantiated
+  // diagrams where add events fired before this listener was wired up.
+  // Deferred so it runs after the first paint and any post-load
+  // bookkeeping.
+  setTimeout(() => {
+    for (const cell of graph.getElements()) {
+      refreshExternalLabelPosition(cell);
+    }
+  }, 150);
+}
+
+function initCrossingBumps() {
+  if (!paper || !graph) return;
+  // Anchor the overlay inside the panned/zoomed layers group so it
+  // tracks pan + zoom for free.  Insert just after the cells layer so
+  // it paints above all links but below the tools layer (resize handles).
+  const cellsLayer = paper.svg?.querySelector?.('.joint-cells-layer');
+  const layersGroup = cellsLayer?.parentNode;
+  if (!layersGroup) return;
+  _bumpLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  _bumpLayer.setAttribute('class', 'sf-link-bumps');
+  _bumpLayer.setAttribute('pointer-events', 'none');
+  layersGroup.insertBefore(_bumpLayer, cellsLayer.nextSibling);
+
+  scheduleCrossingBumpRecompute = () => {
+    clearTimeout(_bumpRecomputeTimer);
+    _bumpRecomputeTimer = setTimeout(recomputeCrossingBumps, BUMP_DEBOUNCE_MS);
+  };
+
+  // Recompute on anything that could change a route or stroke styling.
+  graph.on(
+    'add remove change:source change:target change:vertices change:router '
+    + 'change:position change:size change:z change:attrs',
+    scheduleCrossingBumpRecompute,
+  );
+  // render:done fires after each JointJS render pass completes — covers
+  // route recomputation triggered by router toggles (Distributed
+  // Connectors etc.) that don't fire a change:vertices event on the link.
+  paper.on('render:done', scheduleCrossingBumpRecompute);
+  // Belt-and-braces initial pass after first paint.
+  setTimeout(scheduleCrossingBumpRecompute, 150);
+
+  // Sync bump opacity with selection-driven link dimming. The bumps live
+  // in a separate SVG group and don't inherit the link view's CSS
+  // class, so we have to re-apply opacity per-primitive when selection
+  // changes. selection.js fires `sf:selection-dim-change` after it
+  // toggles its dim classes.
+  document.addEventListener('sf:selection-dim-change', refreshCrossingBumpOpacity);
+}
+
+// Walk every tagged bump primitive and match its opacity to the dim
+// state of the link it represents. Called from the selection-change
+// listener; safe to call when no bumps exist (just iterates an empty
+// NodeList). Far cheaper than a full re-render of the bump layer.
+function refreshCrossingBumpOpacity() {
+  if (!_bumpLayer) return;
+  const dimmedLinkIds = new Set();
+  document.querySelectorAll('.joint-link.sf-link-dimmed').forEach(el => {
+    const id = el.getAttribute('model-id');
+    if (id) dimmedLinkIds.add(id);
+  });
+  _bumpLayer.querySelectorAll('[data-link-id]').forEach(el => {
+    const id = el.getAttribute('data-link-id');
+    el.style.opacity = dimmedLinkIds.has(id) ? '0.18' : '';
+  });
+}
+
+function recomputeCrossingBumps() {
+  if (!_bumpLayer || !graph || !paper) return;
+  while (_bumpLayer.firstChild) _bumpLayer.removeChild(_bumpLayer.firstChild);
+  if (!isCrossingBumpsEnabled()) return;
+
+  // Collect every orthogonal segment with per-link styling.
+  const segments = [];
+  for (const link of graph.getLinks()) {
+    const view = paper.findViewByModel(link);
+    if (!view) continue;
+    const linkSegs = getLinkOrthogonalSegments(view);
+    if (linkSegs.length === 0) continue;
+    const stroke = link.attr('line/stroke') || '#888888';
+    const strokeWidth = +link.attr('line/strokeWidth') || 2;
+    const z = link.get('z') || 0;
+    for (const seg of linkSegs) {
+      segments.push({ link, seg, stroke, strokeWidth, z });
+    }
+  }
+
+  // Pairwise orthogonal-crossing detection.  O(S²) but S is small in
+  // practice (tens of segments) and each test is cheap range arithmetic.
+  //
+  // Bus-cluster dedupe: when several sibling links share a horizontal
+  // "bus" at the same Y and one V drop crosses through, every parallel
+  // H produces a detection at the same (X, Y) — visually a stack of
+  // identical arcs piled on each other.  Adjacent parallel routes at
+  // slightly different Y values produce close-but-not-identical arcs,
+  // also a visual mess.  Collapse both cases by rounding the crossing
+  // position to an 8-px grid and skipping any later detection that
+  // lands on a grid cell we've already drawn into.  Pairs with the
+  // SMALLEST z difference (= more visually "adjacent" links) win the
+  // grid cell — we collect first and sort by z-distance ascending.
+  //
+  // Same-port skip (v1.12.3): two links exiting the same port at one
+  // cell (e.g., multiple lines from Decision's bottom port to different
+  // targets) should NEVER bump against each other — they're related
+  // routes from a shared anchor, not actual crossings. Without this
+  // check, channel-allocated sibling stubs at the source produced false
+  // bumps where one sibling's vertical stub crossed another sibling's
+  // horizontal bus.
+  const crossings = [];
+  for (let i = 0; i < segments.length; i++) {
+    for (let j = i + 1; j < segments.length; j++) {
+      const a = segments[i];
+      const b = segments[j];
+      if (a.link === b.link) continue;       // same link self-bend — skip
+      const cross = findOrthoCrossing(a.seg, b.seg, BUMP_ENDPOINT_BUFFER);
+      if (!cross) continue;
+      // No separate sibling/bundled check needed — the OR-endpoint
+      // skip inside findOrthoCrossing handles every "lines branch or
+      // meet" geometry (sibling stubs, escapes, T-junctions) by virtue
+      // of the crossing being close to a segment endpoint in all those
+      // cases. Only true 4-way crossings get past findOrthoCrossing.
+      const [under, over] = a.z <= b.z ? [a, b] : [b, a];
+      const underIsH = Math.abs(under.seg.a.y - under.seg.b.y) < BUMP_ORTHO_TOL;
+      crossings.push({ cross, under, over, underIsH, zGap: Math.abs(a.z - b.z) });
+    }
+  }
+  crossings.sort((x, y) => x.zGap - y.zGap);
+  const drawnCells = new Set();
+  const GRID = 8;
+  for (const c of crossings) {
+    const key = `${Math.round(c.cross.x / GRID)},${Math.round(c.cross.y / GRID)}`;
+    if (drawnCells.has(key)) continue;
+    drawnCells.add(key);
+    drawBumpOverlay(_bumpLayer, c.cross.x, c.cross.y, c.underIsH, c.under, c.over);
+  }
+  // After a full re-render the primitives start at default opacity;
+  // re-apply the current selection-dim state so newly-drawn bumps don't
+  // pop to full brightness when selection-driven dimming is active.
+  refreshCrossingBumpOpacity();
+}
+
+// Module-level mirror of registerSfRouter's endSignature — same logic,
+// reachable from outside the router closure. Used by the bump detector
+// to recognise BUNDLED siblings (same trunk, same channel allocation
+// pool) which is the specific case where V-stubs overlap and produce
+// false-positive crossings near the shared port.
+function _bumpEndSignature(link, end) {
+  const style = link.prop('lineStyle') || 'none';
+  const marker = end === 'source'
+    ? link.attr('line/sourceMarker')
+    : link.attr('line/targetMarker');
+  let d = (marker && marker.d) ? String(marker.d) : 'none';
+  d = d.replace(/\s*,\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  return `${style}|${d}`;
+}
+
+// Returns true when two links are BUNDLED at a shared port (= same
+// trunk because same source/target signature) AND at least one of the
+// two candidate segments is classified as "stub-zone" relative to that
+// shared port. This is the precise condition under which sibling
+// V-stubs and H-bus-starts produce false-positive crossings, while
+// real crossings further down the line (V-drops crossing other
+// siblings' H-buses out in the middle of the route) escape the skip
+// because their V-drop segment endpoints reach well past the stub zone.
+function isBundledStubCrossing(linkA, linkB, segA, segB) {
+  const portMatch = (refA, refB) =>
+    refA?.id && refB?.id && refA.id === refB.id
+    && refA.port && refB.port && refA.port === refB.port;
+  const aSrc = linkA.get('source');
+  const aTgt = linkA.get('target');
+  const bSrc = linkB.get('source');
+  const bTgt = linkB.get('target');
+
+  if (portMatch(aSrc, bSrc)
+      && _bumpEndSignature(linkA, 'source') === _bumpEndSignature(linkB, 'source')
+      && (segA.inSourceStub || segB.inSourceStub)) return true;
+  if (portMatch(aTgt, bTgt)
+      && _bumpEndSignature(linkA, 'target') === _bumpEndSignature(linkB, 'target')
+      && (segA.inTargetStub || segB.inTargetStub)) return true;
+  if (portMatch(aSrc, bTgt)
+      && _bumpEndSignature(linkA, 'source') === _bumpEndSignature(linkB, 'target')
+      && (segA.inSourceStub || segB.inTargetStub)) return true;
+  if (portMatch(aTgt, bSrc)
+      && _bumpEndSignature(linkA, 'target') === _bumpEndSignature(linkB, 'source')
+      && (segA.inTargetStub || segB.inSourceStub)) return true;
+  return false;
+}
+
+function getLinkOrthogonalSegments(linkView) {
+  const route = linkView.route || [];
+  const src = linkView.sourcePoint;
+  const tgt = linkView.targetPoint;
+  if (!src || !tgt) return [];
+  const points = [
+    { x: src.x, y: src.y },
+    ...route.map(p => ({ x: p.x, y: p.y })),
+    { x: tgt.x, y: tgt.y },
+  ];
+  // Stub-zone classification radius. Sized to cover STUB(32) + LEAD_OUT(24)
+  // + max channel offset (~24 for 4 bundled siblings) + small slack = 90 px.
+  // A segment is "in source stub" only when BOTH endpoints are inside this
+  // radius from sourcePoint — so the V stub (port→srcStub→srcLead) qualifies
+  // but the H bus (srcLead→busTurn, where busTurn reaches the target's x)
+  // does NOT, because its busTurn endpoint sits far from the source whenever
+  // the target is more than ~90 px away. That distinction is exactly what
+  // separates the false-positive "sibling stubs overlap" case from the real
+  // "V-drop crosses sibling's H-bus out in the middle of the route" case.
+  const STUB_ZONE_DIST = 90;
+  const out = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i], b = points[i + 1];
+    const isH = Math.abs(a.y - b.y) < BUMP_ORTHO_TOL;
+    const isV = Math.abs(a.x - b.x) < BUMP_ORTHO_TOL;
+    if (!isH && !isV) continue;
+    const maxDistSrc = Math.max(
+      Math.hypot(a.x - src.x, a.y - src.y),
+      Math.hypot(b.x - src.x, b.y - src.y),
+    );
+    const maxDistTgt = Math.max(
+      Math.hypot(a.x - tgt.x, a.y - tgt.y),
+      Math.hypot(b.x - tgt.x, b.y - tgt.y),
+    );
+    out.push({
+      a, b,
+      inSourceStub: maxDistSrc <= STUB_ZONE_DIST,
+      inTargetStub: maxDistTgt <= STUB_ZONE_DIST,
+    });
+  }
+  return out;
+}
+
+function findOrthoCrossing(segA, segB, buffer) {
+  const aIsH = Math.abs(segA.a.y - segA.b.y) < BUMP_ORTHO_TOL;
+  const aIsV = Math.abs(segA.a.x - segA.b.x) < BUMP_ORTHO_TOL;
+  const bIsH = Math.abs(segB.a.y - segB.b.y) < BUMP_ORTHO_TOL;
+  const bIsV = Math.abs(segB.a.x - segB.b.x) < BUMP_ORTHO_TOL;
+  if (!((aIsH && bIsV) || (aIsV && bIsH))) return null;
+  const h = aIsH ? segA : segB;
+  const v = aIsV ? segA : segB;
+  const hY = h.a.y;
+  const vX = v.a.x;
+  const hXMin = Math.min(h.a.x, h.b.x);
+  const hXMax = Math.max(h.a.x, h.b.x);
+  const vYMin = Math.min(v.a.y, v.b.y);
+  const vYMax = Math.max(v.a.y, v.b.y);
+
+  // Step 1 — must geometrically overlap (cross point lies on both segments).
+  if (vX < hXMin || vX > hXMax || hY < vYMin || hY > vYMax) return null;
+
+  // Step 2 — only TRUE 4-way crossings get bumped: both segments must
+  // pass THROUGH the crossing point (extend on both sides of it),
+  // neither one ending at the crossing. This skips:
+  //   - T-junctions (one segment ends at the crossing)
+  //   - "Escape from parallel flow" (one sibling just turned a corner
+  //     and the crossing sits close to that fresh corner)
+  //   - Bundled-stub overlaps (sibling V-stubs at the same trunk x,
+  //     crossing point close to one's lead endpoint)
+  // All three of those visually represent "lines branching" or
+  // "lines meeting", not actual crossings — drawing a bump on them
+  // produces visual noise that the eye reads as confusing rather
+  // than clarifying. Real 4-way crossings between unrelated routes
+  // still get bumped because neither endpoint is close to the
+  // crossing for either segment.
+  const atHEnd = Math.abs(vX - h.a.x) < buffer || Math.abs(vX - h.b.x) < buffer;
+  const atVEnd = Math.abs(hY - v.a.y) < buffer || Math.abs(hY - v.b.y) < buffer;
+  if (atHEnd || atVEnd) return null;
+
+  return { x: vX, y: hY };
+}
+
+function drawBumpOverlay(layer, cx, cy, underIsH, under, over) {
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const R = BUMP_RADIUS;
+  const sw = under.strokeWidth;
+  // Half stroke-width as the eraser's perpendicular half-height. The old
+  // sw + 1 px buffer was visible against the grid dots — we minimise the
+  // eraser to ~sw and rely on the arc + restoration segments overlapping
+  // the line ends to mask anti-alias bleed.
+  const eHalf = sw / 2;
+  // Arc-end stubs that extend the arc 0.5 px PAST the eraser boundary on
+  // each side, so the arc joins the bumped line cleanly without a visible
+  // gap where the stroke caps meet perpendicular to each other.
+  const STUB = 0.5;
+
+  // 1. Eraser — minimal bg-coloured rect aligned along the bumped segment,
+  //    just thick enough to hide the line's stroke at the crossing.
+  const eraser = document.createElementNS(SVG_NS, 'rect');
+  if (underIsH) {
+    eraser.setAttribute('x', cx - R);
+    eraser.setAttribute('y', cy - eHalf);
+    eraser.setAttribute('width', R * 2);
+    eraser.setAttribute('height', sw);
+  } else {
+    eraser.setAttribute('x', cx - eHalf);
+    eraser.setAttribute('y', cy - R);
+    eraser.setAttribute('width', sw);
+    eraser.setAttribute('height', R * 2);
+  }
+  eraser.setAttribute('fill', 'var(--bg-canvas, #1A1A1A)');
+  // No data-link-id on the eraser — it's always bg-coloured so dimming
+  // wouldn't change anything visually.
+  layer.appendChild(eraser);
+
+  // 2. Restoration — short perpendicular segment in the THROUGH link's
+  //    stroke that re-paints the line across the eraser gap, so the
+  //    straight link reads as continuous through the crossing.
+  const restore = document.createElementNS(SVG_NS, 'line');
+  if (underIsH) {
+    restore.setAttribute('x1', cx);
+    restore.setAttribute('x2', cx);
+    restore.setAttribute('y1', cy - eHalf);
+    restore.setAttribute('y2', cy + eHalf);
+  } else {
+    restore.setAttribute('y1', cy);
+    restore.setAttribute('y2', cy);
+    restore.setAttribute('x1', cx - eHalf);
+    restore.setAttribute('x2', cx + eHalf);
+  }
+  restore.setAttribute('stroke', over.stroke);
+  restore.setAttribute('stroke-width', over.strokeWidth);
+  restore.setAttribute('stroke-linecap', 'butt');
+  // The restoration line paints the THROUGH link's stroke across the
+  // eraser gap; its dim state follows the OVER link.
+  restore.setAttribute('data-link-id', over.link.id);
+  layer.appendChild(restore);
+
+  // 3. Bump arc — semicircle in the BUMPED link's stroke. The path starts
+  //    with a tiny straight stub OUTSIDE the eraser boundary, runs the
+  //    semicircle, then ends with another tiny stub, so the arc joins
+  //    the existing line stroke without a visible kink at the cap.
+  //    `stroke-linecap: round` further smooths any sub-pixel transition.
+  //    Direction convention: horizontal bumped lines arc UP, vertical
+  //    bumped lines arc RIGHT — consistent across the diagram.
+  const arc = document.createElementNS(SVG_NS, 'path');
+  const d = underIsH
+    ? `M ${cx - R - STUB} ${cy} L ${cx - R} ${cy} A ${R} ${R} 0 0 1 ${cx + R} ${cy} L ${cx + R + STUB} ${cy}`
+    : `M ${cx} ${cy - R - STUB} L ${cx} ${cy - R} A ${R} ${R} 0 0 1 ${cx} ${cy + R} L ${cx} ${cy + R + STUB}`;
+  arc.setAttribute('d', d);
+  arc.setAttribute('fill', 'none');
+  arc.setAttribute('stroke', under.stroke);
+  arc.setAttribute('stroke-width', under.strokeWidth);
+  arc.setAttribute('stroke-linecap', 'round');
+  arc.setAttribute('stroke-linejoin', 'round');
+  // Arc represents the BUMPED link going over the through line; dim
+  // state follows the UNDER link.
+  arc.setAttribute('data-link-id', under.link.id);
+  layer.appendChild(arc);
 }
 
 function updateZoomDisplay() {

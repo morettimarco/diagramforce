@@ -76,6 +76,41 @@
   transition: stroke var(--transition-fast);
 }
 
+/* Connection-focus dimming (v1.12.3) — applied by selection.js when one
+ * or more ELEMENTS are selected. Links not attached to any selected
+ * element fade so the connected ones pop. Hover and explicit selection
+ * still bring the link back to full opacity so the user can inspect it
+ * without losing the dimming context.
+ *
+ * `!important` is needed: JointJS sets `view.el.style.opacity` inline
+ * on some shape types (notably OrgPerson, which writes inline opacity
+ * for vacant/avatar effects in _updateCard) and inline trumps CSS.
+ * Without !important the inline value wins and the element refuses to
+ * dim, producing the inconsistent "some dim, some don't" behaviour. */
+.joint-link.sf-link-dimmed {
+  opacity: 0.18 !important;
+  transition: opacity 180ms ease-out;
+}
+.joint-link.sf-link-dimmed:hover,
+.joint-link.sf-link-dimmed.selected {
+  opacity: 1 !important;
+}
+
+/* Element dimming — applied to elements that participate in the link
+ * graph but aren't connected to the selected element. Less aggressive
+ * than the link fade (0.4 vs 0.18) because elements carry more visual
+ * weight (filled rectangles vs thin lines) and over-dimming makes them
+ * unreadable. Background-only shapes (Zones, Notes, TextLabels) never
+ * get this class — selection.js filters them out via `elementsWithLinks`. */
+.joint-element.sf-element-dimmed {
+  opacity: 0.4 !important;
+  transition: opacity 180ms ease-out;
+}
+.joint-element.sf-element-dimmed:hover,
+.joint-element.sf-element-dimmed.selected {
+  opacity: 1 !important;
+}
+
 /* Hover + selection focus — tint the line in --selection-color so the
  * focused connector reads clearly when it overlaps siblings. The
  * canvas.js focus-highlight handler pairs this with a DOM bring-to-front

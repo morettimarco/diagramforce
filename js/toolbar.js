@@ -1,10 +1,10 @@
 // Toolbar — wires all button clicks to module actions
 // Also keeps undo/redo button states in sync
 
-import { diagramHasImage } from './image-component.js?v=1.12.2';
-import { showToast, showError, confirmModal, trapFocus } from './feedback.js?v=1.12.2';
-import { resizeDataObjectToFit } from './templates.js?v=1.12.2';
-import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, isConnectorGroupingEnabled, setConnectorGroupingEnabled, rerouteAllLinks } from './canvas.js?v=1.12.2';
+import { diagramHasImage } from './image-component.js?v=1.12.3';
+import { showToast, showError, confirmModal, trapFocus } from './feedback.js?v=1.12.3';
+import { resizeDataObjectToFit } from './templates.js?v=1.12.3';
+import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, isConnectorGroupingEnabled, setConnectorGroupingEnabled, rerouteAllLinks, isCrossingBumpsEnabled, setCrossingBumpsEnabled } from './canvas.js?v=1.12.3';
 
 let modules = {};
 
@@ -150,6 +150,21 @@ export function init(_modules) {
     setConnectorGroupingEnabled(!isConnectorGroupingEnabled());
     refreshGroupingLabel();
     rerouteAllLinks();
+  });
+
+  // Crossing Bumps toggle (CR-5.2 PoC) — EDA-style "jump over" arcs at
+  // points where two connectors cross without being connected.  Pure
+  // overlay rendering (no router or path mutation), so toggling just
+  // pokes the overlay layer to clear / re-paint.  Default ON.
+  const btnBumps = document.getElementById('btn-display-crossing-bumps');
+  const refreshBumpsLabel = () => {
+    btnBumps?.classList.toggle('is-checked', isCrossingBumpsEnabled());
+    _refreshDisplayDot();
+  };
+  refreshBumpsLabel();
+  btnBumps?.addEventListener('click', () => {
+    setCrossingBumpsEnabled(!isCrossingBumpsEnabled());
+    refreshBumpsLabel();
   });
 
   btnKeysOnly.addEventListener('click', () => {
@@ -1089,6 +1104,8 @@ function refreshDisplayDotIndicator() {
     // Connector Grouping defaults ON now (canvas.js → isConnectorGroupingEnabled),
     // so the non-default state is "currently off".
     isConnectorGroupingEnabled() === false ||
+    // Crossing Bumps default ON (CR-5.2 PoC).
+    isCrossingBumpsEnabled() === false ||
     isDisplayFlagOn('showLabels') ||
     isDisplayFlagOn('showFieldLengths') ||
     isDisplayFlagOn('keyFieldsOnly') ||

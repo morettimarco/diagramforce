@@ -1,12 +1,12 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { wrapSelectionWithMarker } from './markdown.js?v=1.12.2';
-import { confirmModal, showToast } from './feedback.js?v=1.12.2';
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.12.2';
-import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.12.2';
-import * as stencilModule from './stencil.js?v=1.12.2';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.12.2';
+import { wrapSelectionWithMarker } from './markdown.js?v=1.12.3';
+import { confirmModal, showToast } from './feedback.js?v=1.12.3';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.12.3';
+import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.12.3';
+import * as stencilModule from './stencil.js?v=1.12.3';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.12.3';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -15,10 +15,10 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.12.2';
-import * as history from './history.js?v=1.12.2';
-import { startImageAddFlow } from './image-component.js?v=1.12.2';
-import { escHtml } from './persistence.js?v=1.12.2';
+} from './clipboard.js?v=1.12.3';
+import * as history from './history.js?v=1.12.3';
+import { startImageAddFlow } from './image-component.js?v=1.12.3';
+import { escHtml } from './persistence.js?v=1.12.3';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
