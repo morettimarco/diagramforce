@@ -7,7 +7,7 @@
 ```json
 {
   "version": 1,
-  "appVersion": "1.11.8",
+  "appVersion": "1.12.5",
   "timestamp": 1712700000000,
   "title": "My Diagram",
   "diagramType": "architecture",
@@ -24,7 +24,7 @@
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `version` | number | Yes | Always `1` |
-| `appVersion` | string | Yes | Semver string, currently `"1.11.8"` |
+| `appVersion` | string | Yes | Semver string, currently `"1.12.5"` |
 | `timestamp` | number | No | Unix timestamp in milliseconds |
 | `title` | string | Yes | Diagram name (shown as tab title) |
 | `diagramType` | string | Yes | One of: `"architecture"`, `"process"`, `"datamodel"`, `"org"`, `"gantt"`, `"sequence"`. **Must match the shapes you use** (see [Diagram Types](#diagram-types)). Aliases `"data"`/`"organisation"` are accepted but the canonical forms are `"datamodel"` and `"org"` |
@@ -1307,7 +1307,7 @@ A simple 3-node architecture with one container:
 ```json
 {
   "version": 1,
-  "appVersion": "1.11.8",
+  "appVersion": "1.12.5",
   "timestamp": 1712700000000,
   "title": "Simple Architecture",
   "diagramType": "architecture",
@@ -1463,7 +1463,7 @@ Two related Salesforce objects with ER notation:
 ```json
 {
   "version": 1,
-  "appVersion": "1.11.8",
+  "appVersion": "1.12.5",
   "timestamp": 1712700000000,
   "title": "Account-Contact ERD",
   "diagramType": "datamodel",
@@ -1583,7 +1583,7 @@ A two-participant sync exchange with an activation box and an `alt` fragment. Me
 ```json
 {
   "version": 1,
-  "appVersion": "1.11.8",
+  "appVersion": "1.12.5",
   "title": "Account Lookup",
   "diagramType": "sequence",
   "graph": {

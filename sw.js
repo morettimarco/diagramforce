@@ -8,7 +8,7 @@
  * version bump documented in CLAUDE.md must update this file too.
  */
 
-const APP_VERSION = '1.12.4';
+const APP_VERSION = '1.12.5';
 const CACHE_NAME = `diagramforce-v${APP_VERSION}`;
 
 // Same-origin assets to pre-cache on install. Anything not listed here is
@@ -28,8 +28,30 @@ const PRECACHE_URLS = [
   `./css/tabs.css?v=${APP_VERSION}`,
   `./css/canvas.css?v=${APP_VERSION}`,
   `./css/modals.css?v=${APP_VERSION}`,
-  // App JS
+  // App JS — every statically-imported module the app needs to boot. All are
+  // eager ES imports (no dynamic import() anywhere), so all are boot-critical:
+  // omitting any one reintroduces the silent offline-crash this list prevents.
   `./js/app.js?v=${APP_VERSION}`,
+  `./js/brand-palette.js?v=${APP_VERSION}`,
+  `./js/canvas.js?v=${APP_VERSION}`,
+  `./js/clipboard.js?v=${APP_VERSION}`,
+  `./js/feedback.js?v=${APP_VERSION}`,
+  `./js/history.js?v=${APP_VERSION}`,
+  `./js/icons.js?v=${APP_VERSION}`,
+  `./js/image-component.js?v=${APP_VERSION}`,
+  `./js/keyboard.js?v=${APP_VERSION}`,
+  `./js/markdown.js?v=${APP_VERSION}`,
+  `./js/mermaid-import.js?v=${APP_VERSION}`,
+  `./js/persistence.js?v=${APP_VERSION}`,
+  `./js/properties.js?v=${APP_VERSION}`,
+  `./js/selection.js?v=${APP_VERSION}`,
+  `./js/shapes.js?v=${APP_VERSION}`,
+  `./js/share-codec.js?v=${APP_VERSION}`,
+  `./js/stencil.js?v=${APP_VERSION}`,
+  `./js/tabs.js?v=${APP_VERSION}`,
+  `./js/templates.js?v=${APP_VERSION}`,
+  `./js/theme.js?v=${APP_VERSION}`,
+  `./js/toolbar.js?v=${APP_VERSION}`,
   // Vendored libraries
   `./assets/vendor/joint.min.js?v=${APP_VERSION}`,
   `./assets/vendor/pako.min.js?v=${APP_VERSION}`,
@@ -37,6 +59,10 @@ const PRECACHE_URLS = [
   // Static images
   './assets/logo.png',
   './assets/favicon.png',
+  // PWA install assets (manifest + home-screen/dock icons)
+  './manifest.json',
+  './assets/icon-192.png',
+  './assets/icon-512.png',
 ];
 
 self.addEventListener('install', (event) => {
