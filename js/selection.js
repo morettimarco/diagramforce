@@ -1,9 +1,9 @@
 // Selection manager — tracks selected elements
 // Provides single-click, shift-click, rubber-band selection, and alignment ops
 
-import * as clipboard from './clipboard.js?v=1.12.5';
-import * as history from './history.js?v=1.12.5';
-import { isFocusDimmingEnabled } from './canvas.js?v=1.12.5';
+import * as clipboard from './clipboard.js?v=1.13.0';
+import * as history from './history.js?v=1.13.0';
+import { isFocusDimmingEnabled } from './canvas.js?v=1.13.0';
 
 let graph, paper;
 const selectedIds = new Set();

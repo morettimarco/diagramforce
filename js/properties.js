@@ -1,13 +1,13 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { wrapSelectionWithMarker } from './markdown.js?v=1.12.5';
-import { confirmModal, showToast } from './feedback.js?v=1.12.5';
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.12.5';
-import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.12.5';
-import * as stencilModule from './stencil.js?v=1.12.5';
-import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.12.5';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.12.5';
+import { wrapSelectionWithMarker } from './markdown.js?v=1.13.0';
+import { confirmModal, showToast } from './feedback.js?v=1.13.0';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.13.0';
+import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.13.0';
+import * as stencilModule from './stencil.js?v=1.13.0';
+import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.13.0';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.13.0';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -16,10 +16,11 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.12.5';
-import * as history from './history.js?v=1.12.5';
-import { startImageAddFlow } from './image-component.js?v=1.12.5';
-import { escHtml } from './persistence.js?v=1.12.5';
+} from './clipboard.js?v=1.13.0';
+import * as history from './history.js?v=1.13.0';
+import { startImageAddFlow } from './image-component.js?v=1.13.0';
+import { escHtml } from './persistence.js?v=1.13.0';
+import { saveSelectionAsTemplate } from './templates.js?v=1.13.0';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
@@ -983,6 +984,11 @@ function showMultiProperties(count) {
 
   footerEl.appendChild(cloneWrap);
 
+  // Save as Template — pinned directly below the Clone strip. Shares the
+  // footer-button base (`.sf-properties__btn` + shared --convert/--clone
+  // sizing), so it's dimensionally identical to the Clone button above it.
+  addActionBtn(footerEl, 'Save as Template', () => saveSelectionAsTemplate());
+
   // Select All {type} — if selection is a single type, and NOT all of that type are already selected
   const typeCounts = {};
   elements.forEach(c => { const t = c.get('type'); typeCounts[t] = (typeCounts[t] || 0) + 1; });
@@ -1369,7 +1375,7 @@ function renderLinkElementProps(cell) {
   addColor(appearance, 'Border', cell.attr('body/stroke'), v => cell.attr('body/stroke', v));
   addColor(appearance, 'Label color', cell.attr('label/fill'), v => {
     cell.attr('label/fill', v);
-    cell.attr('iconImage/href', getStencilSvgDataUri(TEMPLATE_SVG.linkIcon, v, 20));
+    cell.attr('iconImage/href', getStencilSvgDataUri(COMPONENT_SVG.linkIcon, v, 20));
   });
   addNumber(appearance, 'Font size', cell.attr('label/fontSize') ?? 14,
     v => cell.attr('label/fontSize', v), { min: 6, max: 96 });

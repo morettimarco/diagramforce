@@ -1,10 +1,12 @@
 // Stencil panel — draggable component library
-// Organizes templates by category, supports search, handles drag-to-canvas
+// Organizes built-in components + saved templates by category, search, drag-to-canvas
 
-import { TEMPLATE_CATEGORIES, BPMN_CATEGORIES, DATAMODEL_CATEGORIES, GANTT_CATEGORIES, ORG_CATEGORIES, SEQUENCE_CATEGORIES, createElementFromTemplate } from './templates.js?v=1.12.5';
-import { getAllIcons, getCategories } from './icons.js?v=1.12.5';
-import { updateSimpleNodeLayout, snapActivationToLifeline, canEmbed } from './canvas.js?v=1.12.5';
-import { startImageAddFlow } from './image-component.js?v=1.12.5';
+import { COMPONENT_CATEGORIES, BPMN_CATEGORIES, DATAMODEL_CATEGORIES, GANTT_CATEGORIES, ORG_CATEGORIES, SEQUENCE_CATEGORIES, createElementFromComponent } from './components.js?v=1.13.0';
+import { getAllIcons, getCategories } from './icons.js?v=1.13.0';
+import { updateSimpleNodeLayout, snapActivationToLifeline, canEmbed } from './canvas.js?v=1.13.0';
+import { startImageAddFlow } from './image-component.js?v=1.13.0';
+import { getTemplates, deleteTemplate, renderTemplateThumbnail, instantiateTemplate, onTemplatesChange } from './templates.js?v=1.13.0';
+import { confirmModal } from './feedback.js?v=1.13.0';
 
 let graph, paper;
 let panelEl, searchEl, bodyEl;
@@ -18,6 +20,10 @@ export function init(_graph, _paper) {
   bodyEl = document.getElementById('stencil-categories');
 
   renderCategories();
+
+  // Re-render when the saved-template library changes (save / delete) so the
+  // "My Templates" category appears, updates its count, or disappears.
+  onTemplatesChange(() => renderCategories());
 
   // Gap 17 (v1.12.0) — clear-× button shows when the search has a value;
   // clicks wipe the field and re-run the filter so the user can return to
@@ -83,12 +89,20 @@ export function setDiagramType(type) {
 function renderCategories() {
   bodyEl.innerHTML = '';
 
+  // "My Templates" — user-saved templates (internal name). Global across every
+  // diagram type, pinned above everything else. Only rendered when the library
+  // has at least one entry.
+  const myTemplates = getTemplates();
+  if (myTemplates.length > 0) {
+    bodyEl.appendChild(buildTemplatesSection(myTemplates));
+  }
+
   const rawCategories = currentDiagramType === 'process' ? BPMN_CATEGORIES
                       : currentDiagramType === 'datamodel' ? DATAMODEL_CATEGORIES
                       : currentDiagramType === 'gantt' ? GANTT_CATEGORIES
                       : currentDiagramType === 'org' ? ORG_CATEGORIES
                       : currentDiagramType === 'sequence' ? SEQUENCE_CATEGORIES
-                      : TEMPLATE_CATEGORIES;
+                      : COMPONENT_CATEGORIES;
 
   // Pin "Generic Shapes" to the top across every diagram type. For diagram
   // types where it sat at the bottom (process / gantt / org / sequence) — i.e.
@@ -110,7 +124,7 @@ function renderCategories() {
     : rawCategories;
 
   for (const category of categories) {
-    bodyEl.appendChild(buildTemplateSection(category));
+    bodyEl.appendChild(buildComponentSection(category));
   }
 
   // SLDS icon categories only for architecture diagrams
@@ -127,12 +141,12 @@ function renderCategories() {
   }
 }
 
-function buildTemplateSection(category) {
+function buildComponentSection(category) {
   const section = document.createElement('div');
   section.className = 'sf-stencil__category' + (category.collapsed ? ' sf-stencil__category--collapsed' : '');
   section.dataset.categoryId = category.id;
 
-  const header = buildCategoryHeader(category.label, category.templates.length);
+  const header = buildCategoryHeader(category.label, category.components.length);
   header.addEventListener('click', () => {
     section.classList.toggle('sf-stencil__category--collapsed');
   });
@@ -140,13 +154,88 @@ function buildTemplateSection(category) {
   const items = document.createElement('div');
   items.className = 'sf-stencil__items';
 
-  for (const template of category.templates) {
+  for (const template of category.components) {
+    items.appendChild(buildComponentItem(template));
+  }
+
+  section.appendChild(header);
+  section.appendChild(items);
+  return section;
+}
+
+// ── My Templates (custom user-saved templates; "template" is the internal name) ──
+
+function buildTemplatesSection(templates) {
+  const section = document.createElement('div');
+  section.className = 'sf-stencil__category';
+  section.dataset.categoryId = 'my-templates';
+
+  const header = buildCategoryHeader('My Templates', templates.length);
+  header.addEventListener('click', () => {
+    section.classList.toggle('sf-stencil__category--collapsed');
+  });
+
+  const items = document.createElement('div');
+  items.className = 'sf-stencil__items sf-stencil__items--templates';
+
+  for (const template of templates) {
     items.appendChild(buildTemplateItem(template));
   }
 
   section.appendChild(header);
   section.appendChild(items);
   return section;
+}
+
+function buildTemplateItem(template) {
+  const item = document.createElement('div');
+  item.className = 'sf-stencil__item sf-stencil__item--template';
+  item.draggable = true;
+  item.dataset.label = (template.name || '').toLowerCase();
+  item.title = template.name || 'Template';
+
+  // Static SVG thumbnail (rendered from a throwaway mini-paper).
+  item.appendChild(renderTemplateThumbnail(template));
+
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'sf-stencil__item-label';
+  labelSpan.textContent = template.name || 'Template';
+  item.appendChild(labelSpan);
+
+  // Per-template delete (×) — appears on hover/focus.
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'sf-template-delete';
+  del.title = `Delete "${template.name}"`;
+  del.setAttribute('aria-label', `Delete template "${template.name}"`);
+  del.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+  // Stop the parent's drag from starting when the user grabs the × button.
+  del.addEventListener('mousedown', (e) => e.stopPropagation());
+  del.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const ok = await confirmModal({
+      title: 'Delete template?',
+      message: `Remove "${template.name}" from My Templates? This can't be undone.`,
+      okLabel: 'Delete',
+      tone: 'danger',
+    });
+    if (ok) deleteTemplate(template.id);
+  });
+  item.appendChild(del);
+
+  item._sfTemplateId = template.id;
+  item._sfTemplateName = template.name;
+
+  item.addEventListener('dragstart', (evt) => {
+    evt.dataTransfer.setData('application/sf-diagrams-template', JSON.stringify({ id: template.id }));
+    evt.dataTransfer.effectAllowed = 'copy';
+  });
+
+  item.addEventListener('dblclick', () => {
+    instantiateTemplate(template.id, getCanvasCenterLocalPoint());
+  });
+
+  return item;
 }
 
 function buildIconSection(cat, icons, displayLabel) {
@@ -176,7 +265,7 @@ function buildIconSection(cat, icons, displayLabel) {
       label: icon.name.replace(/_/g, ' '),
       iconName: icon.id,
     };
-    item._sfTemplate = iconTpl;
+    item._sfComponent = iconTpl;
 
     item.addEventListener('dragstart', (evt) => {
       evt.dataTransfer.setData('application/sf-diagrams', JSON.stringify(iconTpl));
@@ -224,7 +313,7 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;');
 }
 
-function buildTemplateItem(template) {
+function buildComponentItem(template) {
   const item = document.createElement('div');
   item.className = 'sf-stencil__item';
   item.draggable = true;
@@ -244,7 +333,7 @@ function buildTemplateItem(template) {
   labelSpan.textContent = template.label || '';
   item.appendChild(labelSpan);
 
-  item._sfTemplate = template;
+  item._sfComponent = template;
 
   item.addEventListener('dragstart', (evt) => {
     evt.dataTransfer.setData('application/sf-diagrams', JSON.stringify(template));
@@ -312,6 +401,17 @@ function setupDropZone() {
   canvasEl.addEventListener('drop', (evt) => {
     evt.preventDefault();
     clearDropHighlight();
+
+    // Custom template drop — instantiate with fresh cell IDs at the drop point.
+    const templateData = evt.dataTransfer.getData('application/sf-diagrams-template');
+    if (templateData) {
+      let info;
+      try { info = JSON.parse(templateData); } catch { return; }
+      const localPoint = paper.clientToLocalPoint(evt.clientX, evt.clientY);
+      instantiateTemplate(info.id, localPoint);
+      return;
+    }
+
     const data = evt.dataTransfer.getData('application/sf-diagrams');
     if (!data) return;
 
@@ -338,7 +438,7 @@ function setupDropZone() {
       const gridSize = paper.options.gridSize || 4;
 
       // Create element at origin first, then center on drop point
-      const element = createElementFromTemplate(template, { x: 0, y: 0 });
+      const element = createElementFromComponent(template, { x: 0, y: 0 });
       if (element) {
         applyDisplayFlags(element);
         const size = element.size();
@@ -390,8 +490,10 @@ function addImageCellAt(result, localPoint) {
   tryEmbed(element);
 }
 
-function addToCenter(template) {
-  // Find the visible center of the canvas, accounting for overlapping panels on mobile
+/** Paper-local point at the visible centre of the canvas, accounting for
+ *  panels that overlap the canvas from the bottom on mobile. Shared by the
+ *  template + template double-click "add to centre" flows. */
+function getCanvasCenterLocalPoint() {
   const canvasEl = document.getElementById('canvas-container');
   const rect = canvasEl.getBoundingClientRect();
   let visibleTop = rect.top;
@@ -414,7 +516,11 @@ function addToCenter(template) {
   }
 
   const centerClient = { x: rect.left + rect.width / 2, y: visibleTop + (visibleBottom - visibleTop) / 2 };
-  const localCenter = paper.clientToLocalPoint(centerClient.x, centerClient.y);
+  return paper.clientToLocalPoint(centerClient.x, centerClient.y);
+}
+
+function addToCenter(template) {
+  const localCenter = getCanvasCenterLocalPoint();
   const gridSize = paper.options.gridSize || 4;
 
   // Dblclick on the Image stencil — same callback flow as drag-drop so the
@@ -424,7 +530,7 @@ function addToCenter(template) {
     return;
   }
 
-  const element = createElementFromTemplate(template, { x: 0, y: 0 });
+  const element = createElementFromComponent(template, { x: 0, y: 0 });
   if (!element) return;
   applyDisplayFlags(element);
 
@@ -589,6 +695,8 @@ function setupTouchDrag() {
   let pressTimer = null;
   let activeItem = null;
   let activeTemplate = null;
+  let activeTemplateId = null;
+  let activeLabel = null;
   let ghost = null;
   let startXY = null;
   let dragging = false;
@@ -599,7 +707,7 @@ function setupTouchDrag() {
   const getTemplateFor = (itemEl) => {
     // Template items: rebuild from dataset/label — we only have label in dataset.
     // Easier: attach JSON directly during build. Fallback: find by iconId for icon-mode items.
-    if (itemEl._sfTemplate) return itemEl._sfTemplate;
+    if (itemEl._sfComponent) return itemEl._sfComponent;
     return null;
   };
 
@@ -609,18 +717,20 @@ function setupTouchDrag() {
     if (ghost) { ghost.remove(); ghost = null; }
     activeItem = null;
     activeTemplate = null;
+    activeTemplateId = null;
+    activeLabel = null;
     startXY = null;
     dragging = false;
   };
 
   const startDrag = (clientX, clientY) => {
-    if (!activeTemplate) return;
+    if (!activeTemplate && !activeTemplateId) return;
     dragging = true;
     if (navigator.vibrate) navigator.vibrate(15);
     // Create simple ghost following finger
     ghost = document.createElement('div');
     ghost.className = 'sf-touch-drag-ghost';
-    ghost.textContent = activeTemplate.label || 'Shape';
+    ghost.textContent = activeTemplate?.label || activeLabel || 'Shape';
     ghost.style.left = clientX + 'px';
     ghost.style.top = clientY + 'px';
     document.body.appendChild(ghost);
@@ -647,13 +757,17 @@ function setupTouchDrag() {
   };
 
   const onEnd = (e) => {
-    if (dragging && activeTemplate) {
+    if (dragging && (activeTemplate || activeTemplateId)) {
       const t = e.changedTouches?.[0];
       if (t) {
         const el = document.elementFromPoint(t.clientX, t.clientY);
         const canvasEl = document.getElementById('canvas-container');
         if (el && canvasEl.contains(el)) {
-          dropTemplateAtClient(activeTemplate, t.clientX, t.clientY);
+          if (activeTemplateId) {
+            instantiateTemplate(activeTemplateId, paper.clientToLocalPoint(t.clientX, t.clientY));
+          } else {
+            dropTemplateAtClient(activeTemplate, t.clientX, t.clientY);
+          }
         }
       }
     }
@@ -665,9 +779,12 @@ function setupTouchDrag() {
     const item = e.target.closest('.sf-stencil__item');
     if (!item) return;
     const tpl = getTemplateFor(item);
-    if (!tpl) return;
+    const templateId = item._sfTemplateId || null;
+    if (!tpl && !templateId) return;
     activeItem = item;
     activeTemplate = tpl;
+    activeTemplateId = templateId;
+    activeLabel = item._sfTemplateName || null;
     const t = e.touches[0];
     startXY = { x: t.clientX, y: t.clientY };
     pressTimer = setTimeout(() => {
@@ -691,7 +808,7 @@ function dropTemplateAtClient(template, clientX, clientY) {
       return;
     }
     const gridSize = paper.options.gridSize || 4;
-    const element = createElementFromTemplate(template, { x: 0, y: 0 });
+    const element = createElementFromComponent(template, { x: 0, y: 0 });
     if (!element) return;
     applyDisplayFlags(element);
     const size = element.size();

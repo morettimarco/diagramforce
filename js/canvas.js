@@ -76,6 +76,7 @@ export function tierNameForType(type) {
 // 'add' listener skips z-assignment and preserves the saved values.
 let _isLoadingJSON = false;
 export function setLoadingJSON(v) { _isLoadingJSON = v; }
+export function isLoadingJSON() { return _isLoadingJSON; }
 
 // ── Auto-sizing toggle (v1.11.6) ────────────────────────────────────
 // Controls whether `fitParentToChildren` is allowed to grow/shrink a
@@ -1643,6 +1644,16 @@ export function init() {
       touchPinchZoom = null;
       touchPinchCenter = null;
     }
+  });
+
+  // iOS Safari ignores `touch-action` for its non-standard pinch "gesture"
+  // events and will viewport-zoom the whole page — which, after a panel
+  // reflow, can strand the UI chrome off-screen and lock the user out. The
+  // canvas drives its own pinch via the touch handlers above (paper.scale),
+  // so suppress the browser's gesture-zoom document-wide. Touch events still
+  // fire, so canvas pinch is unaffected.
+  ['gesturestart', 'gesturechange'].forEach((type) => {
+    document.addEventListener(type, (evt) => evt.preventDefault(), { passive: false });
   });
 
   // --- Zoom (pinch) and Pan (two-finger scroll) ---

@@ -8,7 +8,7 @@
  * version bump documented in CLAUDE.md must update this file too.
  */
 
-const APP_VERSION = '1.12.5';
+const APP_VERSION = '1.13.0';
 const CACHE_NAME = `diagramforce-v${APP_VERSION}`;
 
 // Same-origin assets to pre-cache on install. Anything not listed here is
@@ -48,6 +48,7 @@ const PRECACHE_URLS = [
   `./js/shapes.js?v=${APP_VERSION}`,
   `./js/share-codec.js?v=${APP_VERSION}`,
   `./js/stencil.js?v=${APP_VERSION}`,
+  `./js/components.js?v=${APP_VERSION}`,
   `./js/tabs.js?v=${APP_VERSION}`,
   `./js/templates.js?v=${APP_VERSION}`,
   `./js/theme.js?v=${APP_VERSION}`,

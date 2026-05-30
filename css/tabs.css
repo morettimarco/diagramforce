@@ -274,10 +274,27 @@
   opacity: 0.7;
 }
 
+/* Name + "Modified …" stacked, so the row mirrors the Load/Export anatomy. */
+.sf-close-tabs__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .sf-close-tabs__name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Inside the info column the name must not flex-grow vertically. */
+.sf-close-tabs__info .sf-close-tabs__name {
+  flex: 0 0 auto;
+}
+.sf-close-tabs__meta {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
@@ -302,16 +319,18 @@
 .sf-close-tabs__btn {
   padding: 6px 14px;
   border-radius: var(--border-radius-sm);
-  border: 1px solid var(--border-color);
-  background: var(--bg-canvas);
-  color: var(--text-primary);
+  /* Default (secondary): neutral grey fill — Cancel. */
+  border: 1px solid transparent;
+  background: var(--modal-btn-neutral-bg);
+  color: var(--modal-btn-neutral-fg);
   font-size: var(--font-size-sm);
   font-family: var(--font-family);
   cursor: pointer;
 }
 
-.sf-close-tabs__btn:hover:not(:disabled) {
-  background: var(--toolbar-button-hover);
+/* Secondary hover — scoped so it never recolours the primary / save variants. */
+.sf-close-tabs__btn:not(.sf-close-tabs__btn--primary):not(.sf-close-tabs__btn--save):hover:not(:disabled) {
+  background: var(--modal-btn-neutral-bg-hover);
 }
 
 .sf-close-tabs__btn:disabled {
@@ -319,10 +338,23 @@
   cursor: not-allowed;
 }
 
-.sf-close-tabs__btn--primary {
-  background: var(--color-primary);
+/* Positive commit (Save and Close) — brand blue fill, both themes. */
+.sf-close-tabs__btn--save {
+  background: var(--brand-blue);
   color: #FFFFFF;
-  border-color: var(--color-primary);
+  border-color: var(--brand-blue);
+}
+
+.sf-close-tabs__btn--save:hover:not(:disabled) {
+  opacity: 0.88;
+}
+
+/* Destructive primary (Close Selected / Close Anyway) — brand-red fill in both
+   themes, matching the danger convention (closing tabs can discard work). */
+.sf-close-tabs__btn--primary {
+  background: var(--brand-red);
+  color: #FFFFFF;
+  border-color: var(--brand-red);
 }
 
 .sf-close-tabs__btn--primary:hover:not(:disabled) {

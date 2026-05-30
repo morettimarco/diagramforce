@@ -54,7 +54,11 @@
 .sf-modal__body {
   flex: 1;
   overflow-y: auto;
-  padding: var(--spacing-sm) 0;
+  /* Horizontal inset so body content never touches the dialog edges — matches
+     the header/footer (--spacing-lg) and the inline-padded modals (Close Tabs
+     et al). Modals that set their own body padding (inline or a body modifier
+     class) override this. */
+  padding: var(--spacing-sm) var(--spacing-lg);
 }
 
 .sf-modal__body::-webkit-scrollbar {
@@ -91,6 +95,104 @@
   border-radius: 4px;
 }
 
+/* Inline "Export to JSON" call-to-action inside an advisory — styled as a text
+   link (no button chrome) so it reads as part of the sentence. */
+.sf-modal__advisory-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--color-primary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.sf-modal__advisory-link:hover {
+  text-decoration: none;
+}
+
+/* Success variant — transient import summary at the top of the Load modal.
+   Green accent + faint green tint (brand-green #27AE60 @ 10%), readable on
+   either theme. Stronger text colour than the neutral advisory. */
+.sf-modal__advisory--success {
+  border-left-color: var(--brand-green, #27AE60);
+  background: rgba(39, 174, 96, 0.10);
+  color: var(--text-primary);
+}
+
+/* Import summary as a dash list — one outcome per line for scannability
+   (diagrams saved / diagrams skipped / templates saved / templates skipped). */
+.sf-import-summary__head {
+  display: block;
+}
+.sf-import-summary__list {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.sf-import-summary__list li {
+  position: relative;
+  padding-left: 14px;
+  line-height: 1.5;
+}
+.sf-import-summary__list li::before {
+  content: '–';
+  position: absolute;
+  left: 2px;
+  color: var(--text-secondary);
+}
+
+/* "Select all" as a table-header row at the top of the list (all flat-list
+   modals: Save / Export / Load), matching the Close-tabs header. The bulk
+   commit + Cancel/Delete live in the footer. */
+.sf-modal__list-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-elevated, rgba(127, 127, 127, 0.05));
+}
+.sf-modal__list-header .sf-modal__select-all {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* Export modal advisory: backup date (left) + compact "Back up now" (right). */
+.sf-export-modal__advisory {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+.sf-export-modal__advisory-text { flex: 1; min-width: 0; }
+/* "Back up now" — brand-amber OUTLINE (no fill). Darker amber in light mode for
+   WCAG text contrast; fills on hover. The `.sf-modal__btn` compound selector
+   keeps it ahead of the neutral `.sf-modal__btn` base (which is defined later
+   in the file). */
+.sf-modal__btn.sf-export-modal__backup-now {
+  flex-shrink: 0;
+  white-space: nowrap;
+  --_amber: #D4911F;
+  background: transparent;
+  border-color: var(--_amber);
+  color: var(--_amber);
+}
+[data-theme="dark"] .sf-modal__btn.sf-export-modal__backup-now { --_amber: var(--brand-amber); }
+.sf-modal__btn.sf-export-modal__backup-now:hover {
+  background: var(--_amber);
+  border-color: var(--_amber);
+  color: #1C1E21;
+}
+/* Success flash — JS toggles `is-backed` for ~2s after a successful backup,
+   turning the amber outline into a solid brand-green "✓ Backed up!". The
+   compound selector (incl. :hover) out-specifies the amber resting/hover rules. */
+.sf-modal__btn.sf-export-modal__backup-now.is-backed,
+.sf-modal__btn.sf-export-modal__backup-now.is-backed:hover {
+  background: var(--brand-green);
+  border-color: var(--brand-green);
+  color: #fff;
+}
+
 /* Legacy save-item aliases — now handled by .sf-modal__row */
 
 .sf-modal__btn {
@@ -103,15 +205,29 @@
   font-family: var(--font-family);
   font-weight: 500;
   cursor: pointer;
+  /* Default (secondary) modal button — neutral grey fill, used for Cancel /
+     Close. The colour modifiers below override it for primary / danger roles. */
+  background: var(--modal-btn-neutral-bg);
+  color: var(--modal-btn-neutral-fg);
   border: 1px solid transparent;
   transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
   white-space: nowrap;
 }
 
+/* Secondary hover — scoped so it never recolours the primary / danger variants,
+   nor the amber "Back up now" outline button (which fills amber on its own
+   :hover rule above; without this exclusion the neutral grey would win on
+   specificity and the button would hover grey instead of brand-orange). */
+.sf-modal__btn:not(.sf-modal__btn--primary):not(.sf-modal__btn--danger):not(.sf-export-modal__backup-now):hover {
+  background: var(--modal-btn-neutral-bg-hover);
+}
+
+/* Positive / primary commit — brand blue fill in BOTH themes (not the
+   theme-flipping --color-primary, which is red in dark mode). */
 .sf-modal__btn--primary {
-  background: var(--color-primary);
+  background: var(--brand-blue);
   color: #ffffff;
-  border-color: var(--color-primary);
+  border-color: var(--brand-blue);
 }
 
 .sf-modal__btn--primary:hover {
@@ -125,16 +241,16 @@
   pointer-events: none;
 }
 
+/* Destructive commit (Delete, Discard) — brand-red fill in BOTH themes,
+   mirroring the grey-secondary / blue-primary convention. */
 .sf-modal__btn--danger {
-  background: transparent;
-  color: var(--text-muted);
-  border-color: var(--border-color);
+  background: var(--brand-red);
+  color: #ffffff;
+  border-color: var(--brand-red);
 }
 
 .sf-modal__btn--danger:hover {
-  color: #e53935;
-  border-color: #e53935;
-  background: rgba(229, 57, 53, 0.08);
+  opacity: 0.88;
 }
 
 /* ── Confirm modal (v1.12.0) ────────────────────────
@@ -147,7 +263,8 @@
   max-width: calc(100vw - 32px);
 }
 .sf-confirm-modal__body {
-  padding: 0 var(--spacing-md) var(--spacing-md);
+  /* spacing-sm top so the message clears the header divider (was 0 → text hugged the rule) */
+  padding: var(--spacing-sm) var(--spacing-md) var(--spacing-md);
   font-size: var(--font-size-sm);
   color: var(--text-secondary);
   line-height: 1.5;
@@ -157,6 +274,66 @@
   justify-content: flex-end;
   gap: var(--spacing-sm);
   padding: var(--spacing-sm) var(--spacing-md) var(--spacing-md);
+}
+
+/* ── Prompt modal (single text input) ──────────────────────────────
+   Inherits the confirm-modal chrome; adds an optional labelled text field.
+   The body is a flex item (own BFC), so the message's top margin reliably
+   adds breathing room below the header divider without margin-collapse. */
+.sf-prompt-modal__message {
+  margin: var(--spacing-sm) 0 var(--spacing-md);
+}
+/* Bolded counts (e.g. "8 components") stand out against the secondary-coloured
+   sentence by using the primary text colour + heavier weight. */
+.sf-prompt-modal__message strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.sf-prompt-modal__label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: var(--font-size-xs, 11px);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.sf-prompt-modal__input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: var(--font-size-sm);
+  font-family: var(--font-family);
+  color: var(--text-primary);
+  background: var(--bg-app);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+/* Required field: brand red while empty (placeholder showing), brand blue once
+   it holds a value — independent of focus and theme. Non-required prompts keep
+   the neutral border when empty. */
+.sf-prompt-modal__input:required:placeholder-shown {
+  border-color: var(--brand-red);
+}
+.sf-prompt-modal__input:not(:placeholder-shown) {
+  border-color: var(--brand-blue);
+}
+/* Focus ring. The global a11y ring (layout.css `input:focus-visible`) is
+   `--color-primary`, which flips to RED in dark mode — overriding the state
+   colour above and producing the red/blue mix. Suppress it here and draw a
+   state-coloured ring via box-shadow instead (deterministic on plain `:focus`,
+   no `:focus-visible` heuristic): blue when filled, red when empty, identical
+   in both themes. Scoped to this input — the global ring elsewhere (incl. the
+   properties sidebar) is untouched. rgba values are --brand-blue / --brand-red
+   at 30%. */
+.sf-prompt-modal__input:focus,
+.sf-prompt-modal__input:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(29, 115, 201, 0.30);
+}
+.sf-prompt-modal__input:required:placeholder-shown:focus,
+.sf-prompt-modal__input:required:placeholder-shown:focus-visible {
+  box-shadow: 0 0 0 3px rgba(218, 78, 85, 0.30);
 }
 
 /* ── Toast (v1.12.0) ────────────────────────────────
@@ -290,20 +467,48 @@
   width: 520px;
 }
 
+/* Flat-list pattern (unified across Save / Export / Load, matching Close-tabs):
+   edge-to-edge rows with a bottom divider, no pill radius. List padding is
+   vertical-only so rows span full width (each row owns its horizontal padding). */
+/* Bare row-list (used as an INNER rows container, e.g. the sequence
+   auto-layout confirm) keeps zero horizontal padding so its rows align with the
+   surrounding body's own inset. */
 .sf-modal__row-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--spacing-xs) var(--spacing-sm) !important;
+  padding: var(--spacing-sm) 0;
+}
+
+/* Row-list used directly AS the modal body (Save / Export / Load) gets the
+   standard horizontal inset. Higher specificity (0,2,0) wins over both the base
+   body and the bare row-list above — no !important needed. */
+.sf-modal__body.sf-modal__row-list {
+  padding: var(--spacing-sm) var(--spacing-lg);
+}
+
+/* Bordered container around the Select-all header + rows (Save / Export / Load),
+   mirroring Close-Tabs' .sf-close-tabs__list. overflow:hidden clips the header
+   background and the first/last row corners to the box radius. */
+.sf-modal__list-box {
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  overflow: hidden;
+  background: var(--bg-canvas);
 }
 
 .sf-modal__row {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  padding: var(--spacing-xs) var(--spacing-sm);
-  border-radius: var(--border-radius-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--border-color);
   transition: background var(--transition-fast);
+}
+
+/* Drop the final row's divider so it doesn't stack with the footer's
+   border-top into a double line just above the action buttons. */
+.sf-modal__row:last-child {
+  border-bottom: none;
 }
 
 .sf-modal__row:hover {
@@ -352,23 +557,51 @@
   white-space: nowrap;
 }
 
+/* Save modal's editable name — now FLAT (no card border). A subtle border
+   appears on hover (hints it's editable) and on focus (active edit). */
 .sf-modal__row-name {
   flex: 1;
   min-width: 0;
   font-size: var(--font-size-sm);
   font-family: var(--font-family);
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-primary);
-  background: var(--bg-app);
-  border: 1px solid var(--border-color);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: var(--border-radius-sm);
   padding: 4px 8px;
   outline: none;
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.sf-modal__row-name:hover {
+  border-color: var(--border-color);
+}
+/* When the editable Save name sits inside the info column (with the "Modified …"
+   meta below it), it must size to one line, not flex-grow vertically — and its
+   text must sit FLUSH-LEFT so it aligns with the "Modified …" meta below and
+   matches the static name in Export / Close-Tabs. Drop the left padding only
+   (keep the right so a long name still has breathing room when editing). */
+.sf-save-modal__row-info .sf-modal__row-name {
+  flex: 0 0 auto;
+  width: 100%;
+  padding-left: 0;
 }
 
 .sf-modal__row-name:focus {
   border-color: var(--color-primary);
+  background: var(--bg-app);
+}
+
+/* Right-accessory type badge (Export rows) — mirrors the Close-tabs badge. */
+.sf-modal__row-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  white-space: nowrap;
 }
 
 .sf-modal__row-actions {
@@ -420,28 +653,31 @@
   font-family: var(--font-family);
   font-weight: 500;
   cursor: pointer;
-  border: 1px solid var(--border-color);
-  background: transparent;
-  color: var(--text-secondary);
+  /* Default (secondary): neutral grey fill — Close / Cancel. */
+  border: 1px solid transparent;
+  background: var(--modal-btn-neutral-bg);
+  color: var(--modal-btn-neutral-fg);
   transition: background var(--transition-fast), color var(--transition-fast),
               border-color var(--transition-fast);
 }
 
 .sf-close-confirm__btn:hover {
-  background: var(--stencil-item-hover);
-  color: var(--text-primary);
-  border-color: var(--border-color-strong);
+  background: var(--modal-btn-neutral-bg-hover);
+  color: var(--modal-btn-neutral-fg);
 }
 
+/* Positive commit (Copy Link, Save and Close) — brand blue fill, both themes. */
 .sf-close-confirm__btn--save {
+  background: var(--brand-blue);
   border-color: var(--brand-blue);
-  color: var(--brand-blue);
+  color: #fff;
 }
 
 .sf-close-confirm__btn--save:hover {
   background: var(--brand-blue);
   border-color: var(--brand-blue);
   color: #fff;
+  opacity: 0.88;
 }
 
 /* Share modal: temporary success state on the Copy Link button. Driven by
@@ -454,7 +690,19 @@
   color: #fff;
 }
 
+/* Backup-reminder overlay: a backup button turns brand-green "✓ Backed up!"
+   on success and STAYS green until the overlay closes (no auto-revert, unlike
+   the share button). Beats the blue --save fill + its hover. */
+.sf-backup-modal__btn.is-backed,
+.sf-backup-modal__btn.is-backed:hover {
+  background: var(--brand-green);
+  border-color: var(--brand-green);
+  color: #fff;
+  opacity: 1;
+}
+
 .sf-close-confirm__btn--discard {
+  background: transparent;
   border-color: #DA4E55;
   color: #DA4E55;
 }

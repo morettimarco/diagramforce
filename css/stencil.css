@@ -263,6 +263,80 @@
   min-width: 0;
 }
 
+/* ── My Templates (custom user-saved groups — see js/templates.js) ──
+   Tiles in an auto-fill grid: a static SVG thumbnail (rendered from a
+   throwaway mini-paper), the template name below, and a hover-revealed
+   delete (×) in the top-right corner. */
+.sf-stencil__items--templates {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: var(--spacing-sm);
+  padding: 4px var(--spacing-sm) var(--spacing-sm);
+}
+
+.sf-stencil__item--template {
+  position: relative;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-color);
+}
+
+.sf-template-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 64px;
+  border-radius: var(--border-radius-sm);
+  background: var(--bg-canvas, rgba(127, 127, 127, 0.06));
+  overflow: hidden;
+  /* Let drags / dblclicks originate from the tile, not the inner SVG. */
+  pointer-events: none;
+}
+
+.sf-template-thumb__svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.sf-stencil__item--template .sf-stencil__item-label {
+  flex: none;
+  text-align: center;
+  font-size: var(--font-size-xs, 11px);
+}
+
+.sf-template-delete {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-surface, #2a2d32);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.sf-stencil__item--template:hover .sf-template-delete,
+.sf-template-delete:focus-visible {
+  opacity: 1;
+}
+
+.sf-template-delete:hover {
+  color: #fff;
+  background: var(--brand-red, #DA4E55);
+}
+
 /* Drag handle base rule defined in layout.css */
 
 /* ── Mobile stencil — bottom panel ──────────────────────────────── */

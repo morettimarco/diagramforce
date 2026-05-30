@@ -7,6 +7,12 @@
 html, body {
   height: 100%;
   overflow: hidden;
+  /* Pinch-zoom belongs to the canvas alone (it runs its own JointJS pan/zoom).
+     Permit scroll/pan inside the chrome but never let the browser viewport-zoom
+     it: on mobile a stray pinch followed by a panel reflow can strand controls
+     off-screen and lock the user out. The canvas opts out via `touch-action:
+     none` and drives pinch in JS (see canvas.js touch handlers). */
+  touch-action: pan-x pan-y;
   font-family: var(--font-family);
   font-size: var(--font-size-md);
   line-height: var(--line-height);
@@ -34,6 +40,7 @@ html, body {
   position: relative;
   overflow: hidden;
   background: var(--bg-canvas);
+  touch-action: none; /* canvas owns pan/zoom via JS (see canvas.js touch handlers) */
 }
 
 #paper {
@@ -142,6 +149,5 @@ select:focus-visible {
   .sf-canvas {
     flex: 1;
     min-height: 0;
-    touch-action: none; /* Prevent browser gestures on canvas */
   }
 }

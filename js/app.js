@@ -1,21 +1,22 @@
 // SF Diagrams — App bootstrap
 // Initializes all modules in order. JointJS is a global (loaded via CDN script tag).
 
-import * as theme       from './theme.js?v=1.12.5';
-import * as icons       from './icons.js?v=1.12.5';
-import { getAllStencilSvgs } from './templates.js?v=1.12.5';
-import * as shapes      from './shapes.js?v=1.12.5';
-import * as canvas      from './canvas.js?v=1.12.5';
-import * as stencil     from './stencil.js?v=1.12.5';
-import * as selection   from './selection.js?v=1.12.5';
-import * as history     from './history.js?v=1.12.5';
-import * as clipboard   from './clipboard.js?v=1.12.5';
-import * as keyboard    from './keyboard.js?v=1.12.5';
-import * as toolbar     from './toolbar.js?v=1.12.5';
-import * as properties  from './properties.js?v=1.12.5';
-import * as persistence from './persistence.js?v=1.12.5';
-import * as tabs        from './tabs.js?v=1.12.5';
-import * as mermaidImport from './mermaid-import.js?v=1.12.5';
+import * as theme       from './theme.js?v=1.13.0';
+import * as icons       from './icons.js?v=1.13.0';
+import { getAllStencilSvgs } from './components.js?v=1.13.0';
+import * as shapes      from './shapes.js?v=1.13.0';
+import * as canvas      from './canvas.js?v=1.13.0';
+import * as stencil     from './stencil.js?v=1.13.0';
+import * as selection   from './selection.js?v=1.13.0';
+import * as history     from './history.js?v=1.13.0';
+import * as clipboard   from './clipboard.js?v=1.13.0';
+import * as templates    from './templates.js?v=1.13.0';
+import * as keyboard    from './keyboard.js?v=1.13.0';
+import * as toolbar     from './toolbar.js?v=1.13.0';
+import * as properties  from './properties.js?v=1.13.0';
+import * as persistence from './persistence.js?v=1.13.0';
+import * as tabs        from './tabs.js?v=1.13.0';
+import * as mermaidImport from './mermaid-import.js?v=1.13.0';
 
 // Clickjacking defence. `frame-ancestors` / `X-Frame-Options` cannot be sent
 // from a static GitHub Pages file, so the framing policy is enforced here.
@@ -58,6 +59,9 @@ async function main() {
   history.init(graph);
   clipboard.init(graph, paper, selection);
 
+  // Custom templates library (capture from multi-select, drop from stencil).
+  templates.init(graph, selection, history);
+
   const moduleRefs = {
     graph,
     paper,
@@ -65,6 +69,7 @@ async function main() {
     selection,
     history,
     clipboard,
+    templates,
     persistence,
     toolbar,
     theme,
@@ -86,6 +91,19 @@ async function main() {
   tabs.init(graph, paper, canvas, selection, history, persistence, stencil);
   tabs.setupAutoSave();
 
+  // Tag captured templates with the active diagram type (metadata only — the
+  // library is global, shown across every diagram type).
+  templates.setDiagramTypeGetter(() => tabs.getActiveTabType());
+
+  // Give persistence the templates API (read / export / merge-import) so the
+  // Export Manager + backup-reminder overlay can include templates without a
+  // circular import.
+  persistence.setTemplatesBackupApi({
+    getTemplates: templates.getTemplates,
+    exportFn: templates.exportTemplatesJSON,
+    importMerge: templates.importTemplatesArray,
+  });
+
   // --- Phase 7b: Mermaid import (needs tabs + canvas + graph) ---
   mermaidImport.init(moduleRefs);
 
@@ -94,6 +112,12 @@ async function main() {
 
   // --- Phase 9: Check for shared diagram in URL hash ---
   persistence.loadFromURL();
+
+  // --- Phase 9b: Periodic backup reminder ---
+  // Deferred (setTimeout 0), mirroring the storage-pressure gauge, so it never
+  // blocks first paint. Shows the "Backup your diagrams" overlay if it's been
+  // ≥7 days since the last export (or since first content, if never exported).
+  setTimeout(() => persistence.maybeShowBackupReminder(), 0);
 
   // --- Phase 10: beforeunload guard (Gap 21, v1.12.0) ---
   // Prevent silent data loss on ⌘R / browser close / back nav when any

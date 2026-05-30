@@ -1,8 +1,8 @@
 // Tabs — multi-diagram tab management
 // Each tab holds its own graph JSON, viewport, and undo/redo history.
 
-import { escHtml, APP_VERSION, classifyVersionDiff, normalizeDiagramType, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES } from './persistence.js?v=1.12.5';
-import { showError, showToast } from './feedback.js?v=1.12.5';
+import { escHtml, APP_VERSION, classifyVersionDiff, normalizeDiagramType, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES } from './persistence.js?v=1.13.0';
+import { showError, showToast } from './feedback.js?v=1.13.0';
 
 let graph, paper, canvasModule, selectionModule, historyModule, persistenceModule, stencilModule;
 let tabListEl;
@@ -80,6 +80,11 @@ export function init(_graph, _paper, _canvas, _selection, _history, _persistence
     // The new tab is now active — load the graph into it
     canvasModule.setLoadingJSON(true);
     try { graph.fromJSON(graphJSON); canvasModule.migrateLinks(); canvasModule.migrateNodes(); } finally { canvasModule.setLoadingJSON(false); }
+    // Loading content into a fresh tab IS a content event (markDirty is guarded
+    // by isLoadingJSON, so it won't have stamped) — record it as the modified
+    // time so imported / loaded / shared diagrams show a time like edited ones.
+    const loadedTab = tabs.find(t => t.id === id);
+    if (loadedTab) loadedTab.lastModifiedAt = Date.now();
     // Fit content to viewport after loading
     requestAnimationFrame(() => canvasModule.fitContent());
     // Persist immediately so the imported data survives a page refresh
@@ -250,7 +255,7 @@ export function newTab(name = 'Draft', diagramType = 'architecture') {
   saveCurrentTabState();
 
   const id = generateId();
-  tabs.push({ id, name, diagramType: normalizeDiagramType(diagramType), graphJSON: null, viewport: null, dirty: false, lastSavedAt: null, lastSaveType: null });
+  tabs.push({ id, name, diagramType: normalizeDiagramType(diagramType), graphJSON: null, viewport: null, dirty: false, lastSavedAt: null, lastSaveType: null, lastModifiedAt: null });
   activateTab(id, true);
   render();
   return id;
@@ -316,8 +321,8 @@ function showCloseConfirmModal(tabId, tabName) {
             <strong style="color:var(--text-primary)">${escHtml(tabName)}</strong> has unsaved changes that will be lost.
           </p>
         </div>
-        <div style="display:flex;gap:var(--spacing-sm);padding:var(--spacing-sm) var(--spacing-lg) var(--spacing-md);justify-content:flex-end">
-          <button class="sf-close-confirm__btn sf-close-confirm__btn--cancel">Cancel</button>
+        <div class="sf-modal__footer">
+          <button class="sf-close-confirm__btn sf-close-confirm__btn--cancel" style="margin-right:auto">Cancel</button>
           <button class="sf-close-confirm__btn sf-close-confirm__btn--save">Save and Close</button>
           <button class="sf-close-confirm__btn sf-close-confirm__btn--discard">Discard</button>
         </div>
@@ -367,6 +372,17 @@ function typeIconSvg(diagramType) {
   return `<svg class="sf-close-tabs__type-icon" viewBox="0 0 16 16" fill="currentColor">${inner}</svg>`;
 }
 
+/** Relative-time label ("just now" / "3m ago" / "2h ago" / "5d ago"); null when
+ *  there's no timestamp. Mirrors the Load modal's "Saved … ago". */
+function relTime(ts) {
+  if (!ts) return null;
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
 function showCloseTabsModal() {
   if (tabs.length === 0) return;
 
@@ -379,12 +395,16 @@ function showCloseTabsModal() {
   const rowsHtml = tabs.map(t => {
     const active = t.id === activeTabId ? ' (active)' : '';
     const typeLabel = DIAGRAM_TYPES[t.diagramType]?.short || 'Architecture';
+    const rel = relTime(t.lastModifiedAt || t.lastSavedAt);
     return `
       <label class="sf-close-tabs__row" data-tab-id="${escHtml(t.id)}">
         <input type="checkbox" class="sf-close-tabs__checkbox" data-tab-id="${escHtml(t.id)}" />
         ${typeIconSvg(t.diagramType)}
         ${t.dirty ? '<span class="sf-close-tabs__dirty" title="Unsaved changes"></span>' : ''}
-        <span class="sf-close-tabs__name">${escHtml(t.name)}${active}</span>
+        <div class="sf-close-tabs__info">
+          <span class="sf-close-tabs__name">${escHtml(t.name)}${active}</span>
+          ${rel ? `<span class="sf-close-tabs__meta">Modified ${rel}</span>` : ''}
+        </div>
         <span class="sf-close-tabs__badge">${escHtml(typeLabel)}</span>
       </label>`;
   }).join('');
@@ -394,6 +414,9 @@ function showCloseTabsModal() {
     <div class="sf-modal__dialog">
       <div class="sf-modal__header">
         <h2 class="sf-modal__title">Close Multiple Tabs</h2>
+        <button class="sf-toolbar__button sf-close-tabs__close" aria-label="Close">
+          <svg class="sf-toolbar__icon" aria-hidden="true"><use href="#close"></use></svg>
+        </button>
       </div>
       <div class="sf-modal__body" style="padding:var(--spacing-md) var(--spacing-lg)">
         <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm)">
@@ -407,17 +430,18 @@ function showCloseTabsModal() {
           ${rowsHtml}
         </div>
       </div>
-      <div style="display:flex;gap:var(--spacing-sm);padding:var(--spacing-sm) var(--spacing-lg) var(--spacing-md);justify-content:flex-end">
-        <button class="sf-close-tabs__btn" data-action="cancel">Cancel</button>
-        <button class="sf-close-tabs__btn sf-close-tabs__btn--primary" data-action="close" disabled>Close Selected</button>
+      <div class="sf-modal__footer">
+        <button class="sf-close-tabs__btn sf-close-tabs__btn--primary" data-action="close" style="margin-left:auto" disabled>Close Selected</button>
       </div>
     </div>`;
 
   document.body.appendChild(overlay);
 
-  const close = () => overlay.remove();
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  document.addEventListener('keydown', onKey);
   overlay.querySelector('.sf-modal__overlay').addEventListener('click', close);
-  overlay.querySelector('[data-action="cancel"]').addEventListener('click', close);
+  overlay.querySelector('.sf-close-tabs__close').addEventListener('click', close);
 
   const selectAllEl = overlay.querySelector('[data-role="select-all"]');
   const rowBoxes = Array.from(overlay.querySelectorAll('.sf-close-tabs__checkbox[data-tab-id]'));
@@ -505,9 +529,9 @@ function showMultiDiscardConfirm(dirtyCount, onDiscard, onSaveAndClose) {
           <strong style="color:var(--text-primary)">${dirtyCount}</strong> of the selected tabs ${dirtyCount === 1 ? 'has' : 'have'} unsaved changes. Save to Browser Storage first, or close without saving?
         </p>
       </div>
-      <div style="display:flex;gap:var(--spacing-sm);padding:var(--spacing-sm) var(--spacing-lg) var(--spacing-md);justify-content:flex-end">
-        <button class="sf-close-tabs__btn" data-action="cancel">Cancel</button>
-        <button class="sf-close-tabs__btn" data-action="save">Save and Close</button>
+      <div class="sf-modal__footer">
+        <button class="sf-close-tabs__btn" data-action="cancel" style="margin-right:auto">Cancel</button>
+        <button class="sf-close-tabs__btn sf-close-tabs__btn--save" data-action="save">Save and Close</button>
         <button class="sf-close-tabs__btn sf-close-tabs__btn--primary" data-action="confirm">Close Anyway</button>
       </div>
     </div>`;
@@ -553,7 +577,14 @@ export function getActiveTabType() {
 
 export function markDirty() {
   const tab = tabs.find(t => t.id === activeTabId);
-  if (tab && !tab.dirty) {
+  if (!tab) return;
+  // Stamp the modified time on REAL edits only — the change handler also fires
+  // during fromJSON loads / tab switches (guarded by canvas isLoadingJSON), and
+  // those must not count as "modified".
+  if (!canvasModule.isLoadingJSON?.()) {
+    tab.lastModifiedAt = Date.now();
+  }
+  if (!tab.dirty) {
     tab.dirty = true;
     render();
   }
@@ -602,6 +633,8 @@ export function getAllTabs() {
     diagramType: t.diagramType,
     isActive: t.id === activeTabId,
     dirty: t.dirty,
+    lastModifiedAt: t.lastModifiedAt || null,
+    lastSavedAt: t.lastSavedAt || null,
   }));
 }
 
@@ -691,6 +724,7 @@ function saveTabs() {
       dirty: t.dirty,
       lastSavedAt: t.lastSavedAt || null,
       lastSaveType: t.lastSaveType || null,
+      lastModifiedAt: t.lastModifiedAt || null,
       graphJSON: t.id === activeTabId ? graph.toJSON() : t.graphJSON,
       viewport: t.id === activeTabId ? canvasModule.getViewport() : t.viewport,
     }));
@@ -767,12 +801,17 @@ function doRestoreTabData(data) {
         dirty: t.dirty || (!t.lastSavedAt && t.graphJSON?.cells?.length > 0) || false,
         lastSavedAt: t.lastSavedAt || null,
         lastSaveType: t.lastSaveType || null,
+        // Persisted modified time wins; else fall back to the save time; else,
+        // for a content-bearing tab from before this field existed, stamp now
+        // (one-time migration — persisted on the next save, so it won't reset).
+        lastModifiedAt: t.lastModifiedAt || t.lastSavedAt
+          || (t.graphJSON?.cells?.length > 0 ? Date.now() : null),
       });
     }
     activeTabId = data.activeTabId || tabs[0].id;
   } else {
     const id = generateId();
-    tabs.push({ id, name: 'Draft', diagramType: 'architecture', graphJSON: null, viewport: null, dirty: false, lastSavedAt: null, lastSaveType: null });
+    tabs.push({ id, name: 'Draft', diagramType: 'architecture', graphJSON: null, viewport: null, dirty: false, lastSavedAt: null, lastSaveType: null, lastModifiedAt: null });
     activeTabId = id;
   }
 
@@ -834,7 +873,7 @@ function restoreTabs() {
     console.warn('SF Diagrams: Tab restore failed:', err);
     if (tabs.length === 0) {
       const id = generateId();
-      tabs.push({ id, name: 'Draft', diagramType: 'architecture', graphJSON: null, viewport: null, dirty: false, lastSavedAt: null, lastSaveType: null });
+      tabs.push({ id, name: 'Draft', diagramType: 'architecture', graphJSON: null, viewport: null, dirty: false, lastSavedAt: null, lastSaveType: null, lastModifiedAt: null });
       activeTabId = id;
     }
   }
@@ -911,7 +950,9 @@ function showSessionVersionWarning(savedVersion, diff) {
             const sessionData = JSON.parse(raw);
             const sessionTabs = sessionData.tabs || [];
             const d = new Date();
-            const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+            // YYYY-MM-DD (consistent with persistence.dateSuffix() and the
+            // Save-modal name suffix) for the per-tab session backup filenames.
+            const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
             for (const tab of sessionTabs) {
               if (!tab.graphJSON) continue;
               const backupData = {

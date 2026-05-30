@@ -292,3 +292,138 @@ export function confirmModal(opts) {
 export function showError(message, opts = {}) {
   return showToast(message, 'error', { duration: 4000, ...opts });
 }
+
+// ── Prompt modal (single text input) ──────────────────────────────
+
+/**
+ * Single-line text-input modal — the input-bearing sibling of confirmModal.
+ * Used where the app needs one short string from the user (e.g. naming a
+ * custom pattern) without falling back to the native, unstyled `prompt()`.
+ * Reuses the `.sf-modal` / `.sf-confirm-modal` structure + focus trap so it
+ * looks and behaves like every other dialog.
+ *
+ * @param {object} opts
+ * @param {string} opts.title                Heading text.
+ * @param {string|Node} [opts.message]       Body above the input. A string is
+ *                  set via textContent (XSS-safe); a DOM Node is appended as-is
+ *                  (caller is responsible for building it safely).
+ * @param {string} [opts.label]              Field label (plain).
+ * @param {string} [opts.defaultValue='']    Pre-filled value (selected on open).
+ * @param {string} [opts.placeholder='']
+ * @param {string} [opts.okLabel='Save']
+ * @param {string} [opts.cancelLabel='Cancel']
+ * @param {number} [opts.maxLength=80]
+ * @param {boolean} [opts.allowEmpty=false]  When false (default), an empty
+ *                  submit resolves to null (treated as cancel). When true, an
+ *                  empty submit resolves to '' so the caller can apply its own
+ *                  fallback — only real cancel/escape/overlay return null.
+ * @param {boolean} [opts.requireValue=false]  When true, the primary button is
+ *                  disabled (and Enter is gated) until the field is non-empty.
+ *
+ * @returns {Promise<string|null>}  Trimmed value on confirm; null on cancel /
+ *                                  escape / overlay-click (and on empty submit
+ *                                  unless `allowEmpty` is set, where it's '').
+ */
+export function promptModal(opts) {
+  const {
+    title,
+    message = '',
+    label = '',
+    defaultValue = '',
+    placeholder = '',
+    okLabel = 'Save',
+    cancelLabel = 'Cancel',
+    maxLength = 80,
+    allowEmpty = false,
+    requireValue = false,
+  } = opts || {};
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'sf-modal sf-confirm-modal sf-prompt-modal';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.style.zIndex = '10002';
+
+    const prevFocus = document.activeElement;
+    const titleId = `sf-prompt-title-${Math.random().toString(36).slice(2, 8)}`;
+    const inputId = `sf-prompt-input-${Math.random().toString(36).slice(2, 8)}`;
+    overlay.setAttribute('aria-labelledby', titleId);
+
+    overlay.innerHTML = `
+      <div class="sf-modal__overlay"></div>
+      <div class="sf-modal__dialog sf-confirm-modal__dialog">
+        <div class="sf-modal__header">
+          <h2 id="${titleId}" class="sf-modal__title"></h2>
+        </div>
+        <div class="sf-modal__body sf-confirm-modal__body">
+          <p class="sf-prompt-modal__message"></p>
+          <label class="sf-prompt-modal__label" for="${inputId}"></label>
+          <input id="${inputId}" type="text" class="sf-prompt-modal__input" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="sf-modal__footer sf-confirm-modal__footer">
+          <button class="sf-modal__btn sf-confirm-modal__cancel"></button>
+          <button class="sf-modal__btn sf-modal__btn--primary sf-confirm-modal__ok"></button>
+        </div>
+      </div>
+    `;
+    overlay.querySelector('.sf-modal__title').textContent = title || '';
+    const msgEl = overlay.querySelector('.sf-prompt-modal__message');
+    if (message instanceof Node) msgEl.appendChild(message);
+    else if (message) msgEl.textContent = message;
+    else msgEl.remove();
+    const labelEl = overlay.querySelector('.sf-prompt-modal__label');
+    if (label) labelEl.textContent = label; else labelEl.remove();
+    overlay.querySelector('.sf-confirm-modal__ok').textContent = okLabel;
+    overlay.querySelector('.sf-confirm-modal__cancel').textContent = cancelLabel;
+
+    const input = overlay.querySelector('.sf-prompt-modal__input');
+    input.value = defaultValue;
+    input.maxLength = maxLength;
+    if (placeholder) input.placeholder = placeholder;
+
+    document.body.appendChild(overlay);
+
+    // onEscape is invoked later, by which time `finish` is assigned.
+    const releaseTrap = trapFocus(overlay, { onEscape: () => finish(null) });
+
+    const finish = (value) => {
+      releaseTrap();
+      overlay.remove();
+      if (prevFocus && typeof prevFocus.focus === 'function') {
+        try { prevFocus.focus(); } catch { /* element may be gone */ }
+      }
+      resolve(value);
+    };
+
+    const okBtn = overlay.querySelector('.sf-confirm-modal__ok');
+
+    // Empty input resolves to null (treated as cancel) unless `allowEmpty` is
+    // set, in which case it resolves to '' so the caller can apply a fallback.
+    // When `requireValue` is set, an empty submit is blocked outright.
+    const submit = () => {
+      const v = input.value.trim();
+      if (v === '' && requireValue) return;
+      finish(v === '' ? (allowEmpty ? '' : null) : v);
+    };
+
+    okBtn.addEventListener('click', submit);
+    overlay.querySelector('.sf-confirm-modal__cancel').addEventListener('click', () => finish(null));
+    overlay.querySelector('.sf-modal__overlay').addEventListener('click', () => finish(null));
+    input.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Enter') { evt.preventDefault(); submit(); }
+    });
+
+    // requireValue — keep the primary button disabled until the field is
+    // non-empty (Enter is gated in submit() too).
+    if (requireValue) {
+      input.required = true;  // drives the CSS red-empty / blue-filled border
+      const refreshOk = () => { okBtn.disabled = input.value.trim() === ''; };
+      input.addEventListener('input', refreshOk);
+      refreshOk();
+    }
+
+    // Focus + select the default so the user can type over it immediately.
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  });
+}

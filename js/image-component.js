@@ -1,4 +1,4 @@
-import { showError } from './feedback.js?v=1.12.5';
+import { showError } from './feedback.js?v=1.13.0';
 
 // Image component — consent modal, file picker, and auto-resize for sf.Image.
 //
@@ -167,13 +167,13 @@ function showImageConsentModal(callback) {
           Adding image components will <strong>disable URL sharing</strong> for this diagram while images are present.
         </p>
         <p style="margin:0 0 12px;color:var(--text-secondary);line-height:1.5;font-size:var(--font-size-sm)">
-          Other download options (Save to JSON, PNG, WEBP) stay available, but file sizes will grow with each image. Remove every image to re-enable URL sharing.
+          Other download options (Export to JSON, PNG, WEBP) stay available, but file sizes will grow with each image. Remove every image to re-enable URL sharing.
         </p>
         <p style="margin:0;color:var(--text-secondary);line-height:1.5;font-size:var(--font-size-sm)">
           When you continue you'll be asked to pick an image file. Supported formats: <strong>PNG, JPG, WEBP, GIF</strong>. Large images are automatically resized.
         </p>
       </div>
-      <div class="sf-modal__footer" style="justify-content:flex-end;gap:8px;padding:12px 20px">
+      <div class="sf-modal__footer" style="gap:8px;padding:12px 20px">
         <button class="sf-modal__btn" data-action="cancel">Cancel</button>
         <button class="sf-modal__btn sf-modal__btn--primary" data-action="confirm">Pick image</button>
       </div>

@@ -7,7 +7,7 @@
 ```json
 {
   "version": 1,
-  "appVersion": "1.12.5",
+  "appVersion": "1.13.0",
   "timestamp": 1712700000000,
   "title": "My Diagram",
   "diagramType": "architecture",
@@ -24,7 +24,7 @@
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `version` | number | Yes | Always `1` |
-| `appVersion` | string | Yes | Semver string, currently `"1.12.5"` |
+| `appVersion` | string | Yes | Semver string, currently `"1.13.0"` |
 | `timestamp` | number | No | Unix timestamp in milliseconds |
 | `title` | string | Yes | Diagram name (shown as tab title) |
 | `diagramType` | string | Yes | One of: `"architecture"`, `"process"`, `"datamodel"`, `"org"`, `"gantt"`, `"sequence"`. **Must match the shapes you use** (see [Diagram Types](#diagram-types)). Aliases `"data"`/`"organisation"` are accepted but the canonical forms are `"datamodel"` and `"org"` |
@@ -32,6 +32,34 @@
 | `viewport` | object | No | Pan/zoom state. Omit to auto-fit on load |
 
 > ⚠️ **Always set `diagramType` to match the shapes in the diagram.** If it is missing or wrong, the diagram opens as an architecture tab — the sequence-specific Auto Layout, the data-model stencil, the Gantt timeline controls, etc. are gated on the tab type and will be unavailable until the tab is recreated. Pick the type from the table below **before** choosing shapes.
+
+> For generating an importable diagram, prefer the **single-diagram** envelope
+> above — it opens as a new tab. Two multi-element container formats also import
+> (produced by the app's Export Manager), but you normally won't generate them:
+>
+> ```json
+> { "schema": "diagramforce-export", "version": 1, "appVersion": "1.13.0", "exportedAt": 1712700000000,
+>   "diagrams": [ { "name": "...", "diagramType": "architecture", "graph": { "cells": [] }, "viewport": null, "appVersion": "1.13.0" } ],
+>   "templates": [ { "name": "...", "diagramType": "architecture", "cells": [] } ] }
+> ```
+>
+> Each `diagrams[]` entry MAY carry its own optional `appVersion` (open-tab
+> exports stamp the current version; named-save exports keep the version stored
+> with the save). On re-import a diagram keeps that original version
+> (`entry.appVersion || bundle.appVersion || current`) instead of being
+> re-stamped as current, so its provenance survives a backup round-trip.
+>
+> On import, a `diagramforce-export` bundle dedups its entries against what's
+> already present (exact-content matches are skipped; name clashes with different
+> content get `"(Restored)"`), then saves the surviving `diagrams[]` to the
+> browser and merges `templates[]` into the Templates library; both keys are
+> optional. **Load → Load from Browser opens whenever the file contained any
+> `diagrams[]` — even if all were duplicates** — so a re-imported backup still
+> reveals where the diagrams live (toast distinguishes newly-restored from
+> already-present). A
+> `diagramforce-templates` file (`{ "schema": "diagramforce-templates",
+> "templates": [...] }`) merges templates only. Each template's `cells` is a
+> JointJS subgraph (elements + links), same cell grammar as `graph.cells`.
 
 ## Diagram Types
 
@@ -459,7 +487,7 @@ Raster image embedded directly into the diagram via a `data:` URI. Available in 
 - The `image/href` is a `data:` URI. Uploads from the property panel are auto-resized to max 1280 px on the long edge and re-encoded as WEBP at quality 0.85 (PNG fallback in browsers without WEBP encoding).
 - SVG uploads are rejected (security: SVG can carry scripts). Allowed input formats: PNG, JPG, WEBP, GIF.
 - The `image/style` clip-path keeps the rendered raster inside the rounded body; if you change `body/rx` and `body/ry`, change the `inset(0 round Npx)` value to match.
-- **URL sharing is disabled when any `sf.Image` cell is in the active tab.** Image bytes blow past every messaging-app URL-length limit; the Save → Share-as-URL menu item disables itself reactively. Use Save → Save to JSON to share image-laden diagrams.
+- **URL sharing is disabled when any `sf.Image` cell is in the active tab.** Image bytes blow past every messaging-app URL-length limit; the Save → Share-as-URL menu item disables itself reactively. Use Save → Export to JSON to share image-laden diagrams.
 
 No ports.
 
@@ -1307,7 +1335,7 @@ A simple 3-node architecture with one container:
 ```json
 {
   "version": 1,
-  "appVersion": "1.12.5",
+  "appVersion": "1.13.0",
   "timestamp": 1712700000000,
   "title": "Simple Architecture",
   "diagramType": "architecture",
@@ -1463,7 +1491,7 @@ Two related Salesforce objects with ER notation:
 ```json
 {
   "version": 1,
-  "appVersion": "1.12.5",
+  "appVersion": "1.13.0",
   "timestamp": 1712700000000,
   "title": "Account-Contact ERD",
   "diagramType": "datamodel",
@@ -1583,7 +1611,7 @@ A two-participant sync exchange with an activation box and an `alt` fragment. Me
 ```json
 {
   "version": 1,
-  "appVersion": "1.12.5",
+  "appVersion": "1.13.0",
   "title": "Account Lookup",
   "diagramType": "sequence",
   "graph": {

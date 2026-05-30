@@ -1,10 +1,10 @@
 // Toolbar — wires all button clicks to module actions
 // Also keeps undo/redo button states in sync
 
-import { diagramHasImage } from './image-component.js?v=1.12.5';
-import { showToast, showError, confirmModal, trapFocus } from './feedback.js?v=1.12.5';
-import { resizeDataObjectToFit } from './templates.js?v=1.12.5';
-import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, isConnectorGroupingEnabled, setConnectorGroupingEnabled, rerouteAllLinks, isCrossingBumpsEnabled, setCrossingBumpsEnabled, isFocusDimmingEnabled, setFocusDimmingEnabled } from './canvas.js?v=1.12.5';
+import { diagramHasImage } from './image-component.js?v=1.13.0';
+import { showToast, showError, confirmModal, trapFocus } from './feedback.js?v=1.13.0';
+import { resizeDataObjectToFit } from './components.js?v=1.13.0';
+import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, isConnectorGroupingEnabled, setConnectorGroupingEnabled, rerouteAllLinks, isCrossingBumpsEnabled, setCrossingBumpsEnabled, isFocusDimmingEnabled, setFocusDimmingEnabled } from './canvas.js?v=1.13.0';
 
 let modules = {};
 
@@ -14,7 +14,7 @@ export function init(_modules) {
   // Save dropdown
   setupDropdown('btn-save');
   btn('btn-save-browser').addEventListener('click', () => showSaveModal());
-  btn('btn-save-json').addEventListener('click', () => modules.persistence.exportJSON());
+  btn('btn-save-json').addEventListener('click', () => showExportModal());
   btn('btn-save-png').addEventListener('click', () => {
     if (document.getElementById('paper')?.classList.contains('sf-animate-flow')) {
       modules.persistence.exportGIF(false);
@@ -33,21 +33,25 @@ export function init(_modules) {
   btn('btn-save-webp-t').addEventListener('click', () => modules.persistence.exportWEBP(true));
   btn('btn-save-share').addEventListener('click', () => modules.persistence.shareAsURL());
   document.getElementById('btn-share-url').addEventListener('click', () => modules.persistence.shareAsURL());
+  // (Templates are now exported/imported through the general Export/Import-to-JSON
+  // manager — no dedicated menu items.)
 
   // Share-as-URL is unavailable while the diagram contains image cells —
   // embedded image bytes blow past every messaging/chat URL-length limit.
   // We mirror the state on the dropdown menu item (with explanatory tooltip)
   // and also gate inside `persistence.shareAsURL` for the keyboard shortcut /
   // hamburger entry.
-  const SHARE_DISABLED_MSG = 'URL sharing is unavailable while this diagram contains images. Use Save → Save to JSON to share, or remove every image to re-enable URL sharing.';
+  const SHARE_DISABLED_MSG = 'URL sharing is unavailable while this diagram contains images. Use Save → Export to JSON to share, or remove every image to re-enable URL sharing.';
   const EMPTY_DIAGRAM_MSG = 'Add a shape to enable export.';
   const GIF_ENCODING_MSG = 'Wait until the current GIF export finishes.';
   // Save-dropdown items that depend on the diagram having content. Each is
   // disabled when the active graph is empty so the user can't click into a
   // failure modal — replaces the old alert('Diagram is empty…') path.
   // Save-to-Browser is intentionally left enabled (an empty "Untitled" save
-  // is still a valid checkpoint to come back to later).
-  const EXPORT_BTN_IDS = ['btn-save-json', 'btn-save-png', 'btn-save-png-t',
+  // is still a valid checkpoint to come back to later). "Export to JSON" is
+  // also NOT gated — it opens the Export Manager, which can export named saves
+  // and templates even when the active canvas is empty.
+  const EXPORT_BTN_IDS = ['btn-save-png', 'btn-save-png-t',
     'btn-save-webp', 'btn-save-webp-t'];
   const refreshShareAvailability = () => {
     const isEmpty = !modules.graph || modules.graph.getCells().length === 0;
@@ -86,6 +90,9 @@ export function init(_modules) {
 
   // Wire save modal callback so persistence.namedSave() can also open it
   modules.persistence.setShowSaveModal(() => showSaveModal());
+  // Wire Load-from-Browser modal so a bundle import can reveal the restored
+  // diagrams (persistence opens it after saving them to localStorage).
+  modules.persistence.setShowLoadModal?.((importStats) => showLoadModal(importStats));
 
   // Load dropdown
   setupDropdown('btn-load');
@@ -468,55 +475,133 @@ function setupDropdown(triggerId) {
 
 // --- Load Modal ---
 
-function showLoadModal() {
+/**
+ * Build the inline import-summary copy shown at the top of the Load modal right
+ * after a bundle import. Leads with diagrams (this modal lists diagrams); a
+ * trailing clause covers templates, which land in the stencil, not this list.
+ */
+function formatImportSummary({ imported = 0, skipped = 0, templates = 0, templatesSkipped = 0 } = {}) {
+  const noun = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  // "Import complete" whenever ANYTHING new landed — including templates-only
+  // (a template added IS something new, so "Nothing new" would be wrong).
+  const head = (imported || templates) ? 'Import complete:' : 'Nothing new to import:';
+  const items = [];
+  if (imported)         items.push(`${noun(imported, 'diagram')} saved`);
+  if (skipped)          items.push(`${noun(skipped, 'diagram')} skipped - already opened or saved in this browser`);
+  if (templates)        items.push(`${noun(templates, 'template')} saved`);
+  if (templatesSkipped) items.push(`${noun(templatesSkipped, 'template')} skipped - already in your stencil`);
+  const lis = items.map(i => `<li>${i}</li>`).join('');
+  return `<strong class="sf-import-summary__head">${head}</strong><ul class="sf-import-summary__list">${lis}</ul>`;
+}
+
+// `importStats` (optional) is passed by persistence right after a bundle import
+// — { imported, skipped, templates, templatesSkipped } — to render a transient
+// summary banner. It's absent on every normal open (and on the post-delete
+// rebuild), so the banner is naturally temporary.
+function showLoadModal(importStats = null) {
   const saves = modules.persistence.getNamedSaves();
   const bodyEl = document.getElementById('load-modal-list');
   bodyEl.innerHTML = '';
   // Clean up any previous footer
   document.querySelector('.sf-modal__footer--load')?.remove();
 
+  // Transient import summary — sits at the very top, above the advisory, only
+  // when we arrived here straight from an import. Green success variant.
+  if (importStats && (importStats.imported || importStats.skipped || importStats.templates || importStats.templatesSkipped)) {
+    const summary = document.createElement('div');
+    summary.className = 'sf-modal__advisory sf-modal__advisory--success sf-import-summary';
+    summary.innerHTML = formatImportSummary(importStats);
+    bodyEl.appendChild(summary);
+  }
+
   // Persistence advisory — browsers can clear localStorage under storage
   // pressure, on profile reset, or via privacy settings. Saves are kept for
   // 90 days; for permanent storage, users should export to JSON.
   const advisory = document.createElement('p');
   advisory.className = 'sf-modal__advisory';
-  advisory.textContent = 'Browsers may periodically clear this list. For permanent storage, always Export as JSON.';
+  advisory.innerHTML = 'Browsers may periodically clear this list. For permanent storage, always <button type="button" class="sf-modal__advisory-link">Export to JSON</button>.';
+  advisory.querySelector('.sf-modal__advisory-link').addEventListener('click', () => {
+    hideLoadModal();      // close this overlay first…
+    showExportModal();    // …then open Export to JSON
+  });
   bodyEl.appendChild(advisory);
 
-  if (saves.length === 0) {
+  if (!saves || saves.length === 0) {
+    // Empty state — NO Select-all / list box / footer, just a clear message.
     const empty = document.createElement('p');
     empty.className = 'sf-modal__empty';
-    empty.textContent = 'No saved diagrams found.';
+    empty.textContent = 'No saved diagrams yet. Save a diagram to the browser and it will appear here.';
     bodyEl.appendChild(empty);
   } else {
-    for (const save of saves) {
-      bodyEl.appendChild(buildLoadItem(save));
-    }
+    // Bordered list box (mirrors Close-Tabs): Select-all header + rows.
+    const box = document.createElement('div');
+    box.className = 'sf-modal__list-box';
 
-    // Footer with select-all + Load Selected
+    const header = document.createElement('div');
+    header.className = 'sf-modal__list-header';
+    header.innerHTML = `<label class="sf-modal__select-all"><input type="checkbox" class="sf-modal__check-all"> Select all</label>`;
+    box.appendChild(header);
+
+    for (const save of saves) {
+      box.appendChild(buildLoadItem(save));
+    }
+    bodyEl.appendChild(box);
+
+    // Footer: Delete Selected (left, danger) + Load Selected (right, primary).
     const dialog = bodyEl.closest('.sf-modal__dialog');
     const footer = document.createElement('div');
     footer.className = 'sf-modal__footer sf-modal__footer--load';
     footer.innerHTML = `
-      <label class="sf-modal__select-all">
-        <input type="checkbox" class="sf-modal__check-all"> Select all
-      </label>
+      <button class="sf-modal__btn sf-modal__btn--danger sf-modal__delete-btn" disabled>Delete Selected</button>
       <button class="sf-modal__btn sf-modal__btn--primary sf-modal__action-btn" disabled>Load Selected</button>
     `;
     dialog.appendChild(footer);
 
-    wireSelectAll(bodyEl, footer, '.sf-modal__row-check', async () => {
-      const selected = [...bodyEl.querySelectorAll('.sf-modal__row-check:checked')];
-      for (const chk of selected) {
-        await modules.persistence.loadNamedSave(chk.dataset.saveKey);
-      }
+    const checkAll = header.querySelector('.sf-modal__check-all');
+    const loadBtn = footer.querySelector('.sf-modal__action-btn');
+    const delBtn = footer.querySelector('.sf-modal__delete-btn');
+    const rowChecks = () => [...bodyEl.querySelectorAll('.sf-modal__row-check')];
+    const refresh = () => {
+      const cs = rowChecks();
+      const any = cs.some(c => c.checked);
+      const all = cs.length > 0 && cs.every(c => c.checked);
+      loadBtn.disabled = !any;
+      delBtn.disabled = !any;
+      checkAll.checked = all;
+      checkAll.indeterminate = any && !all;
+    };
+    checkAll.addEventListener('change', () => { rowChecks().forEach(c => { c.checked = checkAll.checked; }); refresh(); });
+    bodyEl.addEventListener('change', (e) => { if (e.target.matches('.sf-modal__row-check')) refresh(); });
+
+    loadBtn.addEventListener('click', async () => {
+      const sel = rowChecks().filter(c => c.checked);
+      for (const chk of sel) await modules.persistence.loadNamedSave(chk.dataset.saveKey);
       hideLoadModal();
     });
+
+    delBtn.addEventListener('click', async () => {
+      const sel = rowChecks().filter(c => c.checked);
+      if (sel.length === 0) return;
+      const ok = await confirmModal({
+        title: 'Delete saved diagrams?',
+        message: `Delete ${sel.length} saved diagram${sel.length === 1 ? '' : 's'} from this browser? This can't be undone.`,
+        okLabel: 'Delete',
+        tone: 'danger',
+      });
+      if (!ok) return;
+      for (const chk of sel) modules.persistence.deleteNamedSave(chk.dataset.saveKey);
+      showLoadModal(); // rebuild the list (deleted entries gone); modal stays open
+    });
+
+    refresh();
   }
 
   const el = document.getElementById('load-modal');
   el.classList.remove('sf-modal--hidden');
   document.body.classList.add('sf-modal-open');
+  // Release any prior trap first — showLoadModal re-runs itself after a bulk
+  // delete to rebuild the list, and we must not stack focus traps.
+  _loadTrapRelease?.();
   _loadTrapRelease = trapFocus(el, { onEscape: hideLoadModal });
 }
 
@@ -562,9 +647,12 @@ function showSaveModal() {
   document.querySelector('.sf-save-modal')?.remove();
 
   const allTabs = modules.tabs.getAllTabs();
+  // ISO-style YYYY-MM-DD suffix (e.g. "Draft 2026-05-30") — readable, and
+  // matches the export filename date format. uniqueSaveName's strip/regex logic
+  // treats the hyphens literally, so it stays collision-safe.
   const dateSuffix = (() => {
     const d = new Date();
-    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   })();
 
   const overlay = document.createElement('div');
@@ -575,13 +663,19 @@ function showSaveModal() {
   // Collect existing save names to avoid duplicates
   const existingSaves = new Set(modules.persistence.getNamedSaves().map(s => s.name));
 
+  const saveTypeLabel = (type) => (modules.tabs.DIAGRAM_TYPES?.[type]?.short) || 'Architecture';
   const tabRows = allTabs.map(tab => {
     const defaultName = uniqueSaveName(tab.name, dateSuffix, existingSaves);
+    const rel = formatRelativeTime(tab.lastModifiedAt || tab.lastSavedAt);
     return `
       <div class="sf-modal__row${tab.isActive ? ' sf-modal__row--active' : ''}">
         <input type="checkbox" class="sf-modal__row-check" data-tab-id="${tab.id}" ${tab.isActive ? 'checked' : ''}>
         <span class="sf-modal__row-icon">${getDiagramTypeIcon(tab.diagramType)}</span>
-        <input type="text" class="sf-modal__row-name" data-tab-id="${tab.id}" value="${escHtml(defaultName)}" spellcheck="false">
+        <div class="sf-modal__row-info sf-save-modal__row-info">
+          <input type="text" class="sf-modal__row-name" data-tab-id="${tab.id}" value="${escHtml(defaultName)}" spellcheck="false">
+          ${rel ? `<span class="sf-modal__row-meta">Modified ${rel}</span>` : ''}
+        </div>
+        <span class="sf-modal__row-badge">${escHtml(saveTypeLabel(tab.diagramType))}</span>
       </div>`;
   }).join('');
 
@@ -595,14 +689,16 @@ function showSaveModal() {
         </button>
       </div>
       <div class="sf-modal__body sf-modal__row-list">
-        <p class="sf-modal__advisory">Browsers may periodically clear this list. For permanent storage, always Export as JSON.</p>
-        ${tabRows}
+        <p class="sf-modal__advisory">Browsers may periodically clear this list. For permanent storage, always <button type="button" class="sf-modal__advisory-link">Export to JSON</button>.</p>
+        <div class="sf-modal__list-box">
+          <div class="sf-modal__list-header">
+            <label class="sf-modal__select-all"><input type="checkbox" class="sf-modal__check-all"> Select all</label>
+          </div>
+          ${tabRows}
+        </div>
       </div>
       <div class="sf-modal__footer">
-        <label class="sf-modal__select-all">
-          <input type="checkbox" class="sf-modal__check-all"> Select all
-        </label>
-        <button class="sf-modal__btn sf-modal__btn--primary sf-modal__action-btn">Save Selected</button>
+        <button class="sf-modal__btn sf-modal__btn--primary sf-modal__action-btn" style="margin-left:auto">Save Selected</button>
       </div>
     </div>
   `;
@@ -613,6 +709,12 @@ function showSaveModal() {
   const close = () => overlay.remove();
   overlay.querySelector('.sf-save-modal__backdrop').addEventListener('click', close);
   overlay.querySelector('.sf-save-modal__close').addEventListener('click', close);
+
+  // Advisory CTA — close this overlay, then open Export to JSON.
+  overlay.querySelector('.sf-modal__advisory-link')?.addEventListener('click', () => {
+    close();
+    showExportModal();
+  });
   const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
   document.addEventListener('keydown', onKey);
 
@@ -640,6 +742,7 @@ function showSaveModal() {
         name,
         timestamp: Date.now(),
         version: 1,
+        appVersion: modules.persistence.APP_VERSION,
         diagramType,
         graph: graphJSON,
         viewport,
@@ -703,8 +806,7 @@ function showSequenceAutoLayoutConfirm(plan, onConfirm) {
         <div class="sf-modal__row-list">${rows}</div>
       </div>
       <div class="sf-modal__footer">
-        <button class="sf-modal__btn sf-seq-autolayout-cancel">Cancel</button>
-        <button class="sf-modal__btn sf-modal__btn--primary sf-seq-autolayout-apply">Apply Auto Layout</button>
+        <button class="sf-modal__btn sf-modal__btn--primary sf-seq-autolayout-apply" style="margin-left:auto">Apply Auto Layout</button>
       </div>
     </div>
   `;
@@ -715,7 +817,6 @@ function showSequenceAutoLayoutConfirm(plan, onConfirm) {
   document.addEventListener('keydown', onKey);
   overlay.querySelector('.sf-save-modal__backdrop').addEventListener('click', close);
   overlay.querySelector('.sf-save-modal__close').addEventListener('click', close);
-  overlay.querySelector('.sf-seq-autolayout-cancel').addEventListener('click', close);
   overlay.querySelector('.sf-seq-autolayout-apply').addEventListener('click', () => {
     close();
     onConfirm();
@@ -759,9 +860,8 @@ function showMermaidImportModal() {
           <span data-type="sequence"><strong>sequenceDiagram</strong> → Sequence</span>.
         </p>
       </div>
-      <div class="sf-modal__footer" style="justify-content:flex-end;gap:8px">
-        <button class="sf-modal__btn sf-mermaid-modal__cancel">Cancel</button>
-        <button class="sf-modal__btn sf-modal__btn--primary sf-mermaid-modal__import" disabled>Load</button>
+      <div class="sf-modal__footer" style="gap:8px">
+        <button class="sf-modal__btn sf-modal__btn--primary sf-mermaid-modal__import" style="margin-left:auto" disabled>Load</button>
       </div>
     </div>
   `;
@@ -782,7 +882,6 @@ function showMermaidImportModal() {
 
   overlay.querySelector('.sf-modal__overlay').addEventListener('click', close);
   overlay.querySelector('.sf-mermaid-modal__close').addEventListener('click', close);
-  overlay.querySelector('.sf-mermaid-modal__cancel').addEventListener('click', close);
 
   const resetSpans = () => {
     supportedSpans.forEach(s => {
@@ -846,11 +945,149 @@ function showMermaidImportModal() {
   setTimeout(() => input.focus(), 50);
 }
 
+/** Export Manager — pick which diagrams (open tabs + named saves) and/or the
+ *  Templates library to export. The active diagram is pre-selected, so the
+ *  common "export current diagram" path is just one extra click. 1 element →
+ *  native single-diagram / templates file; 2+ → a `diagramforce-export` bundle.
+ *  A Select-All export resets the backup-reminder clock. */
+function showExportModal() {
+  document.querySelector('.sf-export-modal')?.remove();
+
+  const allTabs = modules.tabs.getAllTabs();
+  const namedSaves = modules.persistence.getNamedSaves();
+  const templateCount = modules.templates.getTemplates().length;
+
+  // Human label for the right-accessory type badge (e.g. "Process", "Data Model").
+  const typeLabel = (type) => (modules.tabs.DIAGRAM_TYPES?.[type]?.short) || 'Architecture';
+
+  const tabRows = allTabs.map(t => {
+    const rel = formatRelativeTime(t.lastModifiedAt || t.lastSavedAt);
+    return `
+    <div class="sf-modal__row${t.isActive ? ' sf-modal__row--active' : ''}">
+      <input type="checkbox" class="sf-modal__row-check" data-kind="tab" data-id="${escHtml(t.id)}" ${t.isActive ? 'checked' : ''}>
+      <span class="sf-modal__row-icon">${getDiagramTypeIcon(t.diagramType)}</span>
+      <div class="sf-modal__row-info">
+        <span class="sf-modal__row-label">${escHtml(t.name)}</span>
+        <span class="sf-modal__row-meta">${t.isActive ? 'current diagram' : 'open tab'}${rel ? ` · modified ${rel}` : ''}</span>
+      </div>
+      <span class="sf-modal__row-badge">${escHtml(typeLabel(t.diagramType))}</span>
+    </div>`;
+  }).join('');
+
+  const saveRows = namedSaves.map(s => {
+    const rel = formatRelativeTime(s.timestamp);
+    return `
+    <div class="sf-modal__row">
+      <input type="checkbox" class="sf-modal__row-check" data-kind="save" data-id="${escHtml(s.key)}">
+      <span class="sf-modal__row-icon">${getDiagramTypeIcon(s.diagramType)}</span>
+      <div class="sf-modal__row-info">
+        <span class="sf-modal__row-label">${escHtml(s.name)}</span>
+        <span class="sf-modal__row-meta">saved in browser${rel ? ` · ${rel}` : ''}</span>
+      </div>
+      <span class="sf-modal__row-badge">${escHtml(typeLabel(s.diagramType))}</span>
+    </div>`;
+  }).join('');
+
+  const templatesRow = templateCount > 0 ? `
+    <div class="sf-modal__row">
+      <input type="checkbox" class="sf-modal__row-check" data-kind="templates">
+      <span class="sf-modal__row-icon"><svg class="sf-toolbar__icon" aria-hidden="true"><use href="#file"></use></svg></span>
+      <div class="sf-modal__row-info">
+        <span class="sf-modal__row-label">Templates</span>
+        <span class="sf-modal__row-meta">custom template library</span>
+      </div>
+      <span class="sf-modal__row-badge">${templateCount}</span>
+    </div>` : '';
+
+  const fmtBackupAdvisory = () => {
+    const lb = modules.persistence.getLastBackupAt();
+    return lb
+      ? `Last full backup: ${new Date(lb).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}.`
+      : 'No full backup yet — use Back up now to back up everything.';
+  };
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sf-export-modal sf-modal';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.innerHTML = `
+    <div class="sf-modal__overlay sf-export-modal__backdrop"></div>
+    <div class="sf-modal__dialog sf-save-modal__dialog">
+      <div class="sf-modal__header">
+        <h2 class="sf-modal__title">Export to JSON</h2>
+        <button class="sf-toolbar__button sf-export-modal__close" aria-label="Close">
+          <svg class="sf-toolbar__icon"><use href="#close"></use></svg>
+        </button>
+      </div>
+      <div class="sf-modal__body sf-modal__row-list">
+        <div class="sf-modal__advisory sf-export-modal__advisory">
+          <span class="sf-export-modal__advisory-text"></span>
+          <button class="sf-modal__btn sf-export-modal__backup-now">Back up now</button>
+        </div>
+        <div class="sf-modal__list-box">
+          <div class="sf-modal__list-header">
+            <label class="sf-modal__select-all"><input type="checkbox" class="sf-modal__check-all"> Select all</label>
+          </div>
+          ${tabRows}${saveRows}${templatesRow}
+        </div>
+      </div>
+      <div class="sf-modal__footer">
+        <button class="sf-modal__btn sf-modal__btn--primary sf-modal__action-btn" style="margin-left:auto" disabled>Export Selected</button>
+      </div>
+    </div>`;
+  const advisoryText = overlay.querySelector('.sf-export-modal__advisory-text');
+  advisoryText.textContent = fmtBackupAdvisory(); // textContent — safe
+
+  document.body.appendChild(overlay);
+
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  overlay.querySelector('.sf-export-modal__backdrop').addEventListener('click', close);
+  overlay.querySelector('.sf-export-modal__close').addEventListener('click', close);
+
+  // "Back up now" — full backup of everything (resets the reminder clock); the
+  // advisory date updates in place. The modal stays open. On success the button
+  // flashes a brand-green "✓ Backed up!" for a beat, then reverts to the amber
+  // outline (same affordance as the share "✓ Copied!" button).
+  const backupNowBtn = overlay.querySelector('.sf-export-modal__backup-now');
+  let backupRevertTimer = null;
+  backupNowBtn.addEventListener('click', () => {
+    if (!modules.persistence.exportEverything()) return;
+    advisoryText.textContent = fmtBackupAdvisory();
+    backupNowBtn.classList.add('is-backed');
+    backupNowBtn.textContent = '✓ Backed up!';
+    clearTimeout(backupRevertTimer);
+    backupRevertTimer = setTimeout(() => {
+      backupNowBtn.classList.remove('is-backed');
+      backupNowBtn.textContent = 'Back up now';
+    }, 2000);
+  });
+
+  const bodyEl = overlay.querySelector('.sf-modal__body');
+  const footer = overlay.querySelector('.sf-modal__footer');
+
+  wireSelectAll(bodyEl, footer, '.sf-modal__row-check', () => {
+    const checks = [...overlay.querySelectorAll('.sf-modal__row-check')];
+    const checked = checks.filter(c => c.checked);
+    if (checked.length === 0) return;
+    const tabIds = checked.filter(c => c.dataset.kind === 'tab').map(c => c.dataset.id);
+    const saveKeys = checked.filter(c => c.dataset.kind === 'save').map(c => c.dataset.id);
+    const includeTemplates = checked.some(c => c.dataset.kind === 'templates');
+    // Full backup = every row ticked (Select-All) → resets the reminder clock.
+    const markBackup = checks.length > 0 && checks.every(c => c.checked);
+    modules.persistence.exportSelection({ tabIds, saveKeys, includeTemplates }, { markBackup });
+    close();
+  });
+}
+
 // --- Shared modal helpers ---
 
-/** Wire up select-all checkbox + action button for any modal with row checkboxes. */
+/** Wire up select-all checkbox + action button for any modal with row checkboxes.
+ *  The check-all can live in the list header (top) or the footer; the action
+ *  button is in the footer. */
 function wireSelectAll(bodyEl, footerEl, checkSelector, onAction) {
-  const checkAll = footerEl.querySelector('.sf-modal__check-all');
+  const checkAll = bodyEl.querySelector('.sf-modal__check-all') || footerEl.querySelector('.sf-modal__check-all');
   const actionBtn = footerEl.querySelector('.sf-modal__action-btn');
 
   function update() {
@@ -963,13 +1200,13 @@ function buildLoadItem(save) {
     });
     if (ok) {
       modules.persistence.deleteNamedSave(save.key);
-      item.remove();
       showToast(`Deleted "${save.name}"`, 'success');
-      const list = document.getElementById('load-modal-list');
-      if (list.children.length === 0) {
-        list.innerHTML = '<p class="sf-modal__empty">No saved diagrams found.</p>';
-        document.querySelector('.sf-modal__footer--load')?.remove();
-      }
+      // Full rebuild (same as "Delete Selected") so the empty state renders
+      // correctly when the last save goes. The old inline path did
+      // `item.remove()` + `if (list.children.length === 0)`, but the body always
+      // also holds the advisory + Select-all header, so that count was never 0
+      // — leaving a headerful, rowless modal with no "no saves" message.
+      showLoadModal();
     }
   });
 
@@ -983,15 +1220,20 @@ function buildLoadItem(save) {
   return item;
 }
 
-function formatSaveMeta(save) {
-  const now = Date.now();
-  const ageSec = Math.floor((now - save.timestamp) / 1000);
-  let savedAgo;
-  if (ageSec < 60) savedAgo = 'just now';
-  else if (ageSec < 3600) savedAgo = `${Math.floor(ageSec / 60)}m ago`;
-  else if (ageSec < 86400) savedAgo = `${Math.floor(ageSec / 3600)}h ago`;
-  else savedAgo = `${Math.floor(ageSec / 86400)}d ago`;
+/** Relative-time label ("just now" / "3m ago" / "2h ago" / "5d ago"); null when
+ *  there's no timestamp. Shared by the Save/Export modal "Modified …" meta and
+ *  the Load modal's "Saved …". */
+function formatRelativeTime(ts) {
+  if (!ts) return null;
+  const ageSec = Math.floor((Date.now() - ts) / 1000);
+  if (ageSec < 60) return 'just now';
+  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
+  if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
+  return `${Math.floor(ageSec / 86400)}d ago`;
+}
 
+function formatSaveMeta(save) {
+  const savedAgo = formatRelativeTime(save.timestamp) || 'just now';
   const daysLeft = Math.ceil(save.expiresIn / (24 * 60 * 60 * 1000));
   const expiryStr = daysLeft <= 7
     ? `expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`

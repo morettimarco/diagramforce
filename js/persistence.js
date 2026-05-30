@@ -1,16 +1,22 @@
 // Persistence — named saves, JSON import/export, PNG/GIF export
 // (Auto-save is handled by the tabs module now.)
 
-import { GIFEncoder, quantize, applyPalette } from '../assets/vendor/gifenc.esm.js?v=1.12.5';
-import { encodeShareV1, decodeShareV1 } from './share-codec.js?v=1.12.5';
-import { diagramHasImage } from './image-component.js?v=1.12.5';
-import { showToast, showError, confirmModal, trapFocus } from './feedback.js?v=1.12.5';
+import { GIFEncoder, quantize, applyPalette } from '../assets/vendor/gifenc.esm.js?v=1.13.0';
+import { encodeShareV1, decodeShareV1 } from './share-codec.js?v=1.13.0';
+import { diagramHasImage } from './image-component.js?v=1.13.0';
+import { showToast, showError, confirmModal, trapFocus } from './feedback.js?v=1.13.0';
 
 let graph, paper, canvasModule;
 const NAMED_SAVE_PREFIX = 'sfdiag::save::';
 const SAVE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
-const APP_VERSION = '1.12.5';
+const APP_VERSION = '1.13.0';
 export { APP_VERSION };
+
+// ── Backup reminder (periodic "export a backup" overlay) ────────────
+const BACKUP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const LAST_BACKUP_KEY    = 'sfdiag::lastBackupAt';     // ms of last export-to-disk
+const LAST_REMINDER_KEY  = 'sfdiag::lastBackupReminderAt'; // ms the overlay was last shown
+const FIRST_CONTENT_KEY  = 'sfdiag::firstContentAt';   // ms of earliest stored diagram/template
 
 // Maximum number of cells to accept from external sources (share URLs, JSON import)
 const MAX_CELL_COUNT = 2000;
@@ -47,7 +53,7 @@ const ALLOWED_CELL_TYPES = new Set([
   'standard.Link',
 ]);
 
-function sanitizeGraphJSON(graphData) {
+export function sanitizeGraphJSON(graphData) {
   if (!graphData || !Array.isArray(graphData.cells)) return graphData;
   if (graphData.cells.length > MAX_CELL_COUNT) {
     throw new Error(`Diagram exceeds maximum element count (${MAX_CELL_COUNT}).`);
@@ -143,9 +149,19 @@ export function setTabViewportGetter(cb) { getTabViewportCallback = cb; }
 let getTabDiagramTypeCallback = null;
 export function setTabDiagramTypeGetter(cb) { getTabDiagramTypeCallback = cb; }
 
+// Templates module API (injected to avoid a circular import — templates.js
+// imports persistence.js, not vice versa). { getTemplates, exportFn }.
+let templatesBackupApi = null;
+export function setTemplatesBackupApi(api) { templatesBackupApi = api; }
+
 // Callback to show save modal (set by toolbar)
 let showSaveModalCallback = null;
 export function setShowSaveModal(cb) { showSaveModalCallback = cb; }
+
+// Callback to show the Load-from-Browser modal (set by toolbar) — used after a
+// bundle import to reveal where the restored diagrams landed.
+let showLoadModalCallback = null;
+export function setShowLoadModal(cb) { showLoadModalCallback = cb; }
 
 export function init(_graph, _paper, _canvas) {
   graph = _graph;
@@ -153,13 +169,32 @@ export function init(_graph, _paper, _canvas) {
   canvasModule = _canvas;
 }
 
-/** YYYYMMDD date string for filenames */
-function dateSuffix() {
+/** YYYY-MM-DD date string — the single source for every automatic date suffix
+ *  in the app (export filenames, single-diagram/PNG/SVG/GIF downloads, the
+ *  export bundle). Readable and ISO-ordered. */
+export function dateSuffix() {
   const d = new Date();
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
-  return `${y}${m}${day}`;
+  return `${y}-${m}-${day}`;
+}
+
+/** Stable (sorted-key) stringify — order-independent, so two structurally
+ *  identical objects hash the same. Backs import dedup. */
+function stableStringify(v) {
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  if (v && typeof v === 'object') {
+    return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+  }
+  return JSON.stringify(v === undefined ? null : v);
+}
+
+/** Content signature of a cell array (a diagram's `graph.cells` or a template's
+ *  `cells`). Two imports with the same signature are exact duplicates. Exported
+ *  so templates.js shares identical dedup logic. */
+export function contentSignature(cells) {
+  return stableStringify(cells || []);
 }
 
 /** Compare semver strings. Returns -1 if a<b, 0 if equal, 1 if a>b */
@@ -470,6 +505,33 @@ export function getStorageFootprint() {
  */
 export const STORAGE_WARNING_BYTES = 4_000_000;
 
+/**
+ * Ask the browser to mark this origin's storage bucket as **persistent** so it
+ * is exempt from automatic eviction — both storage-pressure clearing and
+ * Safari's idle (≈7-day no-interaction) eviction. Covers the whole origin
+ * bucket, which includes `localStorage` (named saves, custom templates, theme).
+ *
+ * Best-effort and idempotent: returns immediately `true` if already persistent,
+ * `null` if the API is unavailable or the call throws, otherwise the browser's
+ * grant decision. Grant is heuristic — Chrome/Firefox favour installed-PWA /
+ * bookmarked / engaged origins (Diagramforce is an installable PWA, so its
+ * installed users are exactly the grant target); Safari rarely grants for
+ * non-home-screen sites. Because the grant is never guaranteed, this is one
+ * layer of defence — the JSON backup (Save/Load Templates) is the unconditional
+ * one. Firefox may surface a permission prompt, so callers should invoke this
+ * from a meaningful user gesture (e.g. right after saving a template) rather
+ * than blindly on load.
+ */
+export async function requestPersistentStorage() {
+  try {
+    if (!navigator.storage?.persist) return null;
+    if (await navigator.storage.persisted()) return true;
+    return await navigator.storage.persist();
+  } catch {
+    return null;
+  }
+}
+
 export function getNamedSaves() {
   const saves = [];
   const now = Date.now();
@@ -532,23 +594,242 @@ export const saveJSON = namedSave;
 
 // --- Import / Export ---
 
-export function exportJSON() {
-  const diagramType = getDiagramTypeCallback ? getDiagramTypeCallback() : 'architecture';
-  const tabName = getTabNameCallback ? getTabNameCallback() : 'sf-diagram';
-  const data = {
+/** Build the canonical single-diagram file object (drop-in export shape). */
+function buildSingleDiagram(name, diagramType, graphJSON, viewport) {
+  return {
     version: 1,
     appVersion: APP_VERSION,
     timestamp: Date.now(),
-    title: tabName,
+    title: name,
     diagramType,
-    graph: graph.toJSON(),
-    viewport: canvasModule.getViewport(),
+    graph: graphJSON,
+    viewport: viewport || null,
   };
+}
+
+function downloadSingleDiagram(name, diagramType, graphJSON, viewport) {
+  const data = buildSingleDiagram(name, diagramType, graphJSON, viewport);
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const safeName = tabName.replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'sf-diagram';
+  const safeName = (name || 'diagram').replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'diagram';
   triggerDownload(URL.createObjectURL(blob), `${safeName}_${dateSuffix()}.json`);
+}
+
+/** One-click export of the ACTIVE diagram (kept for the keyboard / programmatic
+ *  path). NOT a full backup, so it does not reset the reminder clock. */
+export function exportJSON() {
+  const diagramType = getDiagramTypeCallback ? getDiagramTypeCallback() : 'architecture';
+  const tabName = getTabNameCallback ? getTabNameCallback() : 'sf-diagram';
+  downloadSingleDiagram(tabName, diagramType, graph.toJSON(), canvasModule.getViewport());
   if (onSaveCompleteCallback) onSaveCompleteCallback('json');
   showToast('JSON downloaded ✓', 'success');
+}
+
+/** Record a FULL backup (Select-All export, or the reminder overlay's Export) —
+ *  resets the backup-reminder clock. Partial / single / templates-only exports
+ *  deliberately do NOT call this (per the "scoped to Select-All / overlay"
+ *  rule). */
+export function markBackedUp() {
+  try { localStorage.setItem(LAST_BACKUP_KEY, String(Date.now())); } catch { /* ignore */ }
+}
+
+/** ms of the last full backup, or 0 if never (shown in the Export Manager). */
+export function getLastBackupAt() {
+  return +localStorage.getItem(LAST_BACKUP_KEY) || 0;
+}
+
+/** Read a named save's diagram payload by key, or null if missing/corrupt. */
+function readNamedSave(key) {
+  try {
+    const data = JSON.parse(localStorage.getItem(key));
+    if (!data?.graph) return null;
+    return {
+      name: data.name || key.replace(NAMED_SAVE_PREFIX, ''),
+      diagramType: data.diagramType || 'architecture',
+      graph: data.graph,
+      viewport: data.viewport || null,
+    };
+  } catch { return null; }
+}
+
+/**
+ * Export a user-chosen selection (Export Manager). Format adapts to the count so
+ * common cases stay drop-in compatible:
+ *   - 1 diagram, no templates → single-diagram file (`<name>_<date>.json`)
+ *   - templates only          → templates file (`diagramforce_templates_<date>.json`)
+ *   - 2+ elements             → `diagramforce-export` bundle (`diagramforce_export_<date>.json`)
+ * A "Templates" selection counts as ONE element (the whole library). Named saves
+ * whose name matches an included open tab are deduped (the tab is the live copy).
+ * `markBackup` (Select-All export, or the reminder overlay) resets the reminder
+ * clock. Returns true on a successful download.
+ */
+export function exportSelection({ tabIds = [], saveKeys = [], includeTemplates = false } = {}, { markBackup = false } = {}) {
+  try {
+    const diagrams = [];
+    const tabs = getAllTabsCallback ? getAllTabsCallback() : [];
+    const tabById = new Map(tabs.map(t => [t.id, t]));
+    for (const id of tabIds) {
+      const t = tabById.get(id); if (!t) continue;
+      const g = getTabGraphCallback ? getTabGraphCallback(id) : null;
+      if (!g || !Array.isArray(g.cells) || g.cells.length === 0) continue; // skip empty drafts
+      diagrams.push({
+        name: t.name,
+        diagramType: getTabDiagramTypeCallback ? getTabDiagramTypeCallback(id) : 'architecture',
+        graph: g,
+        viewport: getTabViewportCallback ? getTabViewportCallback(id) : null,
+        appVersion: APP_VERSION,   // stamp so the diagram's version round-trips on re-import
+      });
+    }
+    const tabNames = new Set(diagrams.map(d => d.name));
+    for (const key of saveKeys) {
+      const d = readNamedSave(key);
+      if (!d || tabNames.has(d.name)) continue; // dedup vs an included open tab
+      diagrams.push(d);
+    }
+    const templates = includeTemplates ? (templatesBackupApi?.getTemplates?.() || []) : [];
+
+    if (diagrams.length === 0 && templates.length === 0) {
+      showToast('Nothing selected to export.', 'warning');
+      return false;
+    }
+
+    let ok = true;
+    if (diagrams.length === 1 && templates.length === 0) {
+      const d = diagrams[0];
+      downloadSingleDiagram(d.name, d.diagramType, d.graph, d.viewport);
+      showToast(`Exported "${d.name}" ✓`, 'success');
+    } else if (diagrams.length === 0 && templates.length > 0) {
+      ok = !!(templatesBackupApi?.exportFn?.());   // templates-only → templates file
+    } else {
+      const payload = { schema: 'diagramforce-export', version: 1, appVersion: APP_VERSION, exportedAt: Date.now() };
+      if (diagrams.length) payload.diagrams = diagrams;
+      if (templates.length) payload.templates = templates;
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      triggerDownload(URL.createObjectURL(blob), `diagramforce_export_${dateSuffix()}.json`);
+      const parts = [];
+      if (diagrams.length) parts.push(`${diagrams.length} diagram${diagrams.length === 1 ? '' : 's'}`);
+      if (templates.length) parts.push(`${templates.length} template${templates.length === 1 ? '' : 's'}`);
+      showToast(`Exported ${parts.join(' + ')} ✓`, 'success');
+    }
+    if (ok && markBackup) markBackedUp();
+    return ok;
+  } catch (err) {
+    console.warn('SF Diagrams: export failed', err);
+    showToast('Could not export.', 'error');
+    return false;
+  }
+}
+
+/** Export EVERYTHING (all non-empty tabs + named saves + templates) as a full
+ *  backup. Used by the reminder overlay's single "Export" button. */
+export function exportEverything() {
+  const tabIds = (getAllTabsCallback ? getAllTabsCallback() : []).map(t => t.id);
+  const saveKeys = getNamedSaves().map(s => s.key);
+  const includeTemplates = (templatesBackupApi?.getTemplates?.() || []).length > 0;
+  return exportSelection({ tabIds, saveKeys, includeTemplates }, { markBackup: true });
+}
+
+/** True when there's at least one non-empty open tab or named browser save. */
+function backupHasDiagrams() {
+  const tabs = getAllTabsCallback ? getAllTabsCallback() : [];
+  const tabHasContent = tabs.some(t => {
+    const g = getTabGraphCallback ? getTabGraphCallback(t.id) : null;
+    return g && Array.isArray(g.cells) && g.cells.length > 0;
+  });
+  return tabHasContent || getNamedSaves().length > 0;
+}
+
+/** Earliest moment the user had any diagram/template — the reminder anchor when
+ *  they've never backed up. Cached in localStorage; derived (for existing users
+ *  with no recorded value) from the earliest named-save / template timestamp,
+ *  falling back to now. */
+function getFirstContentAt(templates) {
+  let v = +localStorage.getItem(FIRST_CONTENT_KEY) || 0;
+  if (v) return v;
+  let earliest = Infinity;
+  for (const s of getNamedSaves()) if (s.timestamp) earliest = Math.min(earliest, s.timestamp);
+  for (const t of (templates || [])) if (t.createdAt) earliest = Math.min(earliest, t.createdAt);
+  if (!Number.isFinite(earliest)) earliest = Date.now();
+  try { localStorage.setItem(FIRST_CONTENT_KEY, String(earliest)); } catch { /* ignore */ }
+  return earliest;
+}
+
+/**
+ * Boot check (run deferred via setTimeout(0), like the storage-pressure gauge):
+ * show the backup reminder if it's been ≥7 days since the last export — or, if
+ * the user has never exported, ≥7 days since their first diagram/template — AND
+ * a reminder hasn't already been shown in the last 7 days (so dismissing it
+ * without backing up doesn't re-pop every boot). No-ops if there's nothing to
+ * back up. Never throws (must not block boot).
+ */
+export function maybeShowBackupReminder() {
+  try {
+    const templates = templatesBackupApi?.getTemplates?.() || [];
+    const hasTemplates = templates.length > 0;
+    const hasDiagrams = backupHasDiagrams();
+    if (!hasTemplates && !hasDiagrams) return; // nothing to lose → no nag
+
+    const now = Date.now();
+    const lastBackup   = +localStorage.getItem(LAST_BACKUP_KEY) || 0;
+    const lastReminder = +localStorage.getItem(LAST_REMINDER_KEY) || 0;
+
+    if (now - lastReminder < BACKUP_INTERVAL_MS) return; // cooldown
+    const since = lastBackup || getFirstContentAt(templates);
+    if (now - since < BACKUP_INTERVAL_MS) return;
+
+    try { localStorage.setItem(LAST_REMINDER_KEY, String(now)); } catch { /* ignore */ }
+    showBackupReminderModal();
+  } catch { /* never block boot */ }
+}
+
+/** The "Backup your diagrams" overlay. Close (left) + a single Export (right)
+ *  that exports EVERYTHING (all diagrams + templates) as a full backup. Export
+ *  turns brand-green "✓ Exported!" on success and the overlay auto-closes ~1s
+ *  later. */
+function showBackupReminderModal() {
+  if (document.querySelector('.sf-backup-modal')) return; // already open
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'sf-backup-modal';
+  const titleId = `sf-backup-title-${Math.random().toString(36).slice(2, 8)}`;
+  wrapper.innerHTML = `
+    <div class="sf-modal" style="z-index:3000" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
+      <div class="sf-modal__overlay"></div>
+      <div class="sf-modal__dialog" style="width:480px">
+        <div class="sf-modal__header">
+          <h2 id="${titleId}" class="sf-modal__title">Backup your diagrams</h2>
+          <button class="sf-toolbar__button sf-backup-modal__close" aria-label="Close">
+            <svg class="sf-toolbar__icon" aria-hidden="true"><use href="#close"></use></svg>
+          </button>
+        </div>
+        <div class="sf-modal__body" style="padding:var(--spacing-md) var(--spacing-lg)">
+          <p class="sf-backup-modal__msg" style="margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5"></p>
+        </div>
+        <div class="sf-modal__footer">
+          <button class="sf-close-confirm__btn sf-close-confirm__btn--save sf-backup-modal__btn" style="margin-left:auto">Export</button>
+        </div>
+      </div>
+    </div>`;
+  // textContent (not innerHTML) for the body copy — no interpolation risk.
+  wrapper.querySelector('.sf-backup-modal__msg').textContent =
+    "You've been using Diagramforce for a while! Since this app has no backend, your templates and diagrams live entirely in this browser. To ensure you never lose your work if your browser clears its cache, export a backup to your computer.";
+
+  document.body.appendChild(wrapper);
+
+  let releaseTrap;
+  const close = () => { releaseTrap?.(); wrapper.remove(); };
+  releaseTrap = trapFocus(wrapper, { onEscape: close });
+  wrapper.querySelector('.sf-modal__overlay').addEventListener('click', close);
+  wrapper.querySelector('.sf-backup-modal__close').addEventListener('click', close);
+
+  const exportBtn = wrapper.querySelector('.sf-backup-modal__btn');
+  exportBtn.addEventListener('click', () => {
+    if (exportBtn.classList.contains('is-backed')) return;
+    if (!exportEverything()) return; // nothing exported — leave as-is
+    exportBtn.classList.add('is-backed');
+    exportBtn.textContent = '✓ Exported!';
+    exportBtn.disabled = true;
+    setTimeout(close, 1000); // let the green state show for a beat, then close
+  });
 }
 
 export function importJSON() {
@@ -569,22 +850,172 @@ export function importJSON() {
   input.click();
 }
 
+/** Restore a bundled diagram as a named browser save (collision-safe name).
+ *  Non-destructive: doesn't touch open tabs — the diagram lands in
+ *  Load → Load from Browser. Sanitises the (untrusted) graph first. */
+/** Heal a legacy trailing " YYYYMMDD" name suffix to " YYYY-MM-DD" (only when the
+ *  8 digits parse as a plausible date) so backups exported BEFORE the hyphenated
+ *  date suffix landed read consistently after re-import. No-op otherwise. */
+function normalizeDateSuffix(name) {
+  return String(name || '').replace(/ (\d{4})(\d{2})(\d{2})$/, (full, y, mo, d) => {
+    const mm = +mo, dd = +d;
+    return (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) ? ` ${y}-${mo}-${d}` : full;
+  });
+}
+function restoreDiagramAsSave(name, diagramType, graphJSON, viewport, appVersion) {
+  if (!graphJSON) return false;
+  sanitizeGraphJSON(graphJSON);
+  const base = normalizeDateSuffix(String(name || 'Imported')).slice(0, 80) || 'Imported';
+  let finalName = base;
+  for (let n = 2; localStorage.getItem(NAMED_SAVE_PREFIX + finalName) !== null; n++) {
+    finalName = `${base} (${n})`;
+  }
+  try {
+    localStorage.setItem(NAMED_SAVE_PREFIX + finalName, JSON.stringify({
+      name: finalName,
+      timestamp: Date.now(),
+      diagramType: normalizeDiagramType(diagramType),
+      graph: graphJSON,
+      viewport: viewport || null,
+      // Preserve the diagram's original version so re-imports stay honest;
+      // fall back to the current app version when the source carried none.
+      appVersion: appVersion || APP_VERSION,
+    }));
+    return true;
+  } catch { return false; }
+}
+
+/** Content-signature + name sets of every existing diagram (open tabs + named
+ *  saves) — the dedup reference for an import. */
+function collectExistingDiagrams() {
+  const sigs = new Set();
+  const names = new Set();
+  for (const t of (getAllTabsCallback ? getAllTabsCallback() : [])) {
+    if (t.name) names.add(t.name);
+    const g = getTabGraphCallback ? getTabGraphCallback(t.id) : null;
+    if (g?.cells) sigs.add(contentSignature(g.cells));
+  }
+  for (const s of getNamedSaves()) {
+    names.add(s.name);
+    const d = readNamedSave(s.key);
+    if (d?.graph?.cells) sigs.add(contentSignature(d.graph.cells));
+  }
+  return { sigs, names };
+}
+
+/** Dedup + rename a bundle's diagrams against what already exists:
+ *   - exact content match (same `graph.cells`) → **skipped** (no duplicate)
+ *   - name match but different content → name gets **" (Restored)"**
+ *  Also dedups within the file, and sanitises each kept graph. Returns the
+ *  prepared `{name, diagramType, graph, viewport}` list to open or save. */
+function prepareImportedDiagrams(rawDiagrams) {
+  const { sigs, names } = collectExistingDiagrams();
+  const seen = new Set();
+  const out = [];
+  for (const d of rawDiagrams) {
+    const cells = d?.graph?.cells;
+    if (!Array.isArray(cells)) continue;
+    const sig = contentSignature(cells);
+    if (sigs.has(sig) || seen.has(sig)) continue;   // exact duplicate → skip
+    seen.add(sig);
+    sanitizeGraphJSON(d.graph);
+    let name = String(d.name || 'Imported').slice(0, 80) || 'Imported';
+    if (names.has(name)) name = `${name} (Restored)`;
+    names.add(name);
+    out.push({ name, diagramType: normalizeDiagramType(d.diagramType), graph: d.graph, viewport: d.viewport || null, appVersion: d.appVersion || null });
+  }
+  return out;
+}
+
 /**
- * Parse a JSON string and load it into a new tab (or fallback to current canvas).
- * Used by `importJSON` (file picker) and `pasteJSON` (textarea modal).
- * Returns true on success, false on parse/validation failure.
+ * Parse a JSON string and import it — handles every Diagramforce file format:
+ *   - `diagramforce-export` bundle (+ legacy `diagramforce-diagrams`): diagrams
+ *     are restored as named browser saves (then the Load-from-Browser modal
+ *     opens so the user sees them); templates merged into the library.
+ *   - `diagramforce-templates`: merged into the template library.
+ *   - single diagram (`{graph,…}`): opened as a new tab (the original behaviour).
+ * Used by `importJSON` (file picker) and `pasteJSON` (textarea modal). Returns
+ * true on success.
  */
 async function loadJSONText(jsonText, fallbackName) {
+  let data;
+  try { data = JSON.parse(jsonText); }
+  catch (err) { showError(`Failed to load ${fallbackName ? `"${fallbackName}"` : 'JSON'}: ${err.message}`); return false; }
+
+  const okVer = await checkVersionWarning(data.appVersion || null, data.title || fallbackName || 'Imported', data);
+  if (!okVer) return false;
+
+  const isBundle = data.schema === 'diagramforce-export' || data.schema === 'diagramforce-diagrams'
+    || (Array.isArray(data.diagrams) && !data.graph);
+  const isTemplatesOnly = !isBundle && (data.schema === 'diagramforce-templates'
+    || (Array.isArray(data.templates) && !data.graph && !Array.isArray(data.diagrams)));
+
+  // ── Bundle: dedup + rename, restore to browser saves, then SHOW the user ──
+  // Diagrams are saved to localStorage (not force-opened as tabs) and the
+  // Load-from-Browser modal is opened so the user sees exactly where their
+  // files landed and can pick what to open.
+  if (isBundle) {
+    const rawDiagrams = Array.isArray(data.diagrams) ? data.diagrams : [];
+    const rawTemplates = Array.isArray(data.templates) ? data.templates : [];
+    const diagrams = prepareImportedDiagrams(rawDiagrams);   // dedup + rename + sanitise
+
+    let saved = 0;
+    for (const d of diagrams) {
+      // Preserve each diagram's own version, else the bundle's, else current.
+      if (restoreDiagramAsSave(d.name, d.diagramType, d.graph, d.viewport, d.appVersion || data.appVersion)) saved++;
+    }
+    const tc = (rawTemplates.length && templatesBackupApi?.importMerge)
+      ? (templatesBackupApi.importMerge(rawTemplates) || 0) : 0;
+
+    // Import tally. "skipped" = file entries that did NOT become new saves
+    // because an exact content-copy is already open (as a tab) or saved here.
+    const stats = {
+      imported: saved,
+      skipped: Math.max(0, rawDiagrams.length - saved),
+      templates: tc,
+      templatesSkipped: Math.max(0, rawTemplates.length - tc),
+    };
+
+    // If the file carried diagrams, reveal the Load-from-Browser modal and let
+    // it render an inline import summary at the top. That modal is the right
+    // surface: the user is already looking there for their files, and the
+    // summary explains why one may be absent from the list (it's an open tab,
+    // or an exact duplicate). This replaces the fleeting toast for this path.
+    if (rawDiagrams.length && showLoadModalCallback) {
+      showLoadModalCallback(stats);
+      return true;
+    }
+
+    // Templates-only file (no modal to host the banner), or no modal wired →
+    // fall back to a toast.
+    if (saved || tc) {
+      const parts = [];
+      if (saved) parts.push(`${saved} diagram${saved === 1 ? '' : 's'}`);
+      if (tc) parts.push(`${tc} template${tc === 1 ? '' : 's'}`);
+      showToast(`Restored ${parts.join(' and ')} ✓`, 'success');
+    } else if (rawDiagrams.length || rawTemplates.length) {
+      showToast('Everything in this file is already in your browser.', 'info');
+    } else {
+      showToast('Nothing to import from this file.', 'warning');
+    }
+    return true;
+  }
+
+  // ── Templates-only file ──
+  if (isTemplatesOnly) {
+    if (!templatesBackupApi?.importMerge) { showError('Templates import is unavailable.'); return false; }
+    const n = templatesBackupApi.importMerge(data.templates || []) || 0;
+    if (n === 0) { showError('No valid templates found in that file.'); return false; }
+    showToast(`Imported ${n} template${n === 1 ? '' : 's'} ✓`, 'success');
+    return true;
+  }
+
+  // ── Single diagram → new tab (original behaviour) ──
   try {
-    const data = JSON.parse(jsonText);
-    const savedVer = data.appVersion || null;
     const name = data.title || fallbackName || 'Imported';
-    const ok = await checkVersionWarning(savedVer, name, data);
-    if (!ok) return false;
     if (data?.graph) sanitizeGraphJSON(data.graph);
     if (onImportCallback && data?.graph) {
-      const type = normalizeDiagramType(data.diagramType);
-      onImportCallback(name, type, data.graph, data.viewport);
+      onImportCallback(name, normalizeDiagramType(data.diagramType), data.graph, data.viewport);
     } else if (data?.graph) {
       canvasModule.setLoadingJSON(true);
       try { graph.fromJSON(data.graph); } finally { canvasModule.setLoadingJSON(false); }
@@ -628,12 +1059,11 @@ export function pasteJSON() {
           placeholder='{ "appVersion": "${APP_VERSION}", "diagramType": "architecture", "graph": { "cells": [...] } }'
           style="width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;padding:8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-panel);color:var(--text-primary);resize:vertical"></textarea>
         <p class="sf-paste-json-modal__status" style="margin:var(--spacing-sm) 0 0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5;min-height:1.4em">
-          Paste a diagram exported via <strong>Save → Save to JSON</strong> or generated using <a href="https://github.com/MateuszDabrowski/diagramforce/blob/main/DIAGRAM_JSON_SPEC.md" target="_blank" rel="noopener" style="color:var(--color-primary)">Diagram JSON Spec for LLMs</a>.
+          Paste a diagram exported via <strong>Save → Export to JSON</strong> or generated using <a href="https://github.com/MateuszDabrowski/diagramforce/blob/main/DIAGRAM_JSON_SPEC.md" target="_blank" rel="noopener" style="color:var(--color-primary)">Diagram JSON Spec for LLMs</a>.
         </p>
       </div>
-      <div class="sf-modal__footer" style="justify-content:flex-end;gap:8px">
-        <button class="sf-modal__btn sf-paste-json-modal__cancel">Cancel</button>
-        <button class="sf-modal__btn sf-modal__btn--primary sf-paste-json-modal__load" disabled>Load</button>
+      <div class="sf-modal__footer" style="gap:8px">
+        <button class="sf-modal__btn sf-modal__btn--primary sf-paste-json-modal__load" style="margin-left:auto" disabled>Load</button>
       </div>
     </div>
   `;
@@ -652,22 +1082,36 @@ export function pasteJSON() {
   releaseTrap = trapFocus(overlay, { onEscape: close });
   overlay.querySelector('.sf-modal__overlay').addEventListener('click', close);
   overlay.querySelector('.sf-paste-json-modal__close').addEventListener('click', close);
-  overlay.querySelector('.sf-paste-json-modal__cancel').addEventListener('click', close);
 
   const validate = () => {
     const text = input.value.trim();
     if (!text) {
       status.style.color = okColor;
-      status.innerHTML = 'Paste a diagram exported via <strong>Save → Save to JSON</strong> or generated using <a href="https://github.com/MateuszDabrowski/diagramforce/blob/main/DIAGRAM_JSON_SPEC.md" target="_blank" rel="noopener" style="color:var(--color-primary)">Diagram JSON Spec for LLMs</a>.';
+      status.innerHTML = 'Paste a diagram exported via <strong>Save → Export to JSON</strong> or generated using <a href="https://github.com/MateuszDabrowski/diagramforce/blob/main/DIAGRAM_JSON_SPEC.md" target="_blank" rel="noopener" style="color:var(--color-primary)">Diagram JSON Spec for LLMs</a>.';
       loadBtn.disabled = true;
       return;
     }
     try {
       const data = JSON.parse(text);
-      if (!data?.graph?.cells) throw new Error('Missing graph.cells field.');
+      // Accept any format loadJSONText handles: single diagram, export bundle,
+      // or templates file.
+      const isBundle = data?.schema === 'diagramforce-export' || data?.schema === 'diagramforce-diagrams' || Array.isArray(data?.diagrams);
+      const isTemplates = data?.schema === 'diagramforce-templates' || (Array.isArray(data?.templates) && !data?.graph && !Array.isArray(data?.diagrams));
+      let detected;
+      if (data?.graph?.cells) {
+        detected = `<strong>${escHtml(data.title || 'Untitled')}</strong> (${escHtml(normalizeDiagramType(data.diagramType))}, ${data.graph.cells.length} cells)`;
+      } else if (isBundle) {
+        const dN = Array.isArray(data.diagrams) ? data.diagrams.length : 0;
+        const tN = Array.isArray(data.templates) ? data.templates.length : 0;
+        detected = `Bundle — ${dN} diagram${dN === 1 ? '' : 's'}${tN ? `, ${tN} template${tN === 1 ? '' : 's'}` : ''}`;
+      } else if (isTemplates) {
+        const tN = Array.isArray(data.templates) ? data.templates.length : 0;
+        detected = `Templates — ${tN} template${tN === 1 ? '' : 's'}`;
+      } else {
+        throw new Error('Unrecognised format (no graph, diagrams, or templates).');
+      }
       status.style.color = okColor;
-      const t = normalizeDiagramType(data.diagramType);
-      status.innerHTML = `Detected: <strong>${escHtml(data.title || 'Untitled')}</strong> (${escHtml(t)}, ${data.graph.cells.length} cells)`;
+      status.innerHTML = `Detected: ${detected}`;
       loadBtn.disabled = false;
     } catch (err) {
       status.style.color = errColor;
@@ -1400,7 +1844,7 @@ function showShareModal(url, opts = {}) {
     ? `
         <div class="sf-share-modal__warning">
           <p style="margin:0 0 var(--spacing-sm);font-weight:600;color:var(--text-primary)">Diagrams containing images exceed URL size limits.</p>
-          <p style="margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">Please use Save → Save to JSON to share this diagram, or remove every image to re-enable URL sharing.</p>
+          <p style="margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">Please use Save → Export to JSON to share this diagram, or remove every image to re-enable URL sharing.</p>
         </div>`
     : `
         <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
@@ -1408,10 +1852,11 @@ function showShareModal(url, opts = {}) {
         </p>
         <input type="text" class="sf-share-modal__url" readonly aria-readonly="true" aria-label="Shareable diagram URL" spellcheck="false">`;
 
+  // Action modal: the top-right X is the dismiss. The warning variant has no
+  // action button, so it renders no footer at all (rather than an empty bar).
   const footerHtml = isWarning
-    ? `<button class="sf-close-confirm__btn sf-share-modal__close-btn">Close</button>`
-    : `<button class="sf-close-confirm__btn sf-share-modal__close-btn">Close</button>
-       <button class="sf-close-confirm__btn sf-close-confirm__btn--save sf-share-modal__copy-btn">Copy Link</button>`;
+    ? ''
+    : `<button class="sf-close-confirm__btn sf-close-confirm__btn--save sf-share-modal__copy-btn" style="margin-left:auto">Copy Link</button>`;
 
   wrapper.innerHTML = `
     <div class="sf-modal" style="z-index:3000">
@@ -1419,13 +1864,14 @@ function showShareModal(url, opts = {}) {
       <div class="sf-modal__dialog" style="width:520px">
         <div class="sf-modal__header">
           <h2 class="sf-modal__title">${isWarning ? 'Sharing unavailable' : 'Share Diagram'}</h2>
+          <button class="sf-toolbar__button sf-share-modal__close" aria-label="Close">
+            <svg class="sf-toolbar__icon" aria-hidden="true"><use href="#close"></use></svg>
+          </button>
         </div>
         <div class="sf-modal__body" style="padding:var(--spacing-md) var(--spacing-lg)">
           ${bodyHtml}
         </div>
-        <div style="display:flex;gap:var(--spacing-sm);padding:var(--spacing-sm) var(--spacing-lg) var(--spacing-md);justify-content:flex-end">
-          ${footerHtml}
-        </div>
+        ${footerHtml ? `<div class="sf-modal__footer" style="justify-content:flex-end">${footerHtml}</div>` : ''}
       </div>
     </div>`;
 
@@ -1433,7 +1879,7 @@ function showShareModal(url, opts = {}) {
 
   let releaseTrap;
   const close = () => { releaseTrap?.(); wrapper.remove(); };
-  wrapper.querySelector('.sf-share-modal__close-btn').addEventListener('click', close);
+  wrapper.querySelector('.sf-share-modal__close').addEventListener('click', close);
   wrapper.querySelector('.sf-modal__overlay').addEventListener('click', close);
   releaseTrap = trapFocus(wrapper, { onEscape: close });
 
@@ -1473,7 +1919,7 @@ function showShareModal(url, opts = {}) {
   setTimeout(() => urlInput.select(), 50);
 }
 
-function triggerDownload(url, filename) {
+export function triggerDownload(url, filename) {
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
