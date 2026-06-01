@@ -49,17 +49,6 @@ export function getAllIcons() {
   return iconRegistry;
 }
 
-export function searchIcons(query) {
-  const q = query.toLowerCase();
-  return iconRegistry.filter(icon =>
-    icon.name.toLowerCase().includes(q) ||
-    icon.category.toLowerCase().includes(q)
-  );
-}
-
-export function getIconsByCategory(category) {
-  return iconRegistry.filter(icon => icon.category === category);
-}
 
 export function getCategories() {
   // Include 'diagrams' if stencil icons have been registered
@@ -142,11 +131,6 @@ export function normalizeViewBoxes() {
   }
 
   svg.remove();
-}
-
-/** Return the normalized (cropped) viewBox for an icon, or empty string if not computed. */
-export function getNormalizedViewBox(iconId) {
-  return normalizedViewBoxes.get(iconId) || '';
 }
 
 // Generate a data URI for an SLDS icon to use as JointJS <image> href.

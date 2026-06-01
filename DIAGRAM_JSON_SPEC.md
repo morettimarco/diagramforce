@@ -7,7 +7,7 @@
 ```json
 {
   "version": 1,
-  "appVersion": "1.13.0",
+  "appVersion": "1.14.0",
   "timestamp": 1712700000000,
   "title": "My Diagram",
   "diagramType": "architecture",
@@ -24,7 +24,7 @@
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `version` | number | Yes | Always `1` |
-| `appVersion` | string | Yes | Semver string, currently `"1.13.0"` |
+| `appVersion` | string | Yes | Semver string, currently `"1.14.0"` |
 | `timestamp` | number | No | Unix timestamp in milliseconds |
 | `title` | string | Yes | Diagram name (shown as tab title) |
 | `diagramType` | string | Yes | One of: `"architecture"`, `"process"`, `"datamodel"`, `"org"`, `"gantt"`, `"sequence"`. **Must match the shapes you use** (see [Diagram Types](#diagram-types)). Aliases `"data"`/`"organisation"` are accepted but the canonical forms are `"datamodel"` and `"org"` |
@@ -38,8 +38,8 @@
 > (produced by the app's Export Manager), but you normally won't generate them:
 >
 > ```json
-> { "schema": "diagramforce-export", "version": 1, "appVersion": "1.13.0", "exportedAt": 1712700000000,
->   "diagrams": [ { "name": "...", "diagramType": "architecture", "graph": { "cells": [] }, "viewport": null, "appVersion": "1.13.0" } ],
+> { "schema": "diagramforce-export", "version": 1, "appVersion": "1.14.0", "exportedAt": 1712700000000,
+>   "diagrams": [ { "name": "...", "diagramType": "architecture", "graph": { "cells": [] }, "viewport": null, "appVersion": "1.14.0" } ],
 >   "templates": [ { "name": "...", "diagramType": "architecture", "cells": [] } ] }
 > ```
 >
@@ -66,7 +66,7 @@
 | Type | Use For | Primary Shapes |
 |------|---------|----------------|
 | `architecture` | System architecture, integrations | SimpleNode, Container, Zone, Note, TextLabel, Image |
-| `process` | BPMN workflows, flowcharts | BpmnEvent, BpmnTask, BpmnGateway, BpmnSubprocess, BpmnPool, Flow* shapes |
+| `process` | BPMN workflows, flowcharts | BpmnEvent, BpmnTask, BpmnGateway, BpmnSubprocess, BpmnLoop, BpmnPool, BpmnDataObject, Flow* shapes, Annotation |
 | `datamodel` | ERDs, Salesforce object models | DataObject |
 | `org` | Org charts, team structures, RACI workflows | OrgPerson, Container (Team), Zone, Task |
 | `gantt` | Project timelines | GanttTimeline, GanttTask, GanttMilestone, GanttGroup, GanttMarker |
@@ -244,7 +244,7 @@ Basic rounded-rect component node with optional icon and subtitle. The most comm
       "fontFamily": "system-ui, -apple-system, sans-serif",
       "fill": "var(--node-text)",
       "text": "My Node",
-      "textWrap": { "width": "calc(w - 64)", "maxLineCount": 2, "ellipsis": true }
+      "textWrap": { "width": "calc(w - 64)", "maxLineCount": 4, "ellipsis": true }
     },
     "subtitle": {
       "x": 12, "y": 42,
@@ -315,7 +315,7 @@ Group node with a coloured accent bar header. Can visually contain child element
       "fontFamily": "system-ui, -apple-system, sans-serif",
       "fill": "var(--node-subtitle)",
       "text": "",
-      "textWrap": { "width": "calc(w - 28)", "maxLineCount": 2, "ellipsis": true }
+      "textWrap": { "width": "calc(w - 28)", "maxLineCount": 4, "ellipsis": true }
     }
   },
   "ports": { /* standard 4-port config */ }
@@ -421,9 +421,12 @@ Post-it style sticky note.
   "z": 2000,
   "attrs": {
     "body": {
-      "width": "calc(w)", "height": "calc(h)",
-      "rx": 3, "ry": 3,
-      "fill": "#FFF9C4", "stroke": "#E8D44D", "strokeWidth": 1
+      "d": "M 0 0 L calc(w - 14) 0 L calc(w) 14 L calc(w) calc(h) L 0 calc(h) Z",
+      "fill": "#FFF9C4", "stroke": "#E8D44D", "strokeWidth": 1, "strokeLinejoin": "round"
+    },
+    "fold": {
+      "d": "M calc(w - 14) 0 L calc(w - 14) 14 L calc(w) 14 Z",
+      "fill": "#EDD56A", "stroke": "#E8D44D", "strokeWidth": 1, "strokeLinejoin": "round"
     },
     "icon": { "x": 10, "y": 10, "width": 20, "height": 20, "href": "" },
     "label": {
@@ -493,7 +496,7 @@ No ports.
 
 ### sf.Line
 
-Decorative horizontal line separator. Available in all diagram types.
+Decorative horizontal line separator with an optional caption. Available in all diagram types.
 
 **Default size:** `200 x 8`
 
@@ -513,16 +516,25 @@ Decorative horizontal line separator. Available in all diagram types.
     "line": {
       "x1": 0, "y1": "calc(0.5 * h)", "x2": "calc(w)", "y2": "calc(0.5 * h)",
       "stroke": "var(--text-muted)", "strokeWidth": 2, "strokeLinecap": "round"
+    },
+    "label": {
+      "text": "", "fontSize": 13,
+      "fontFamily": "system-ui, -apple-system, sans-serif",
+      "fill": "var(--text-secondary)"
     }
   }
 }
 ```
 
+**`attrs.label.text`** (since v1.14.0) — optional caption rendered above the line's left edge, left-aligned. Empty by default. Supports the same inline markdown as Notes (`**bold**`, `*italic*`, `~~strike~~`, `` `code` ``); underscores are literal (not italic). When set it paints via a `<foreignObject>`, and a transparent hit rect sized to the caption makes it clickable/selectable.
+
 **`lineStyle`** — `"solid"` (default), `"dashed"`, `"dotted"`, or `"breaks"`. Controls `strokeDasharray`:
 - `solid` → `none`
 - `dashed` → `12 6`
-- `dotted` → `3 4`
-- `breaks` → `16 8 2 8`
+- `dotted` → `0 6` (round dots; was `3 4` before v1.14.0)
+- `breaks` → `16 8` (long dashes; was `16 8 2 8` before v1.14.0)
+
+Diagrams saved before v1.14.0 with the legacy `3 4` / `16 8 2 8` values are auto-migrated to `0 6` / `16 8` on load.
 
 No ports.
 
@@ -548,27 +560,38 @@ Clickable external-link element with a terminator (pill) shape: label + external
       "stroke": "var(--border-muted, #D0D5DD)", "strokeWidth": 1
     },
     "label": {
-      "x": 12, "y": "calc(0.5 * h)",
+      "x": 20, "y": "calc(0.5 * h - 8)",
       "textAnchor": "start", "textVerticalAnchor": "middle",
       "fontSize": 14, "fontWeight": 600,
-      "fill": "#1D73C9", "textDecoration": "underline",
-      "text": "Link"
+      "fill": "#1D73C9",
+      "text": "API Docs"
+    },
+    "domain": {
+      "x": 20, "y": "calc(0.5 * h + 10)",
+      "textAnchor": "start", "textVerticalAnchor": "middle",
+      "fontSize": 10, "fill": "var(--text-muted, #6B7280)",
+      "text": "example.com"
     },
     "iconImage": {
-      "x": "calc(w - 28)", "y": "calc(0.5 * h - 9)",
-      "width": 18, "height": 18,
+      "x": "calc(w - 34)", "y": "calc(0.5 * h - 10)",
+      "width": 20, "height": 20,
+      "pointerEvents": "none",
       "href": "data:image/svg+xml,..."
     },
     "iconHit": {
-      "x": "calc(w - 34)", "y": "calc(0.5 * h - 14)",
-      "width": 28, "height": 28,
-      "fill": "transparent", "stroke": "none"
+      "x": "calc(w - 40)", "y": "calc(0.5 * h - 16)",
+      "width": 32, "height": 32,
+      "rx": 16, "ry": 16,
+      "fill": "transparent",
+      "stroke": "var(--border-muted, #D0D5DD)", "strokeWidth": 1
     }
   }
 }
 ```
 
 **`url`** — Target URL. Opened in a new tab (`noopener,noreferrer`) when the icon is clicked. Empty string disables click-through.
+
+**`attrs.domain.text`** — optional hostname shown as a small second line under the label (the app auto-fills it from `url` on drop). When present, `label.y` shifts up to `calc(0.5 * h - 8)` to make room (as above); for a single-line link with no domain, use `label.y: "calc(0.5 * h)"` and omit `domain`.
 
 No ports.
 
@@ -918,7 +941,7 @@ Rounded rectangle activity.
       "fontFamily": "system-ui, -apple-system, sans-serif",
       "fill": "#222222",
       "text": "Review Order",
-      "textWrap": { "width": "calc(w - 16)", "maxLineCount": 2, "ellipsis": true }
+      "textWrap": { "width": "calc(w - 16)", "maxLineCount": 4, "ellipsis": true }
     }
   },
   "ports": { /* standard 4-port config */ }
@@ -981,6 +1004,26 @@ Rounded rectangle container with [+] marker.
 
 Same pattern as Container but with `expandMarker` rect and `expandPlus` text at the bottom.
 
+#### sf.BpmnLoop
+
+Rounded-rectangle container identical in size to `sf.BpmnSubprocess`, but marked with a loop glyph instead of the `[+]` expand marker — use it for a looped / iterating sub-process.
+
+**Default size:** `360 x 240`, **z:** `500`
+
+Same `body` as Container/Subprocess, with a single-line top-left `label` (default `"Loop"`) and a `loopIcon` (`<use href="#refresh">`) centred at the bottom edge instead of Subprocess's `expandMarker` + `expandPlus`. Standard 4-port configuration.
+
+```json
+{
+  "id": "loop-1",
+  "type": "sf.BpmnLoop",
+  "position": { "x": 100, "y": 100 },
+  "size": { "width": 360, "height": 240 },
+  "z": 500,
+  "attrs": { "label": { "text": "Process Each Order" } },
+  "ports": { /* standard 4-port config (top/right/bottom/left) — see Port Definitions */ }
+}
+```
+
 #### sf.BpmnPool
 
 Horizontal pool/lane container.
@@ -988,6 +1031,26 @@ Horizontal pool/lane container.
 **Default size:** `600 x 250`, **z:** `0`
 
 Has a narrow left `header` panel with rotated vertical label. No ports.
+
+#### sf.BpmnDataObject
+
+Small folded-corner document artifact representing a BPMN data object. Available in the Process diagram's stencil; the label sits **below** the shape.
+
+**Default size:** `40 x 50`, **z:** `2000`
+
+`body` is a folded-corner `path` with a `fold` triangle at the top-right; the `label` text is positioned beneath the shape (`y: calc(h + 10)`, default `"Data"`). Standard 4-port configuration.
+
+```json
+{
+  "id": "data-1",
+  "type": "sf.BpmnDataObject",
+  "position": { "x": 100, "y": 100 },
+  "size": { "width": 40, "height": 50 },
+  "z": 2000,
+  "attrs": { "label": { "text": "Invoice" } },
+  "ports": { /* standard 4-port config (top/right/bottom/left) — see Port Definitions */ }
+}
+```
 
 ### Flowchart Shapes
 
@@ -1007,7 +1070,72 @@ All flowchart shapes follow the same simple pattern — a `body` path/rect and a
 
 All have standard 4-port configuration.
 
+### sf.Annotation
+
+A curly-brace bracket with a text label — used to call out or group a region of a diagram. The brace spans the element's height on one side; the label sits beside it. Standard 4-port configuration.
+
+**Default size:** `100 x 120`, **z:** `2000`
+
+**Properties:**
+- `bracketSide` — `"right"` (default) or `"left"`. Which side the curly brace is drawn on.
+
+The caption is set via `attrs.label.text`. Since v1.14.0 the label **stays horizontal automatically**: if the element is rotated, the label counter-rotates so the text always reads level (there is no manual text-angle property).
+
+```json
+{
+  "id": "anno-1",
+  "type": "sf.Annotation",
+  "position": { "x": 600, "y": 100 },
+  "size": { "width": 100, "height": 120 },
+  "z": 2000,
+  "bracketSide": "right",
+  "attrs": {
+    "label": { "text": "Legacy systems" }
+  },
+  "ports": { /* standard 4-port config (top/right/bottom/left) — see Port Definitions */ }
+}
+```
+
 ### Gantt Shapes
+
+> A Gantt chart is built around a **`sf.GanttTimeline`** backbone — a date-ruler container that the other Gantt shapes are positioned over. Add the timeline first, then place tasks / milestones / markers across its columns.
+
+#### sf.GanttTimeline
+
+The date-ruler backbone of a Gantt chart: a header row of period columns (days / weeks / months) plus a left-hand task-list panel. Group and task **rows** are stored on the timeline itself (in the `tasks` array); `sf.GanttTask` / `sf.GanttMilestone` / `sf.GanttMarker` elements are then positioned over its columns by canvas X.
+
+**Default size:** `960 x 48`, **z:** `1000` (container tier). No ports.
+
+**Properties (all top-level, not under `attrs`):**
+- `viewMode` — `"day"`, `"week"`, or `"month"` (column granularity). Default `"week"`.
+- `numPeriods` — number of columns (default `12`; stencil presets: day `14`, week `12`, month `12`).
+- `startDate` / `endDate` — `"YYYY-MM-DD"`. `endDate` auto-computes from `startDate` + `numPeriods` when blank (day → +N days, week → +N×7 days, month → +N months). The view snaps `startDate` to a Monday (week) or the 1st (month).
+- `tasks` — array of `{ id, type: "group" | "task", label, groupId?, color? }`; `task` rows reference their parent group via `groupId`.
+- `taskListWidth` — width (px) of the left task-list panel (default `200`).
+- `rowHeight` — height (px) per task row (default / min `48`). The timeline auto-grows its height to fit the visible rows.
+- `timelineTitle` / `timelineDescription` — header text for the task-list panel (default `"Tasks"` / `""`).
+
+```json
+{
+  "id": "timeline-1",
+  "type": "sf.GanttTimeline",
+  "position": { "x": 80, "y": 80 },
+  "size": { "width": 960, "height": 48 },
+  "z": 1000,
+  "viewMode": "week",
+  "numPeriods": 12,
+  "startDate": "2026-06-01",
+  "endDate": "2026-08-24",
+  "taskListWidth": 200,
+  "rowHeight": 48,
+  "timelineTitle": "Tasks",
+  "timelineDescription": "",
+  "tasks": [
+    { "id": "g1", "type": "group", "label": "Phase 1", "color": "#1D73C9" },
+    { "id": "t1", "type": "task", "groupId": "g1", "label": "Discovery", "color": "#1D73C9" }
+  ]
+}
+```
 
 #### sf.GanttTask
 
@@ -1222,7 +1350,7 @@ The stick figure uses the theme-aware `var(--node-text)` stroke by default — n
 
 #### sf.SequenceActivation
 
-Narrow grey box overlaid on a participant's lifeline to show when that participant is "active" (executing). Has no ports — purely decorative.
+Narrow grey box overlaid on a participant's lifeline to show when that participant is "active" (executing). It carries its own `lifelinePortCount` (default `2`) `seq-left` / `seq-right` port pairs, so messages can attach directly to the active box instead of the bare lifeline.
 
 **Default size:** `12 x 80`, **z:** `2200`
 
@@ -1235,40 +1363,44 @@ Position `x` must be `participantCenterX - 6` (the activation is centered on the
   "position": { "x": 124, "y": 140 },
   "size": { "width": 12, "height": 96 },
   "z": 2200,
+  "lifelinePortCount": 2,
   "attrs": {
-    "body": { "fill": "#D8D8D8", "stroke": "#8A9099", "strokeWidth": 1 }
+    "body": { "fill": "#D0D4D9", "stroke": "#8A9099", "strokeWidth": 1 }
   }
 }
 ```
 
 #### sf.SequenceFragment
 
-UML fragment box (loop / alt / opt / par / critical / break) with a pentagonal label tab in the top-left corner. Wraps the messages inside the fragment.
+UML fragment box with a trapezoidal label tab in the top-left corner. Wraps the messages inside the fragment.
 
 **Default size:** `400 x 200`, **z:** `500`
 
-| `fragmentType` | Pentagon label |
-|----------------|----------------|
-| `loop` | `loop` |
-| `alt` | `alt` |
-| `opt` | `opt` |
-| `par` | `par` |
-| `critical` | `critical` |
-| `break` | `break` |
+**Properties:**
+- `fragmentType` — **`"standard"` (default) or `"alternative"` — these are the only two values.** `standard` is a single-compartment frame (use it for loop / opt / par / critical / break). `alternative` is the UML `alt`: a dashed horizontal divider splits the frame into two compartments — for it to render you must *also* set the `dividerLine` and `elseText` attrs to `visibility: "visible"` (see example).
+- `fragmentLabel` — the free-text keyword shown in the title tab (default `"loop"`). **This is where the operator name (`loop` / `alt` / `opt` / `par` / `critical` / `break`) actually goes** — NOT `fragmentType`. The tab text re-syncs from this prop on import.
+- `condition` — top-compartment condition; the visible text lives in `attrs.conditionText.text` and is conventionally `[bracketed]`.
+- `elseCondition` — bottom-compartment condition (alternative only); visible text lives in `attrs.elseText.text`.
+
+For a single-compartment fragment (e.g. a loop), set `"fragmentType": "standard"`, `"fragmentLabel": "loop"`, and omit `elseCondition` plus the `dividerLine` / `elseText` attrs.
 
 ```json
 {
   "id": "frag-1",
   "type": "sf.SequenceFragment",
   "position": { "x": 30, "y": 180 },
-  "size": { "width": 520, "height": 160 },
+  "size": { "width": 400, "height": 200 },
   "z": 500,
-  "fragmentType": "alt",
+  "fragmentType": "alternative",
+  "fragmentLabel": "alt",
   "condition": "customer exists",
+  "elseCondition": "customer not found",
   "attrs": {
     "body":          { "stroke": "#8A9099", "fill": "rgba(138,144,153,0.05)" },
     "titleText":     { "text": "alt" },
-    "conditionText": { "text": "[customer exists]" }
+    "conditionText": { "text": "[customer exists]" },
+    "dividerLine":   { "visibility": "visible" },
+    "elseText":      { "text": "[customer not found]", "visibility": "visible" }
   }
 }
 ```
@@ -1335,7 +1467,7 @@ A simple 3-node architecture with one container:
 ```json
 {
   "version": 1,
-  "appVersion": "1.13.0",
+  "appVersion": "1.14.0",
   "timestamp": 1712700000000,
   "title": "Simple Architecture",
   "diagramType": "architecture",
@@ -1375,7 +1507,7 @@ A simple 3-node architecture with one container:
         "attrs": {
           "body": { "width": "calc(w)", "height": "calc(h)", "rx": 8, "ry": 8, "fill": "var(--node-bg)", "stroke": "var(--node-border)", "strokeWidth": 1 },
           "icon": { "x": 12, "y": "calc(0.5 * h - 16)", "width": 32, "height": 32, "href": "" },
-          "label": { "x": "calc(0.5 * w)", "y": "calc(0.5 * h)", "textAnchor": "middle", "textVerticalAnchor": "middle", "fontSize": 13, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-text)", "text": "Web App", "textWrap": { "width": "calc(w - 64)", "maxLineCount": 2, "ellipsis": true } },
+          "label": { "x": "calc(0.5 * w)", "y": "calc(0.5 * h)", "textAnchor": "middle", "textVerticalAnchor": "middle", "fontSize": 13, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-text)", "text": "Web App", "textWrap": { "width": "calc(w - 64)", "maxLineCount": 4, "ellipsis": true } },
           "subtitle": { "x": 12, "y": 42, "textAnchor": "start", "textVerticalAnchor": "top", "fontSize": 10, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-subtitle)", "text": "", "visibility": "hidden", "textWrap": { "width": "calc(w - 24)", "height": "calc(h - 48)", "ellipsis": true } }
         },
         "ports": {
@@ -1402,7 +1534,7 @@ A simple 3-node architecture with one container:
         "attrs": {
           "body": { "width": "calc(w)", "height": "calc(h)", "rx": 8, "ry": 8, "fill": "var(--node-bg)", "stroke": "var(--node-border)", "strokeWidth": 1 },
           "icon": { "x": 12, "y": "calc(0.5 * h - 16)", "width": 32, "height": 32, "href": "" },
-          "label": { "x": "calc(0.5 * w)", "y": "calc(0.5 * h)", "textAnchor": "middle", "textVerticalAnchor": "middle", "fontSize": 13, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-text)", "text": "REST API", "textWrap": { "width": "calc(w - 64)", "maxLineCount": 2, "ellipsis": true } },
+          "label": { "x": "calc(0.5 * w)", "y": "calc(0.5 * h)", "textAnchor": "middle", "textVerticalAnchor": "middle", "fontSize": 13, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-text)", "text": "REST API", "textWrap": { "width": "calc(w - 64)", "maxLineCount": 4, "ellipsis": true } },
           "subtitle": { "x": 12, "y": 42, "textAnchor": "start", "textVerticalAnchor": "top", "fontSize": 10, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-subtitle)", "text": "", "visibility": "hidden", "textWrap": { "width": "calc(w - 24)", "height": "calc(h - 48)", "ellipsis": true } }
         },
         "ports": {
@@ -1429,7 +1561,7 @@ A simple 3-node architecture with one container:
         "attrs": {
           "body": { "width": "calc(w)", "height": "calc(h)", "rx": 8, "ry": 8, "fill": "var(--node-bg)", "stroke": "var(--node-border)", "strokeWidth": 1 },
           "icon": { "x": 12, "y": "calc(0.5 * h - 16)", "width": 32, "height": 32, "href": "" },
-          "label": { "x": "calc(0.5 * w)", "y": "calc(0.5 * h)", "textAnchor": "middle", "textVerticalAnchor": "middle", "fontSize": 13, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-text)", "text": "Database", "textWrap": { "width": "calc(w - 64)", "maxLineCount": 2, "ellipsis": true } },
+          "label": { "x": "calc(0.5 * w)", "y": "calc(0.5 * h)", "textAnchor": "middle", "textVerticalAnchor": "middle", "fontSize": 13, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-text)", "text": "Database", "textWrap": { "width": "calc(w - 64)", "maxLineCount": 4, "ellipsis": true } },
           "subtitle": { "x": 12, "y": 42, "textAnchor": "start", "textVerticalAnchor": "top", "fontSize": 10, "fontFamily": "system-ui, -apple-system, sans-serif", "fill": "var(--node-subtitle)", "text": "", "visibility": "hidden", "textWrap": { "width": "calc(w - 24)", "height": "calc(h - 48)", "ellipsis": true } }
         },
         "ports": {
@@ -1491,7 +1623,7 @@ Two related Salesforce objects with ER notation:
 ```json
 {
   "version": 1,
-  "appVersion": "1.13.0",
+  "appVersion": "1.14.0",
   "timestamp": 1712700000000,
   "title": "Account-Contact ERD",
   "diagramType": "datamodel",
@@ -1611,7 +1743,7 @@ A two-participant sync exchange with an activation box and an `alt` fragment. Me
 ```json
 {
   "version": 1,
-  "appVersion": "1.13.0",
+  "appVersion": "1.14.0",
   "title": "Account Lookup",
   "diagramType": "sequence",
   "graph": {
@@ -1656,12 +1788,16 @@ A two-participant sync exchange with an activation box and an `alt` fragment. Me
         "position": { "x": 30, "y": 180 },
         "size": { "width": 460, "height": 120 },
         "z": 500,
-        "fragmentType": "alt",
+        "fragmentType": "alternative",
+        "fragmentLabel": "alt",
         "condition": "account found",
+        "elseCondition": "account not found",
         "attrs": {
           "body":          { "stroke": "#8A9099", "fill": "rgba(138,144,153,0.05)" },
           "titleText":     { "text": "alt" },
-          "conditionText": { "text": "[account found]" }
+          "conditionText": { "text": "[account found]" },
+          "dividerLine":   { "visibility": "visible" },
+          "elseText":      { "text": "[account not found]", "visibility": "visible" }
         }
       },
       {
@@ -1671,7 +1807,7 @@ A two-participant sync exchange with an activation box and an `alt` fragment. Me
         "size": { "width": 12, "height": 80 },
         "z": 2200,
         "attrs": {
-          "body": { "fill": "#D8D8D8", "stroke": "#8A9099", "strokeWidth": 1 }
+          "body": { "fill": "#D0D4D9", "stroke": "#8A9099", "strokeWidth": 1 }
         }
       },
       {

@@ -1,0 +1,10 @@
+{
+  "name": "diagramforce-tests",
+  "version": "1.14.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-build characterization/regression tests for Diagramforce. Uses Node's native test runner (node:test) only — NO Jest/Vitest/Babel/bundler. The app itself stays build-free; this package.json exists purely so Node treats the test files as ES modules and exposes `npm test`.",
+  "scripts": {
+    "test": "node --test 'tests/**/*.test.js'"
+  }
+}

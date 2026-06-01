@@ -22,7 +22,7 @@ const onChangeCallbacks = [];
 // `flushPendingDragCommit()` is also invoked at the start of undo()/redo()
 // so a fast Cmd+Z immediately after a drop still finds the drag on the stack.
 const DRAG_IDLE_MS = 80;
-const pendingChanges = new Map();   // cellId → { position?, size?, vertices? }
+const pendingChanges = new Map();   // cellId → { position?, size?, angle?, vertices? }
 let pendingCommitTimer = null;
 
 function schedulePendingDragCommit() {
@@ -54,6 +54,13 @@ function commitPendingDrag() {
         const ow = oldSize.width, oh = oldSize.height, nw = newSize.width, nh = newSize.height;
         undos.push(() => { const c = graph.getCell(id); if (c) c.resize(ow, oh); });
         redos.push(() => { const c = graph.getCell(id); if (c) c.resize(nw, nh); });
+      }
+    }
+    if (entry.angle) {
+      const { oldAngle, newAngle } = entry.angle;
+      if (oldAngle !== newAngle) {
+        undos.push(() => { const c = graph.getCell(id); if (c) c.set('angle', oldAngle); });
+        redos.push(() => { const c = graph.getCell(id); if (c) c.set('angle', newAngle); });
       }
     }
     if (entry.vertices) {
@@ -176,6 +183,25 @@ export function init(_graph) {
       entry.size = { oldSize: { ...oldSize }, newSize };
     } else {
       entry.size.newSize = newSize;
+    }
+    schedulePendingDragCommit();
+  });
+
+  // Rotation (the `angle` property, set via the Rotation field / +90 button).
+  // change:attrs/size/position never fire for a rotate. Merge through
+  // pendingChanges like a drag so a whole rotation interaction — spinner clicks,
+  // typing, repeated +90 — collapses to a SINGLE undo step (keeps the FIRST
+  // oldAngle + the LATEST newAngle), not one entry per degree.
+  graph.on('change:angle', (cell) => {
+    if (isUndoRedoing) return;
+    const id = cell.id;
+    const newAngle = cell.get('angle') ?? 0;
+    let entry = pendingChanges.get(id);
+    if (!entry) { entry = {}; pendingChanges.set(id, entry); }
+    if (!entry.angle) {
+      entry.angle = { oldAngle: cell.previous('angle') ?? 0, newAngle };
+    } else {
+      entry.angle.newAngle = newAngle;
     }
     schedulePendingDragCommit();
   });

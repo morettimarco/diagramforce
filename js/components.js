@@ -1,7 +1,7 @@
 // Pre-built Salesforce architecture components
 // Each component is a config object describing a diagram element
 
-import { getIconDataUri } from './icons.js?v=1.13.0';
+import { getIconDataUri } from './icons.js?v=1.14.0';
 
 /** Convert inline stencilSvg markup to a data URI for use as a canvas icon.
  *  Each child element must carry its own fill/stroke — the wrapper SVG sets NO
@@ -968,7 +968,7 @@ export function resizeDataObjectToFit(cell) {
 const stencilSvgToId = new Map();
 
 /** Return the registered icon ID for a stencilSvg string, or '' if not registered. */
-export function getStencilSvgIconId(svg) {
+function getStencilSvgIconId(svg) {
   return stencilSvgToId.get(svg) || '';
 }
 

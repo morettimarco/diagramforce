@@ -8,7 +8,7 @@
  * version bump documented in CLAUDE.md must update this file too.
  */
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.14.0';
 const CACHE_NAME = `diagramforce-v${APP_VERSION}`;
 
 // Same-origin assets to pre-cache on install. Anything not listed here is
@@ -34,6 +34,18 @@ const PRECACHE_URLS = [
   `./js/app.js?v=${APP_VERSION}`,
   `./js/brand-palette.js?v=${APP_VERSION}`,
   `./js/canvas.js?v=${APP_VERSION}`,
+  `./js/canvas/context.js?v=${APP_VERSION}`,
+  `./js/canvas/router.js?v=${APP_VERSION}`,
+  `./js/canvas/auto-layout.js?v=${APP_VERSION}`,
+  `./js/canvas/migration.js?v=${APP_VERSION}`,
+  `./js/canvas/crossing-bumps.js?v=${APP_VERSION}`,
+  `./js/canvas/viewport.js?v=${APP_VERSION}`,
+  `./js/canvas/line-style.js?v=${APP_VERSION}`,
+  `./js/canvas/mobile.js?v=${APP_VERSION}`,
+  `./js/canvas/external-labels.js?v=${APP_VERSION}`,
+  `./js/canvas/selection-viz.js?v=${APP_VERSION}`,
+  `./js/canvas/spacing-guides.js?v=${APP_VERSION}`,
+  `./js/canvas/embedding.js?v=${APP_VERSION}`,
   `./js/clipboard.js?v=${APP_VERSION}`,
   `./js/feedback.js?v=${APP_VERSION}`,
   `./js/history.js?v=${APP_VERSION}`,
@@ -43,6 +55,12 @@ const PRECACHE_URLS = [
   `./js/markdown.js?v=${APP_VERSION}`,
   `./js/mermaid-import.js?v=${APP_VERSION}`,
   `./js/persistence.js?v=${APP_VERSION}`,
+  `./js/persistence/context.js?v=${APP_VERSION}`,
+  `./js/persistence/image-export.js?v=${APP_VERSION}`,
+  `./js/persistence/share-orchestration.js?v=${APP_VERSION}`,
+  `./js/persistence/versioning.js?v=${APP_VERSION}`,
+  `./js/persistence/json-pipeline.js?v=${APP_VERSION}`,
+  `./js/persistence/storage.js?v=${APP_VERSION}`,
   `./js/properties.js?v=${APP_VERSION}`,
   `./js/selection.js?v=${APP_VERSION}`,
   `./js/shapes.js?v=${APP_VERSION}`,
@@ -53,6 +71,8 @@ const PRECACHE_URLS = [
   `./js/templates.js?v=${APP_VERSION}`,
   `./js/theme.js?v=${APP_VERSION}`,
   `./js/toolbar.js?v=${APP_VERSION}`,
+  `./js/util.js?v=${APP_VERSION}`,
+  `./js/util/geometry.js?v=${APP_VERSION}`,
   // Vendored libraries
   `./assets/vendor/joint.min.js?v=${APP_VERSION}`,
   `./assets/vendor/pako.min.js?v=${APP_VERSION}`,

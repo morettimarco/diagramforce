@@ -32,7 +32,7 @@ const PC_TOKENS  = { Ctrl: 'Ctrl', Cmd: 'Ctrl', Meta: 'Ctrl', Alt: 'Alt', Option
  * Final glyphs on macOS are joined without a `+` separator (Apple HIG
  * convention: "⌘S", "⌘⇧Z"). Other platforms use plain "Ctrl+S".
  */
-export function kbd(combo) {
+function kbd(combo) {
   if (typeof combo !== 'string' || !combo) return '';
   const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
   if (IS_MAC) {
@@ -47,7 +47,7 @@ export function kbd(combo) {
  * glyphs. Idempotent — running it twice is harmless because the kbd()
  * output never contains a literal "Ctrl+" on macOS.
  */
-export function applyPlatformShortcutsToTooltips() {
+function applyPlatformShortcutsToTooltips() {
   // Match `(Ctrl+X)`, `(Ctrl+Shift+Z)`, etc. inside a title=. Outer parens
   // are preserved; only the combo inside gets rewritten when it contains
   // at least one named modifier (Ctrl/Shift/Alt/Cmd/Meta). Bare-token

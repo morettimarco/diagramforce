@@ -1,8 +1,9 @@
 // Tabs — multi-diagram tab management
 // Each tab holds its own graph JSON, viewport, and undo/redo history.
 
-import { escHtml, APP_VERSION, classifyVersionDiff, normalizeDiagramType, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES } from './persistence.js?v=1.13.0';
-import { showError, showToast } from './feedback.js?v=1.13.0';
+import { APP_VERSION, classifyVersionDiff, normalizeDiagramType, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES } from './persistence.js?v=1.14.0';
+import { escHtml, formatRelativeTime } from './util.js?v=1.14.0';
+import { showError, showToast, buildModal } from './feedback.js?v=1.14.0';
 
 let graph, paper, canvasModule, selectionModule, historyModule, persistenceModule, stencilModule;
 let tabListEl;
@@ -307,36 +308,26 @@ function doCloseTab(id) {
 function showCloseConfirmModal(tabId, tabName) {
   document.querySelector('.sf-close-confirm-modal')?.remove();
 
-  const overlay = document.createElement('div');
-  overlay.className = 'sf-close-confirm-modal';
-  overlay.innerHTML = `
-    <div class="sf-modal" style="z-index:3000">
-      <div class="sf-modal__overlay"></div>
-      <div class="sf-modal__dialog" style="width:380px">
-        <div class="sf-modal__header">
-          <h2 class="sf-modal__title">Unsaved Changes</h2>
-        </div>
-        <div class="sf-modal__body" style="padding:var(--spacing-md) var(--spacing-lg)">
-          <p style="margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
-            <strong style="color:var(--text-primary)">${escHtml(tabName)}</strong> has unsaved changes that will be lost.
-          </p>
-        </div>
-        <div class="sf-modal__footer">
-          <button class="sf-close-confirm__btn sf-close-confirm__btn--cancel" style="margin-right:auto">Cancel</button>
-          <button class="sf-close-confirm__btn sf-close-confirm__btn--save">Save and Close</button>
-          <button class="sf-close-confirm__btn sf-close-confirm__btn--discard">Discard</button>
-        </div>
-      </div>
-    </div>`;
+  const { footer, close } = buildModal({
+    title: 'Unsaved Changes',
+    className: 'sf-close-confirm-modal',
+    zIndex: 3000,
+    width: '380px',
+    showClose: false, // decision dialog — dismiss via Cancel / backdrop / Escape
+    bodyStyle: 'padding:var(--spacing-md) var(--spacing-lg)',
+    bodyHtml: `
+      <p style="margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
+        <strong style="color:var(--text-primary)">${escHtml(tabName)}</strong> has unsaved changes that will be lost.
+      </p>`,
+    footerHtml: `
+      <button class="sf-close-confirm__btn sf-close-confirm__btn--cancel" style="margin-right:auto">Cancel</button>
+      <button class="sf-close-confirm__btn sf-close-confirm__btn--save">Save and Close</button>
+      <button class="sf-close-confirm__btn sf-close-confirm__btn--discard">Discard</button>`,
+  });
 
-  document.body.appendChild(overlay);
+  footer.querySelector('.sf-close-confirm__btn--cancel').addEventListener('click', close);
 
-  const close = () => overlay.remove();
-
-  overlay.querySelector('.sf-modal__overlay').addEventListener('click', close);
-  overlay.querySelector('.sf-close-confirm__btn--cancel').addEventListener('click', close);
-
-  overlay.querySelector('.sf-close-confirm__btn--save').addEventListener('click', () => {
+  footer.querySelector('.sf-close-confirm__btn--save').addEventListener('click', () => {
     close();
     // Switch to the tab first if not active, then trigger save
     if (tabId !== activeTabId) switchTab(tabId);
@@ -345,7 +336,7 @@ function showCloseConfirmModal(tabId, tabName) {
     persistenceModule.namedSave();
   });
 
-  overlay.querySelector('.sf-close-confirm__btn--discard').addEventListener('click', () => {
+  footer.querySelector('.sf-close-confirm__btn--discard').addEventListener('click', () => {
     close();
     // Force close without checking dirty again
     const tab = tabs.find(t => t.id === tabId);
@@ -372,30 +363,15 @@ function typeIconSvg(diagramType) {
   return `<svg class="sf-close-tabs__type-icon" viewBox="0 0 16 16" fill="currentColor">${inner}</svg>`;
 }
 
-/** Relative-time label ("just now" / "3m ago" / "2h ago" / "5d ago"); null when
- *  there's no timestamp. Mirrors the Load modal's "Saved … ago". */
-function relTime(ts) {
-  if (!ts) return null;
-  const sec = Math.floor((Date.now() - ts) / 1000);
-  if (sec < 60) return 'just now';
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
-  return `${Math.floor(sec / 86400)}d ago`;
-}
-
 function showCloseTabsModal() {
   if (tabs.length === 0) return;
 
   document.querySelector('.sf-close-tabs-modal')?.remove();
 
-  const overlay = document.createElement('div');
-  overlay.className = 'sf-modal sf-close-tabs-modal';
-  overlay.style.zIndex = '3000';
-
   const rowsHtml = tabs.map(t => {
     const active = t.id === activeTabId ? ' (active)' : '';
     const typeLabel = DIAGRAM_TYPES[t.diagramType]?.short || 'Architecture';
-    const rel = relTime(t.lastModifiedAt || t.lastSavedAt);
+    const rel = formatRelativeTime(t.lastModifiedAt || t.lastSavedAt);
     return `
       <label class="sf-close-tabs__row" data-tab-id="${escHtml(t.id)}">
         <input type="checkbox" class="sf-close-tabs__checkbox" data-tab-id="${escHtml(t.id)}" />
@@ -409,43 +385,29 @@ function showCloseTabsModal() {
       </label>`;
   }).join('');
 
-  overlay.innerHTML = `
-    <div class="sf-modal__overlay"></div>
-    <div class="sf-modal__dialog">
-      <div class="sf-modal__header">
-        <h2 class="sf-modal__title">Close Multiple Tabs</h2>
-        <button class="sf-toolbar__button sf-close-tabs__close" aria-label="Close">
-          <svg class="sf-toolbar__icon" aria-hidden="true"><use href="#close"></use></svg>
-        </button>
-      </div>
-      <div class="sf-modal__body" style="padding:var(--spacing-md) var(--spacing-lg)">
-        <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm)">
-          Select the tabs you want to close.
-        </p>
-        <div class="sf-close-tabs__list">
-          <label class="sf-close-tabs__row sf-close-tabs__row--header">
-            <input type="checkbox" class="sf-close-tabs__checkbox" data-role="select-all" />
-            <span class="sf-close-tabs__name">Select all</span>
-          </label>
-          ${rowsHtml}
-        </div>
-      </div>
-      <div class="sf-modal__footer">
-        <button class="sf-close-tabs__btn sf-close-tabs__btn--primary" data-action="close" style="margin-left:auto" disabled>Close Selected</button>
-      </div>
-    </div>`;
+  // dialog width (460px/90vw) comes from `.sf-close-tabs-modal .sf-modal__dialog` CSS
+  const { body, footer, close } = buildModal({
+    title: 'Close Multiple Tabs',
+    className: 'sf-close-tabs-modal',
+    zIndex: 3000,
+    bodyStyle: 'padding:var(--spacing-md) var(--spacing-lg)',
+    bodyHtml: `
+      <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm)">
+        Select the tabs you want to close.
+      </p>
+      <div class="sf-close-tabs__list">
+        <label class="sf-close-tabs__row sf-close-tabs__row--header">
+          <input type="checkbox" class="sf-close-tabs__checkbox" data-role="select-all" />
+          <span class="sf-close-tabs__name">Select all</span>
+        </label>
+        ${rowsHtml}
+      </div>`,
+    footerHtml: '<button class="sf-close-tabs__btn sf-close-tabs__btn--primary" data-action="close" style="margin-left:auto" disabled>Close Selected</button>',
+  });
 
-  document.body.appendChild(overlay);
-
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  document.addEventListener('keydown', onKey);
-  overlay.querySelector('.sf-modal__overlay').addEventListener('click', close);
-  overlay.querySelector('.sf-close-tabs__close').addEventListener('click', close);
-
-  const selectAllEl = overlay.querySelector('[data-role="select-all"]');
-  const rowBoxes = Array.from(overlay.querySelectorAll('.sf-close-tabs__checkbox[data-tab-id]'));
-  const closeBtn = overlay.querySelector('[data-action="close"]');
+  const selectAllEl = body.querySelector('[data-role="select-all"]');
+  const rowBoxes = Array.from(body.querySelectorAll('.sf-close-tabs__checkbox[data-tab-id]'));
+  const closeBtn = footer.querySelector('[data-action="close"]');
 
   const updateState = () => {
     const checked = rowBoxes.filter(b => b.checked);
@@ -471,7 +433,7 @@ function showCloseTabsModal() {
 
   // Clicking the row (outside the native label-to-input propagation edge cases)
   // — rely on default label click behaviour, but make sure checkbox doesn't double-fire.
-  overlay.querySelectorAll('.sf-close-tabs__row[data-tab-id]').forEach(row => {
+  body.querySelectorAll('.sf-close-tabs__row[data-tab-id]').forEach(row => {
     row.addEventListener('click', (e) => {
       // The <label> already forwards clicks to the checkbox; just stop propagation
       // from the checkbox itself so it doesn't trigger twice.
@@ -515,42 +477,34 @@ function performMultiClose(ids) {
 }
 
 function showMultiDiscardConfirm(dirtyCount, onDiscard, onSaveAndClose) {
-  const overlay = document.createElement('div');
-  overlay.className = 'sf-modal';
-  overlay.style.zIndex = '3100';
-  overlay.innerHTML = `
-    <div class="sf-modal__overlay"></div>
-    <div class="sf-modal__dialog" style="width:460px">
-      <div class="sf-modal__header">
-        <h2 class="sf-modal__title">Unsaved Changes</h2>
-      </div>
-      <div class="sf-modal__body" style="padding:var(--spacing-md) var(--spacing-lg)">
-        <p style="margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
-          <strong style="color:var(--text-primary)">${dirtyCount}</strong> of the selected tabs ${dirtyCount === 1 ? 'has' : 'have'} unsaved changes. Save to Browser Storage first, or close without saving?
-        </p>
-      </div>
-      <div class="sf-modal__footer">
-        <button class="sf-close-tabs__btn" data-action="cancel" style="margin-right:auto">Cancel</button>
-        <button class="sf-close-tabs__btn sf-close-tabs__btn--save" data-action="save">Save and Close</button>
-        <button class="sf-close-tabs__btn sf-close-tabs__btn--primary" data-action="confirm">Close Anyway</button>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-  const close = () => overlay.remove();
-  overlay.querySelector('.sf-modal__overlay').addEventListener('click', close);
-  overlay.querySelector('[data-action="cancel"]').addEventListener('click', close);
-  overlay.querySelector('[data-action="save"]').addEventListener('click', () => { close(); onSaveAndClose(); });
-  overlay.querySelector('[data-action="confirm"]').addEventListener('click', () => { close(); onDiscard(); });
+  const { footer, close } = buildModal({
+    title: 'Unsaved Changes',
+    zIndex: 3100,
+    width: '460px',
+    showClose: false, // decision dialog — dismiss via Cancel / backdrop / Escape
+    bodyStyle: 'padding:var(--spacing-md) var(--spacing-lg)',
+    bodyHtml: `
+      <p style="margin:0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
+        <strong style="color:var(--text-primary)">${dirtyCount}</strong> of the selected tabs ${dirtyCount === 1 ? 'has' : 'have'} unsaved changes. Save to Browser Storage first, or close without saving?
+      </p>`,
+    footerHtml: `
+      <button class="sf-close-tabs__btn" data-action="cancel" style="margin-right:auto">Cancel</button>
+      <button class="sf-close-tabs__btn sf-close-tabs__btn--save" data-action="save">Save and Close</button>
+      <button class="sf-close-tabs__btn sf-close-tabs__btn--primary" data-action="confirm">Close Anyway</button>`,
+  });
+  footer.querySelector('[data-action="cancel"]').addEventListener('click', close);
+  footer.querySelector('[data-action="save"]').addEventListener('click', () => { close(); onSaveAndClose(); });
+  footer.querySelector('[data-action="confirm"]').addEventListener('click', () => { close(); onDiscard(); });
 }
 
-export function switchTab(id) {
+function switchTab(id) {
   if (id === activeTabId) return;
   saveCurrentTabState();
   activateTab(id, false);
   render();
 }
 
-export function renameTab(id, name) {
+function renameTab(id, name) {
   const tab = tabs.find(t => t.id === id);
   if (tab) {
     tab.name = name;
@@ -567,7 +521,7 @@ export function getActiveTabId() {
   return activeTabId;
 }
 
-export function getActiveTabName() {
+function getActiveTabName() {
   return tabs.find(t => t.id === activeTabId)?.name || 'Draft';
 }
 
@@ -575,7 +529,7 @@ export function getActiveTabType() {
   return tabs.find(t => t.id === activeTabId)?.diagramType || 'architecture';
 }
 
-export function markDirty() {
+function markDirty() {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return;
   // Stamp the modified time on REAL edits only — the change handler also fires
@@ -607,11 +561,6 @@ export function markSaved(saveType) {
   }
 }
 
-export function getActiveTabSaveInfo() {
-  const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab?.lastSavedAt) return null;
-  return { lastSavedAt: tab.lastSavedAt, lastSaveType: tab.lastSaveType };
-}
 
 /**
  * Gap 21 (v1.12.0) — true when any open tab has uncommitted changes that
@@ -886,10 +835,6 @@ function restoreTabs() {
  */
 function showSessionVersionWarning(savedVersion, diff) {
   return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'sf-modal';
-    overlay.style.zIndex = '10001';
-
     const isMajor = diff === 'major';
     const title = isMajor ? 'Compatibility Warning' : 'Session Restored';
     const githubLink = `<a href="https://github.com/MateuszDabrowski/diagramforce" target="_blank" rel="noopener" style="color:var(--color-primary)">GitHub</a>`;
@@ -914,33 +859,31 @@ function showSessionVersionWarning(savedVersion, diff) {
          <button class="sf-modal__btn sf-modal__btn--primary" data-action="try">Try Anyway</button>`
       : `<button class="sf-modal__btn sf-modal__btn--primary" data-action="ok">OK</button>`;
 
-    overlay.innerHTML = `
-      <div class="sf-modal__overlay"></div>
-      <div class="sf-modal__dialog" style="width:440px">
-        <div class="sf-modal__header">
-          <h2 class="sf-modal__title">${title}</h2>
-        </div>
-        <div class="sf-modal__body" style="padding:16px 20px">
-          <p style="margin:0 0 12px">
-            Diagramforce has been updated from <strong>v${escHtml(savedVersion)}</strong>
-            to <strong>v${escHtml(APP_VERSION)}</strong>${isMajor ? ` (${githubLink})` : ''}.
-          </p>
-          <p style="margin:0${footerNote ? ' 0 12px' : ''};color:var(--text-secondary)">
-            ${message}
-          </p>
-          ${footerNote}
-        </div>
-        <div class="sf-modal__footer" style="justify-content:flex-end">
-          ${buttons}
-        </div>
-      </div>`;
+    // Major resolves false unless "try" sets true; minor resolves undefined.
+    let result = isMajor ? false : undefined;
+    const { footer, close } = buildModal({
+      title,
+      zIndex: 10001,
+      width: '440px',
+      showClose: false,
+      bodyStyle: 'padding:16px 20px',
+      bodyHtml: `
+        <p style="margin:0 0 12px">
+          Diagramforce has been updated from <strong>v${escHtml(savedVersion)}</strong>
+          to <strong>v${escHtml(APP_VERSION)}</strong>${isMajor ? ` (${githubLink})` : ''}.
+        </p>
+        <p style="margin:0${footerNote ? ' 0 12px' : ''};color:var(--text-secondary)">
+          ${message}
+        </p>
+        ${footerNote}`,
+      footerHtml: buttons,
+      onClose: () => resolve(result), // backdrop / Escape resolve the variant default
+    });
+    footer.style.justifyContent = 'flex-end';
 
     if (isMajor) {
-      overlay.querySelector('[data-action="reset"]').addEventListener('click', () => {
-        overlay.remove();
-        resolve(false);
-      });
-      overlay.querySelector('[data-action="backup"]')?.addEventListener('click', (e) => {
+      footer.querySelector('[data-action="reset"]').addEventListener('click', () => close());
+      footer.querySelector('[data-action="backup"]')?.addEventListener('click', (e) => {
         const btn = e.currentTarget;
         if (btn.dataset.saved) return;
         // Export each auto-saved tab as a separate backup JSON file
@@ -984,26 +927,11 @@ function showSessionVersionWarning(savedVersion, diff) {
         btn.style.borderColor = '#2e844a';
         btn.dataset.saved = '1';
       });
-      overlay.querySelector('[data-action="try"]').addEventListener('click', () => {
-        overlay.remove();
-        resolve(true);
-      });
-      overlay.querySelector('.sf-modal__overlay').addEventListener('click', () => {
-        overlay.remove();
-        resolve(false);
-      });
+      footer.querySelector('[data-action="try"]').addEventListener('click', () => { result = true; close(); });
     } else {
-      overlay.querySelector('[data-action="ok"]').addEventListener('click', () => {
-        overlay.remove();
-        resolve();
-      });
-      overlay.querySelector('.sf-modal__overlay').addEventListener('click', () => {
-        overlay.remove();
-        resolve();
-      });
+      footer.querySelector('[data-action="ok"]').addEventListener('click', () => close());
     }
-
-    document.body.appendChild(overlay);
+    // backdrop / Escape close → onClose resolves `result` (false major / undefined minor)
   });
 }
 

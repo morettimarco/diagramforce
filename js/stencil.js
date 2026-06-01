@@ -1,12 +1,12 @@
 // Stencil panel — draggable component library
 // Organizes built-in components + saved templates by category, search, drag-to-canvas
 
-import { COMPONENT_CATEGORIES, BPMN_CATEGORIES, DATAMODEL_CATEGORIES, GANTT_CATEGORIES, ORG_CATEGORIES, SEQUENCE_CATEGORIES, createElementFromComponent } from './components.js?v=1.13.0';
-import { getAllIcons, getCategories } from './icons.js?v=1.13.0';
-import { updateSimpleNodeLayout, snapActivationToLifeline, canEmbed } from './canvas.js?v=1.13.0';
-import { startImageAddFlow } from './image-component.js?v=1.13.0';
-import { getTemplates, deleteTemplate, renderTemplateThumbnail, instantiateTemplate, onTemplatesChange } from './templates.js?v=1.13.0';
-import { confirmModal } from './feedback.js?v=1.13.0';
+import { COMPONENT_CATEGORIES, BPMN_CATEGORIES, DATAMODEL_CATEGORIES, GANTT_CATEGORIES, ORG_CATEGORIES, SEQUENCE_CATEGORIES, createElementFromComponent } from './components.js?v=1.14.0';
+import { getAllIcons, getCategories } from './icons.js?v=1.14.0';
+import { updateSimpleNodeLayout, snapActivationToLifeline, canEmbed } from './canvas.js?v=1.14.0';
+import { startImageAddFlow } from './image-component.js?v=1.14.0';
+import { getTemplates, deleteTemplate, renderTemplateThumbnail, instantiateTemplate, onTemplatesChange } from './templates.js?v=1.14.0';
+import { confirmModal } from './feedback.js?v=1.14.0';
 
 let graph, paper;
 let panelEl, searchEl, bodyEl;

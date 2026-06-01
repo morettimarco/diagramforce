@@ -193,6 +193,44 @@
   width: 16px;
 }
 
+/* Native number-input spinners paint in the OS *light* scheme by default, so in
+   dark mode the up/down arrows are near-black on the dark input. color-scheme:dark
+   re-paints them light. (Applies to every number field — Width/Height too.) */
+[data-theme="dark"] .sf-properties__input[type="number"] {
+  color-scheme: dark;
+}
+
+/* Rotation control: degrees input + a quick "+90°" button */
+.sf-prop-rotation {
+  margin-bottom: var(--spacing-sm);   /* breathing room before the next control */
+}
+.sf-prop-rotation-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.sf-prop-rotation-row .sf-properties__input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sf-prop-rotate-90 {
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-family);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+.sf-prop-rotate-90:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
 .sf-properties__textarea {
   resize: vertical;
   min-height: 48px;

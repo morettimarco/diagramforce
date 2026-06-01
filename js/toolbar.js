@@ -1,10 +1,11 @@
 // Toolbar — wires all button clicks to module actions
 // Also keeps undo/redo button states in sync
 
-import { diagramHasImage } from './image-component.js?v=1.13.0';
-import { showToast, showError, confirmModal, trapFocus } from './feedback.js?v=1.13.0';
-import { resizeDataObjectToFit } from './components.js?v=1.13.0';
-import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, isConnectorGroupingEnabled, setConnectorGroupingEnabled, rerouteAllLinks, isCrossingBumpsEnabled, setCrossingBumpsEnabled, isFocusDimmingEnabled, setFocusDimmingEnabled } from './canvas.js?v=1.13.0';
+import { diagramHasImage } from './image-component.js?v=1.14.0';
+import { showToast, showError, confirmModal, trapFocus, buildModal } from './feedback.js?v=1.14.0';
+import { resizeDataObjectToFit } from './components.js?v=1.14.0';
+import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, isConnectorGroupingEnabled, setConnectorGroupingEnabled, rerouteAllLinks, isCrossingBumpsEnabled, setCrossingBumpsEnabled, isFocusDimmingEnabled, setFocusDimmingEnabled } from './canvas.js?v=1.14.0';
+import { escHtml, formatRelativeTime } from './util.js?v=1.14.0';
 
 let modules = {};
 
@@ -81,6 +82,10 @@ export function init(_modules) {
   if (modules.graph) {
     modules.graph.on('add', refreshShareAvailability);
     modules.graph.on('remove', refreshShareAvailability);
+    // `graph.fromJSON()` (tab load, import, restore, share-load) fires a single
+    // 'reset' — NOT per-cell 'add'/'remove' — so without this the export/share
+    // items stayed stale-disabled after an import until the next tab switch.
+    modules.graph.on('reset', refreshShareAvailability);
   }
   if (modules.tabs) modules.tabs.onChange(refreshShareAvailability);
   // Listen for GIF encoding state flips so the disable refreshes when
@@ -655,11 +660,6 @@ function showSaveModal() {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   })();
 
-  const overlay = document.createElement('div');
-  overlay.className = 'sf-save-modal sf-modal';
-  overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-modal', 'true');
-
   // Collect existing save names to avoid duplicates
   const existingSaves = new Set(modules.persistence.getNamedSaves().map(s => s.name));
 
@@ -679,47 +679,27 @@ function showSaveModal() {
       </div>`;
   }).join('');
 
-  overlay.innerHTML = `
-    <div class="sf-modal__overlay sf-save-modal__backdrop"></div>
-    <div class="sf-modal__dialog sf-save-modal__dialog">
-      <div class="sf-modal__header">
-        <h2 class="sf-modal__title">Save to Browser</h2>
-        <button class="sf-toolbar__button sf-save-modal__close" aria-label="Close">
-          <svg class="sf-toolbar__icon"><use href="#close"></use></svg>
-        </button>
-      </div>
-      <div class="sf-modal__body sf-modal__row-list">
-        <p class="sf-modal__advisory">Browsers may periodically clear this list. For permanent storage, always <button type="button" class="sf-modal__advisory-link">Export to JSON</button>.</p>
-        <div class="sf-modal__list-box">
-          <div class="sf-modal__list-header">
-            <label class="sf-modal__select-all"><input type="checkbox" class="sf-modal__check-all"> Select all</label>
-          </div>
-          ${tabRows}
+  const { overlay, body: bodyEl, footer, close } = buildModal({
+    title: 'Save to Browser',
+    className: 'sf-save-modal',
+    dialogClass: 'sf-save-modal__dialog', // 520px
+    bodyClass: 'sf-modal__row-list',
+    bodyHtml: `
+      <p class="sf-modal__advisory">Browsers may periodically clear this list. For permanent storage, always <button type="button" class="sf-modal__advisory-link">Export to JSON</button>.</p>
+      <div class="sf-modal__list-box">
+        <div class="sf-modal__list-header">
+          <label class="sf-modal__select-all"><input type="checkbox" class="sf-modal__check-all"> Select all</label>
         </div>
-      </div>
-      <div class="sf-modal__footer">
-        <button class="sf-modal__btn sf-modal__btn--primary sf-modal__action-btn" style="margin-left:auto">Save Selected</button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-
-  // Close handlers
-  const close = () => overlay.remove();
-  overlay.querySelector('.sf-save-modal__backdrop').addEventListener('click', close);
-  overlay.querySelector('.sf-save-modal__close').addEventListener('click', close);
+        ${tabRows}
+      </div>`,
+    footerHtml: '<button class="sf-modal__btn sf-modal__btn--primary sf-modal__action-btn" style="margin-left:auto">Save Selected</button>',
+  });
 
   // Advisory CTA — close this overlay, then open Export to JSON.
-  overlay.querySelector('.sf-modal__advisory-link')?.addEventListener('click', () => {
+  bodyEl.querySelector('.sf-modal__advisory-link')?.addEventListener('click', () => {
     close();
     showExportModal();
   });
-  const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
-  document.addEventListener('keydown', onKey);
-
-  const bodyEl = overlay.querySelector('.sf-modal__body');
-  const footer = overlay.querySelector('.sf-modal__footer');
 
   wireSelectAll(bodyEl, footer, '.sf-modal__row-check', () => {
     const selected = [];
@@ -774,11 +754,6 @@ function showSaveModal() {
 function showSequenceAutoLayoutConfirm(plan, onConfirm) {
   document.querySelector('.sf-seq-autolayout-modal')?.remove();
 
-  const overlay = document.createElement('div');
-  overlay.className = 'sf-save-modal sf-seq-autolayout-modal sf-modal';
-  overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-modal', 'true');
-
   const rows = plan.mismatches.map(m => {
     const reason = m.hasCustomRatios
       ? `${m.count} ports, custom spacing`
@@ -790,34 +765,18 @@ function showSequenceAutoLayoutConfirm(plan, onConfirm) {
       </div>`;
   }).join('');
 
-  overlay.innerHTML = `
-    <div class="sf-modal__overlay sf-save-modal__backdrop"></div>
-    <div class="sf-modal__dialog sf-save-modal__dialog">
-      <div class="sf-modal__header">
-        <h2 class="sf-modal__title">Auto Layout may shift connectors</h2>
-        <button class="sf-toolbar__button sf-save-modal__close" aria-label="Close">
-          <svg class="sf-toolbar__icon"><use href="#close"></use></svg>
-        </button>
-      </div>
-      <div class="sf-modal__body">
-        <p style="margin:0 0 12px 0;color:var(--text-secondary);font-size:13px;line-height:1.5">
-          Every lane will be set to <strong>${plan.targetCount} evenly-spaced ports</strong> so connectors between same-index ports become parallel. The lanes below will have their port layout regenerated — existing connectors on those lanes may move vertically.
-        </p>
-        <div class="sf-modal__row-list">${rows}</div>
-      </div>
-      <div class="sf-modal__footer">
-        <button class="sf-modal__btn sf-modal__btn--primary sf-seq-autolayout-apply" style="margin-left:auto">Apply Auto Layout</button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
-  document.addEventListener('keydown', onKey);
-  overlay.querySelector('.sf-save-modal__backdrop').addEventListener('click', close);
-  overlay.querySelector('.sf-save-modal__close').addEventListener('click', close);
-  overlay.querySelector('.sf-seq-autolayout-apply').addEventListener('click', () => {
+  const { footer, close } = buildModal({
+    title: 'Auto Layout may shift connectors',
+    className: 'sf-save-modal sf-seq-autolayout-modal',
+    dialogClass: 'sf-save-modal__dialog', // 520px
+    bodyHtml: `
+      <p style="margin:0 0 12px 0;color:var(--text-secondary);font-size:13px;line-height:1.5">
+        Every lane will be set to <strong>${plan.targetCount} evenly-spaced ports</strong> so connectors between same-index ports become parallel. The lanes below will have their port layout regenerated — existing connectors on those lanes may move vertically.
+      </p>
+      <div class="sf-modal__row-list">${rows}</div>`,
+    footerHtml: '<button class="sf-modal__btn sf-modal__btn--primary sf-seq-autolayout-apply" style="margin-left:auto">Apply Auto Layout</button>',
+  });
+  footer.querySelector('.sf-seq-autolayout-apply').addEventListener('click', () => {
     close();
     onConfirm();
   });
@@ -828,60 +787,38 @@ function showSequenceAutoLayoutConfirm(plan, onConfirm) {
 function showMermaidImportModal() {
   document.querySelector('.sf-mermaid-modal')?.remove();
 
-  const overlay = document.createElement('div');
-  overlay.className = 'sf-mermaid-modal sf-modal';
-  overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-modal', 'true');
-  overlay.innerHTML = `
-    <div class="sf-modal__overlay"></div>
-    <div class="sf-modal__dialog" style="width:620px;max-width:92vw">
-      <div class="sf-modal__header">
-        <h2 class="sf-modal__title">
-          Paste Mermaid
-          <span class="sf-badge sf-badge--beta" style="margin-left:8px;padding:2px 6px;font-size:10px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;border-radius:3px;background:var(--brand-amber, #F6B355);color:#1A1A1A;vertical-align:middle">Beta</span>
-        </h2>
-        <button class="sf-toolbar__button sf-mermaid-modal__close" aria-label="Close">
-          <svg class="sf-toolbar__icon"><use href="#close"></use></svg>
-        </button>
-      </div>
-      <div class="sf-modal__body" style="padding:var(--spacing-md) var(--spacing-lg)">
-        <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
-          Paste mermaid.js code:
-        </p>
-        <textarea class="sf-mermaid-modal__input" spellcheck="false" rows="14"
-          placeholder="flowchart TD&#10;  A[Start] --&gt; B{Decision}&#10;  B --&gt;|Yes| C[Process]&#10;  B --&gt;|No| D[End]"
-          style="width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;padding:8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-panel);color:var(--text-primary);resize:vertical"></textarea>
-        <p class="sf-mermaid-modal__supported" style="margin:var(--spacing-sm) 0 0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
-          <span class="sf-mermaid-modal__supported-label">Supported:</span>
-          <span data-type="graph"><strong>graph</strong> → Process</span>,
-          <span data-type="flowchart"><strong>flowchart</strong> → Process</span>,
-          <span data-type="state"><strong>stateDiagram</strong> → Process</span>,
-          <span data-type="er"><strong>erDiagram</strong> → Data Model</span>,
-          <span data-type="sequence"><strong>sequenceDiagram</strong> → Sequence</span>.
-        </p>
-      </div>
-      <div class="sf-modal__footer" style="gap:8px">
-        <button class="sf-modal__btn sf-modal__btn--primary sf-mermaid-modal__import" style="margin-left:auto" disabled>Load</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
+  const { dialog, body, footer, header, close } = buildModal({
+    title: 'Paste Mermaid',
+    className: 'sf-mermaid-modal',
+    width: '620px',
+    bodyStyle: 'padding:var(--spacing-md) var(--spacing-lg)',
+    bodyHtml: `
+      <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
+        Paste mermaid.js code:
+      </p>
+      <textarea class="sf-mermaid-modal__input" spellcheck="false" rows="14"
+        placeholder="flowchart TD&#10;  A[Start] --&gt; B{Decision}&#10;  B --&gt;|Yes| C[Process]&#10;  B --&gt;|No| D[End]"
+        style="width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;padding:8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-panel);color:var(--text-primary);resize:vertical"></textarea>
+      <p class="sf-mermaid-modal__supported" style="margin:var(--spacing-sm) 0 0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
+        <span class="sf-mermaid-modal__supported-label">Supported:</span>
+        <span data-type="graph"><strong>graph</strong> → Process</span>,
+        <span data-type="flowchart"><strong>flowchart</strong> → Process</span>,
+        <span data-type="state"><strong>stateDiagram</strong> → Process</span>,
+        <span data-type="er"><strong>erDiagram</strong> → Data Model</span>,
+        <span data-type="sequence"><strong>sequenceDiagram</strong> → Sequence</span>.
+      </p>`,
+    footerHtml: '<button class="sf-modal__btn sf-modal__btn--primary sf-mermaid-modal__import" style="margin-left:auto" disabled>Load</button>',
+  });
+  dialog.style.maxWidth = '92vw'; // preserve prior inline override
+  // Static "Beta" badge after the title text (title itself stays textContent-safe)
+  header.querySelector('.sf-modal__title').insertAdjacentHTML('beforeend',
+    ' <span class="sf-badge sf-badge--beta" style="margin-left:8px;padding:2px 6px;font-size:10px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;border-radius:3px;background:var(--brand-amber, #F6B355);color:#1A1A1A;vertical-align:middle">Beta</span>');
 
-  const input = overlay.querySelector('.sf-mermaid-modal__input');
-  const importBtn = overlay.querySelector('.sf-mermaid-modal__import');
-  const supportedP = overlay.querySelector('.sf-mermaid-modal__supported');
-  const supportedLabel = overlay.querySelector('.sf-mermaid-modal__supported-label');
-  const supportedSpans = overlay.querySelectorAll('.sf-mermaid-modal__supported [data-type]');
-
-  const close = () => {
-    overlay.remove();
-    document.removeEventListener('keydown', onKey);
-  };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
-  document.addEventListener('keydown', onKey);
-
-  overlay.querySelector('.sf-modal__overlay').addEventListener('click', close);
-  overlay.querySelector('.sf-mermaid-modal__close').addEventListener('click', close);
+  const input = body.querySelector('.sf-mermaid-modal__input');
+  const importBtn = footer.querySelector('.sf-mermaid-modal__import');
+  const supportedP = body.querySelector('.sf-mermaid-modal__supported');
+  const supportedLabel = body.querySelector('.sf-mermaid-modal__supported-label');
+  const supportedSpans = body.querySelectorAll('.sf-mermaid-modal__supported [data-type]');
 
   const resetSpans = () => {
     supportedSpans.forEach(s => {
@@ -1006,51 +943,32 @@ function showExportModal() {
       : 'No full backup yet — use Back up now to back up everything.';
   };
 
-  const overlay = document.createElement('div');
-  overlay.className = 'sf-export-modal sf-modal';
-  overlay.setAttribute('role', 'dialog');
-  overlay.setAttribute('aria-modal', 'true');
-  overlay.innerHTML = `
-    <div class="sf-modal__overlay sf-export-modal__backdrop"></div>
-    <div class="sf-modal__dialog sf-save-modal__dialog">
-      <div class="sf-modal__header">
-        <h2 class="sf-modal__title">Export to JSON</h2>
-        <button class="sf-toolbar__button sf-export-modal__close" aria-label="Close">
-          <svg class="sf-toolbar__icon"><use href="#close"></use></svg>
-        </button>
+  const { overlay, body: bodyEl, footer, close } = buildModal({
+    title: 'Export to JSON',
+    className: 'sf-export-modal',
+    dialogClass: 'sf-save-modal__dialog', // 520px (shared with Save)
+    bodyClass: 'sf-modal__row-list',
+    bodyHtml: `
+      <div class="sf-modal__advisory sf-export-modal__advisory">
+        <span class="sf-export-modal__advisory-text"></span>
+        <button class="sf-modal__btn sf-export-modal__backup-now">Back up now</button>
       </div>
-      <div class="sf-modal__body sf-modal__row-list">
-        <div class="sf-modal__advisory sf-export-modal__advisory">
-          <span class="sf-export-modal__advisory-text"></span>
-          <button class="sf-modal__btn sf-export-modal__backup-now">Back up now</button>
+      <div class="sf-modal__list-box">
+        <div class="sf-modal__list-header">
+          <label class="sf-modal__select-all"><input type="checkbox" class="sf-modal__check-all"> Select all</label>
         </div>
-        <div class="sf-modal__list-box">
-          <div class="sf-modal__list-header">
-            <label class="sf-modal__select-all"><input type="checkbox" class="sf-modal__check-all"> Select all</label>
-          </div>
-          ${tabRows}${saveRows}${templatesRow}
-        </div>
-      </div>
-      <div class="sf-modal__footer">
-        <button class="sf-modal__btn sf-modal__btn--primary sf-modal__action-btn" style="margin-left:auto" disabled>Export Selected</button>
-      </div>
-    </div>`;
-  const advisoryText = overlay.querySelector('.sf-export-modal__advisory-text');
+        ${tabRows}${saveRows}${templatesRow}
+      </div>`,
+    footerHtml: '<button class="sf-modal__btn sf-modal__btn--primary sf-modal__action-btn" style="margin-left:auto" disabled>Export Selected</button>',
+  });
+  const advisoryText = bodyEl.querySelector('.sf-export-modal__advisory-text');
   advisoryText.textContent = fmtBackupAdvisory(); // textContent — safe
-
-  document.body.appendChild(overlay);
-
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
-  document.addEventListener('keydown', onKey);
-  overlay.querySelector('.sf-export-modal__backdrop').addEventListener('click', close);
-  overlay.querySelector('.sf-export-modal__close').addEventListener('click', close);
 
   // "Back up now" — full backup of everything (resets the reminder clock); the
   // advisory date updates in place. The modal stays open. On success the button
   // flashes a brand-green "✓ Backed up!" for a beat, then reverts to the amber
   // outline (same affordance as the share "✓ Copied!" button).
-  const backupNowBtn = overlay.querySelector('.sf-export-modal__backup-now');
+  const backupNowBtn = bodyEl.querySelector('.sf-export-modal__backup-now');
   let backupRevertTimer = null;
   backupNowBtn.addEventListener('click', () => {
     if (!modules.persistence.exportEverything()) return;
@@ -1063,9 +981,6 @@ function showExportModal() {
       backupNowBtn.textContent = 'Back up now';
     }, 2000);
   });
-
-  const bodyEl = overlay.querySelector('.sf-modal__body');
-  const footer = overlay.querySelector('.sf-modal__footer');
 
   wireSelectAll(bodyEl, footer, '.sf-modal__row-check', () => {
     const checks = [...overlay.querySelectorAll('.sf-modal__row-check')];
@@ -1121,10 +1036,6 @@ function getDiagramTypeIcon(type) {
     org: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="5" y="1" width="6" height="4" rx="1"/><rect x="0.5" y="10" width="6" height="4" rx="1" opacity="0.7"/><rect x="9.5" y="10" width="6" height="4" rx="1" opacity="0.7"/><path d="M8 5v2H3.5V10M8 7h4.5V10" stroke="currentColor" stroke-width="1" fill="none"/></svg>',
   };
   return icons[type] || icons.architecture;
-}
-
-function escHtml(str) {
-  return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '&#39;');
 }
 
 // Focus-trap handles for the two statically-rendered modals (about + load).
@@ -1218,18 +1129,6 @@ function buildLoadItem(save) {
   item.appendChild(info);
   item.appendChild(actions);
   return item;
-}
-
-/** Relative-time label ("just now" / "3m ago" / "2h ago" / "5d ago"); null when
- *  there's no timestamp. Shared by the Save/Export modal "Modified …" meta and
- *  the Load modal's "Saved …". */
-function formatRelativeTime(ts) {
-  if (!ts) return null;
-  const ageSec = Math.floor((Date.now() - ts) / 1000);
-  if (ageSec < 60) return 'just now';
-  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
-  if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
-  return `${Math.floor(ageSec / 86400)}d ago`;
 }
 
 function formatSaveMeta(save) {

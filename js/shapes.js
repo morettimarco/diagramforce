@@ -2,7 +2,7 @@
 // All shapes are under the `sf` namespace
 // Uses JointJS v4 JSON markup array syntax
 
-import { parseMarkdown } from './markdown.js?v=1.13.0';
+import { parseMarkdown } from './markdown.js?v=1.14.0';
 
 // ── Markdown foreignObject helper (CR-6.1) ─────────────────────────
 // sf.TextLabel and sf.Note render their text as native HTML inside an SVG
@@ -590,21 +590,119 @@ export function register() {
           width: 'calc(w)', height: 'calc(h)',
           fill: 'transparent', stroke: 'none',
         },
+        // Transparent hit target sized by sf.LineView to the painted caption
+        // above the line, so clicking the label selects the line. The markdown
+        // FO is pointer-events:none, so clicks fall through to this rect, which
+        // JointJS hit-tests for selection. Hidden until the line has a label.
+        labelHit: {
+          x: 0, y: 0, width: 0, height: 0,
+          fill: 'transparent', stroke: 'none',
+          visibility: 'hidden',
+        },
         line: {
           x1: 0, y1: 'calc(0.5 * h)', x2: 'calc(w)', y2: 'calc(0.5 * h)',
           stroke: 'var(--text-muted)',
           strokeWidth: 2,
           strokeLinecap: 'round',
         },
+        // Optional caption rendered above the line by sf.LineView via a
+        // markdown <foreignObject>. Empty by default. This SVG <text> only
+        // stores the text/style attrs — it's hidden (display:none) by the FO
+        // renderer, which paints the actual markdown.
+        label: {
+          text: '',
+          fontSize: 13,
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+          fill: 'var(--text-secondary)',
+          x: 0, y: 0,
+          textVerticalAnchor: 'bottom',
+        },
       },
     },
     {
       markup: [
         { tagName: 'rect', selector: 'hitArea' },
+        { tagName: 'rect', selector: 'labelHit' },
         { tagName: 'line', selector: 'line' },
+        { tagName: 'text', selector: 'label' },
       ],
     }
   );
+
+  // sf.LineView — paints the optional caption above the line as markdown.
+  // The line sits at the element's vertical centre in an 8px-tall box, so the
+  // label band lives above it (negative y), bottom-anchored (align-items:
+  // flex-end) so multi-line markdown grows upward and never crosses the line.
+  // Empty label ⇒ nothing visible (the FO renders an empty content div).
+  // Auto-resolved for sf.Line elements via paper.cellViewNamespace.
+  joint.shapes.sf.LineView = joint.dia.ElementView.extend({
+    initialize() {
+      joint.dia.ElementView.prototype.initialize.apply(this, arguments);
+      this.listenTo(this.model, 'change:attrs change:size', () => this._renderMarkdown());
+    },
+    render() {
+      joint.dia.ElementView.prototype.render.apply(this, arguments);
+      this._renderMarkdown();
+      return this;
+    },
+    update() {
+      joint.dia.ElementView.prototype.update.apply(this, arguments);
+      this._renderMarkdown();
+    },
+    _renderMarkdown() {
+      const m = this.model;
+      const { width, height } = m.size();
+      const label = m.attr('label') || {};
+      const text = label.text ?? '';
+      const fontSize = label.fontSize ?? 13;
+      const fontFamily = label.fontFamily ?? 'system-ui, -apple-system, sans-serif';
+      const fill = label.fill ?? 'var(--text-secondary)';
+      const GAP = 4;     // gap between caption and line
+      const BAND = 64;   // label band height; overflow:visible lets taller text grow upward
+      const w = Math.max(width, 120);
+      const foY = (height / 2) - GAP - BAND;
+      const css = `display:flex;align-items:flex-end;justify-content:flex-start;`
+        + `width:100%;height:100%;`
+        + `font-size:${fontSize}px;font-family:${fontFamily};color:${fill};`
+        + `line-height:1.3;text-align:left;`
+        + `white-space:pre-wrap;word-break:break-word;overflow:visible;`;
+      ensureMarkdownFO(this, 'label', text, { x: 0, y: foY, width: w, height: BAND, css, hideSelector: 'label' });
+      const fo = this.el.querySelector(':scope > foreignObject[data-md="label"]');
+      if (fo) fo.setAttribute('overflow', 'visible');
+      // Size the click target to the painted caption. Sync handles the laid-out
+      // update path; one deduped rAF handles the first render that runs before
+      // the view is inserted into the DOM (FO not laid out yet ⇒ offsetWidth 0).
+      this._sizeLabelHit();
+      if (text && typeof requestAnimationFrame === 'function') {
+        if (this._hitRaf) cancelAnimationFrame(this._hitRaf);
+        this._hitRaf = requestAnimationFrame(() => { this._hitRaf = null; this._sizeLabelHit(); });
+      }
+    },
+    _sizeLabelHit() {
+      const hit = this.el.querySelector('[joint-selector="labelHit"]');
+      if (!hit) return;
+      const { height } = this.model.size();
+      const text = (this.model.attr('label') || {}).text ?? '';
+      const GAP = 4, BAND = 64;
+      const foY = (height / 2) - GAP - BAND;
+      const fo = this.el.querySelector(':scope > foreignObject[data-md="label"]');
+      const content = fo && fo.querySelector('[data-md-content]');
+      const tw = content ? content.offsetWidth : 0;
+      const th = content ? content.offsetHeight : 0;
+      if (text && tw > 0 && th > 0) {
+        const PAD = 3;
+        hit.setAttribute('x', String(-PAD));
+        hit.setAttribute('y', String(foY + BAND - th - PAD));
+        hit.setAttribute('width', String(tw + PAD * 2));
+        hit.setAttribute('height', String(th + PAD * 2));
+        hit.setAttribute('visibility', 'visible');
+      } else {
+        hit.setAttribute('visibility', 'hidden');
+        hit.setAttribute('width', '0');
+        hit.setAttribute('height', '0');
+      }
+    },
+  });
 
   // --- Image ---
   // Raster image element. The data URI lives on `attrs.image.href`; the body
@@ -1581,7 +1679,7 @@ export function register() {
   joint.shapes.sf.AnnotationView = joint.dia.ElementView.extend({
     initialize() {
       joint.dia.ElementView.prototype.initialize.apply(this, arguments);
-      this.listenTo(this.model, 'change:attrs change:size change:bracketSide',
+      this.listenTo(this.model, 'change:attrs change:size change:bracketSide change:angle',
         () => this._renderMarkdown());
     },
     render() {
@@ -1606,16 +1704,37 @@ export function register() {
       const isRight = (m.get('bracketSide') || 'right') === 'right';
       const x = isRight ? 0 : GUTTER;
       const w = Math.max(0, width - GUTTER);
+      // Auto-horizontal label — the annotation's text always reads level no
+      // matter how the bracket is rotated. The <foreignObject> lives inside the
+      // element's own rotation frame, so we counter the bracket's angle:
+      // foAngle = −elementAngle. Re-rendered on change:angle (in the listenTo
+      // above) so it holds as the bracket turns. SVG transform on the FO, NOT a
+      // CSS transform on the inner HTML — CSS composed unreliably with the
+      // element rotation and made the label vanish. overflow:visible while the
+      // FO is turned so the text isn't clipped by its box.
+      const norm = a => ((Math.round(a) % 360) + 360) % 360;
+      const foAngle = norm(-(m.angle() || 0));
       const css = `display:flex;align-items:center;justify-content:flex-start;`
         + `width:100%;height:100%;`
         + `font-size:${fontSize}px;font-family:${fontFamily};color:${fill};`
         + `line-height:1.3;text-align:left;`
-        + `white-space:pre-wrap;word-break:break-word;overflow:hidden;`;
+        + `white-space:pre-wrap;word-break:break-word;`
+        + (foAngle ? `overflow:visible;` : `overflow:hidden;`);
       ensureMarkdownFO(this, 'label', text, {
         x, y: 0, width: w, height,
         css,
         hideSelector: 'label',
       });
+      const fo = this.el.querySelector(':scope > foreignObject[data-md="label"]');
+      if (fo) {
+        if (foAngle) {
+          fo.setAttribute('transform', `rotate(${foAngle} ${x + w / 2} ${height / 2})`);
+          fo.setAttribute('overflow', 'visible');
+        } else {
+          fo.removeAttribute('transform');
+          fo.removeAttribute('overflow');
+        }
+      }
     },
   });
 

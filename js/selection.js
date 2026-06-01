@@ -1,9 +1,9 @@
 // Selection manager — tracks selected elements
 // Provides single-click, shift-click, rubber-band selection, and alignment ops
 
-import * as clipboard from './clipboard.js?v=1.13.0';
-import * as history from './history.js?v=1.13.0';
-import { isFocusDimmingEnabled } from './canvas.js?v=1.13.0';
+import * as clipboard from './clipboard.js?v=1.14.0';
+import * as history from './history.js?v=1.14.0';
+import { isFocusDimmingEnabled } from './canvas.js?v=1.14.0';
 
 let graph, paper;
 const selectedIds = new Set();
@@ -404,7 +404,6 @@ export function getSelectedElements() {
   return [...selectedIds].map(id => graph.getCell(id)).filter(Boolean);
 }
 
-export function isSelected(id) { return selectedIds.has(id); }
 export function getCount() { return selectedIds.size; }
 
 export function addToSelection(id) {
@@ -803,50 +802,6 @@ function rectsIntersect(a, b) {
     a.y + a.height < b.y ||
     b.y + b.height < a.y
   );
-}
-
-// --- Alignment operations ---
-
-export function alignLeft() {
-  const els = getSelectedElements().filter(e => e.isElement());
-  if (els.length < 2) return;
-  const minX = Math.min(...els.map(e => e.position().x));
-  els.forEach(e => e.position(minX, e.position().y));
-}
-
-export function alignCenterH() {
-  const els = getSelectedElements().filter(e => e.isElement());
-  if (els.length < 2) return;
-  const avg = els.reduce((s, e) => s + e.position().x + e.size().width / 2, 0) / els.length;
-  els.forEach(e => e.position(avg - e.size().width / 2, e.position().y));
-}
-
-export function alignRight() {
-  const els = getSelectedElements().filter(e => e.isElement());
-  if (els.length < 2) return;
-  const maxX = Math.max(...els.map(e => e.position().x + e.size().width));
-  els.forEach(e => e.position(maxX - e.size().width, e.position().y));
-}
-
-export function alignTop() {
-  const els = getSelectedElements().filter(e => e.isElement());
-  if (els.length < 2) return;
-  const minY = Math.min(...els.map(e => e.position().y));
-  els.forEach(e => e.position(e.position().x, minY));
-}
-
-export function alignMiddle() {
-  const els = getSelectedElements().filter(e => e.isElement());
-  if (els.length < 2) return;
-  const avg = els.reduce((s, e) => s + e.position().y + e.size().height / 2, 0) / els.length;
-  els.forEach(e => e.position(e.position().x, avg - e.size().height / 2));
-}
-
-export function alignBottom() {
-  const els = getSelectedElements().filter(e => e.isElement());
-  if (els.length < 2) return;
-  const maxY = Math.max(...els.map(e => e.position().y + e.size().height));
-  els.forEach(e => e.position(e.position().x, maxY - e.size().height));
 }
 
 // ── Long-press context menu (touch / mobile) ──────────────────────

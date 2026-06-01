@@ -1,0 +1,360 @@
+// JSON pipeline — untrusted-graph sanitisation + the load/import path for every
+// Diagramforce file format (single diagram, export bundle, templates), driven by
+// the file picker (importJSON) and the paste-JSON modal (pasteJSON). Extracted
+// from persistence.js (Phase 3, Slice 2). sanitizeGraphJSON is PURE (consts only)
+// so unit tests reach it through the facade with no init(). Everything else is
+// runtime-only and reads live state/callbacks from the persistence context (pctx);
+// version checks + dedup signatures come from the leaf versioning module.
+
+import { contentSignature, checkVersionWarning } from './versioning.js?v=1.14.0';
+import { normalizeDateSuffix } from '../util.js?v=1.14.0';
+import { escHtml } from '../util.js?v=1.14.0';
+import { showToast, showError, buildModal } from '../feedback.js?v=1.14.0';
+import { pctx } from './context.js?v=1.14.0';
+
+// Maximum number of cells to accept from external sources (share URLs, JSON import)
+const MAX_CELL_COUNT = 2000;
+
+/** Sanitise graph JSON from untrusted sources (share URLs, imports).
+ *  Strips event-handler attributes and javascript: URIs to prevent XSS. */
+// S4 (v1.12.0) — allowlist of cell types the renderer accepts from untrusted
+// JSON (share URL, file import, paste-JSON). Anything outside this set is
+// dropped during sanitization. Mirrors the shapes registered in shapes.js
+// plus the JointJS standard link. If a new shape lands in shapes.js, add
+// its type here too — verified at audit time, but a runtime test on a
+// fresh codebase would be even safer.
+const ALLOWED_CELL_TYPES = new Set([
+  // Architecture
+  'sf.SimpleNode', 'sf.Container', 'sf.Zone', 'sf.TextLabel', 'sf.Note',
+  'sf.Annotation', 'sf.Image', 'sf.Link', 'sf.Line', 'sf.Task',
+  // BPMN / Process
+  'sf.BpmnEvent', 'sf.BpmnTask', 'sf.BpmnGateway', 'sf.BpmnSubprocess',
+  'sf.BpmnLoop', 'sf.BpmnPool', 'sf.BpmnDataObject',
+  // Flow
+  'sf.FlowProcess', 'sf.FlowDecision', 'sf.FlowTerminator', 'sf.FlowDatabase',
+  'sf.FlowDocument', 'sf.FlowIO', 'sf.FlowPredefined', 'sf.FlowOffPage',
+  // Data Model
+  'sf.DataObject',
+  // Organisation
+  'sf.OrgPerson',
+  // Gantt
+  'sf.GanttTask', 'sf.GanttMilestone', 'sf.GanttMarker', 'sf.GanttTimeline',
+  'sf.GanttGroup',
+  // Sequence
+  'sf.SequenceParticipant', 'sf.SequenceActor', 'sf.SequenceActivation',
+  'sf.SequenceFragment',
+  // JointJS link
+  'standard.Link',
+]);
+
+export function sanitizeGraphJSON(graphData) {
+  if (!graphData || !Array.isArray(graphData.cells)) return graphData;
+  if (graphData.cells.length > MAX_CELL_COUNT) {
+    throw new Error(`Diagram exceeds maximum element count (${MAX_CELL_COUNT}).`);
+  }
+  const stripAttrs = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const key of Object.keys(obj)) {
+      // Drop prototype-pollution vectors from untrusted JSON.
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        delete obj[key];
+        continue;
+      }
+      // Remove event handler attributes (onclick, onload, etc.)
+      if (/^on[a-z]/i.test(key)) { delete obj[key]; continue; }
+      const val = obj[key];
+      // Neutralise script-bearing URIs (javascript:/vbscript:/data:text/html).
+      // data:image/* is intentionally left intact — image cells rely on it.
+      if (typeof val === 'string'
+          && /^\s*(javascript|vbscript)\s*:|^\s*data\s*:\s*text\/html/i.test(val)) {
+        obj[key] = '';
+      } else if (typeof val === 'object' && val !== null) {
+        stripAttrs(val);
+      }
+    }
+  };
+  // S4 (v1.12.0) — drop any cell whose type isn't in the registered shape
+  // allowlist. Closes the fuzzing surface where a crafted share URL could
+  // ship a cell with an unknown `type` that JointJS would silently render
+  // with default attrs (or worse, with attrs the app's renderer never
+  // expected to handle). Drop silently — a noisy error would help an
+  // attacker probe the allowlist boundaries.
+  graphData.cells = graphData.cells.filter(c =>
+    c && typeof c === 'object' && typeof c.type === 'string' && ALLOWED_CELL_TYPES.has(c.type)
+  );
+  for (const cell of graphData.cells) { stripAttrs(cell); }
+  return graphData;
+}
+
+export function importJSON() {
+  const input = document.getElementById('file-input');
+  input.onchange = (evt) => {
+    const files = Array.from(evt.target.files);
+    if (!files.length) return;
+    for (const file of files) {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const fallbackName = file.name.replace(/\.json$/i, '') || 'Imported';
+        await loadJSONText(e.target.result, fallbackName);
+      };
+      reader.readAsText(file);
+    }
+    input.value = '';
+  };
+  input.click();
+}
+
+/** Restore a bundled diagram as a named browser save (collision-safe name).
+ *  Non-destructive: doesn't touch open tabs — the diagram lands in
+ *  Load → Load from Browser. Sanitises the (untrusted) graph first. */
+function restoreDiagramAsSave(name, diagramType, graphJSON, viewport, appVersion) {
+  const { normalizeDiagramType, namedSavePrefix: NAMED_SAVE_PREFIX, appVersion: APP_VERSION } = pctx;
+  if (!graphJSON) return false;
+  sanitizeGraphJSON(graphJSON);
+  const base = normalizeDateSuffix(String(name || 'Imported')).slice(0, 80) || 'Imported';
+  let finalName = base;
+  for (let n = 2; localStorage.getItem(NAMED_SAVE_PREFIX + finalName) !== null; n++) {
+    finalName = `${base} (${n})`;
+  }
+  try {
+    localStorage.setItem(NAMED_SAVE_PREFIX + finalName, JSON.stringify({
+      name: finalName,
+      timestamp: Date.now(),
+      diagramType: normalizeDiagramType(diagramType),
+      graph: graphJSON,
+      viewport: viewport || null,
+      // Preserve the diagram's original version so re-imports stay honest;
+      // fall back to the current app version when the source carried none.
+      appVersion: appVersion || APP_VERSION,
+    }));
+    return true;
+  } catch { return false; }
+}
+
+/** Content-signature + name sets of every existing diagram (open tabs + named
+ *  saves) — the dedup reference for an import. */
+function collectExistingDiagrams() {
+  const { getAllTabs: getAllTabsCallback, getTabGraph: getTabGraphCallback, getNamedSaves, readNamedSave } = pctx;
+  const sigs = new Set();
+  const names = new Set();
+  for (const t of (getAllTabsCallback ? getAllTabsCallback() : [])) {
+    if (t.name) names.add(t.name);
+    const g = getTabGraphCallback ? getTabGraphCallback(t.id) : null;
+    if (g?.cells) sigs.add(contentSignature(g.cells));
+  }
+  for (const s of getNamedSaves()) {
+    names.add(s.name);
+    const d = readNamedSave(s.key);
+    if (d?.graph?.cells) sigs.add(contentSignature(d.graph.cells));
+  }
+  return { sigs, names };
+}
+
+/** Dedup + rename a bundle's diagrams against what already exists:
+ *   - exact content match (same `graph.cells`) → **skipped** (no duplicate)
+ *   - name match but different content → name gets **" (Restored)"**
+ *  Also dedups within the file, and sanitises each kept graph. Returns the
+ *  prepared `{name, diagramType, graph, viewport}` list to open or save. */
+function prepareImportedDiagrams(rawDiagrams) {
+  const { normalizeDiagramType } = pctx;
+  const { sigs, names } = collectExistingDiagrams();
+  const seen = new Set();
+  const out = [];
+  for (const d of rawDiagrams) {
+    const cells = d?.graph?.cells;
+    if (!Array.isArray(cells)) continue;
+    const sig = contentSignature(cells);
+    if (sigs.has(sig) || seen.has(sig)) continue;   // exact duplicate → skip
+    seen.add(sig);
+    sanitizeGraphJSON(d.graph);
+    let name = String(d.name || 'Imported').slice(0, 80) || 'Imported';
+    if (names.has(name)) name = `${name} (Restored)`;
+    names.add(name);
+    out.push({ name, diagramType: normalizeDiagramType(d.diagramType), graph: d.graph, viewport: d.viewport || null, appVersion: d.appVersion || null });
+  }
+  return out;
+}
+
+/**
+ * Parse a JSON string and import it — handles every Diagramforce file format:
+ *   - `diagramforce-export` bundle (+ legacy `diagramforce-diagrams`): diagrams
+ *     are restored as named browser saves (then the Load-from-Browser modal
+ *     opens so the user sees them); templates merged into the library.
+ *   - `diagramforce-templates`: merged into the template library.
+ *   - single diagram (`{graph,…}`): opened as a new tab (the original behaviour).
+ * Used by `importJSON` (file picker) and `pasteJSON` (textarea modal). Returns
+ * true on success.
+ */
+async function loadJSONText(jsonText, fallbackName) {
+  const { templatesBackupApi, showLoadModal: showLoadModalCallback, onImport: onImportCallback, normalizeDiagramType, graph, canvas: canvasModule } = pctx;
+  let data;
+  try { data = JSON.parse(jsonText); }
+  catch (err) { showError(`Failed to load ${fallbackName ? `"${fallbackName}"` : 'JSON'}: ${err.message}`); return false; }
+
+  const okVer = await checkVersionWarning(data.appVersion || null, data.title || fallbackName || 'Imported', data);
+  if (!okVer) return false;
+
+  const isBundle = data.schema === 'diagramforce-export' || data.schema === 'diagramforce-diagrams'
+    || (Array.isArray(data.diagrams) && !data.graph);
+  const isTemplatesOnly = !isBundle && (data.schema === 'diagramforce-templates'
+    || (Array.isArray(data.templates) && !data.graph && !Array.isArray(data.diagrams)));
+
+  // ── Bundle: dedup + rename, restore to browser saves, then SHOW the user ──
+  // Diagrams are saved to localStorage (not force-opened as tabs) and the
+  // Load-from-Browser modal is opened so the user sees exactly where their
+  // files landed and can pick what to open.
+  if (isBundle) {
+    const rawDiagrams = Array.isArray(data.diagrams) ? data.diagrams : [];
+    const rawTemplates = Array.isArray(data.templates) ? data.templates : [];
+    const diagrams = prepareImportedDiagrams(rawDiagrams);   // dedup + rename + sanitise
+
+    let saved = 0;
+    for (const d of diagrams) {
+      // Preserve each diagram's own version, else the bundle's, else current.
+      if (restoreDiagramAsSave(d.name, d.diagramType, d.graph, d.viewport, d.appVersion || data.appVersion)) saved++;
+    }
+    const tc = (rawTemplates.length && templatesBackupApi?.importMerge)
+      ? (templatesBackupApi.importMerge(rawTemplates) || 0) : 0;
+
+    // Import tally. "skipped" = file entries that did NOT become new saves
+    // because an exact content-copy is already open (as a tab) or saved here.
+    const stats = {
+      imported: saved,
+      skipped: Math.max(0, rawDiagrams.length - saved),
+      templates: tc,
+      templatesSkipped: Math.max(0, rawTemplates.length - tc),
+    };
+
+    // If the file carried diagrams, reveal the Load-from-Browser modal and let
+    // it render an inline import summary at the top. That modal is the right
+    // surface: the user is already looking there for their files, and the
+    // summary explains why one may be absent from the list (it's an open tab,
+    // or an exact duplicate). This replaces the fleeting toast for this path.
+    if (rawDiagrams.length && showLoadModalCallback) {
+      showLoadModalCallback(stats);
+      return true;
+    }
+
+    // Templates-only file (no modal to host the banner), or no modal wired →
+    // fall back to a toast.
+    if (saved || tc) {
+      const parts = [];
+      if (saved) parts.push(`${saved} diagram${saved === 1 ? '' : 's'}`);
+      if (tc) parts.push(`${tc} template${tc === 1 ? '' : 's'}`);
+      showToast(`Restored ${parts.join(' and ')} ✓`, 'success');
+    } else if (rawDiagrams.length || rawTemplates.length) {
+      showToast('Everything in this file is already in your browser.', 'info');
+    } else {
+      showToast('Nothing to import from this file.', 'warning');
+    }
+    return true;
+  }
+
+  // ── Templates-only file ──
+  if (isTemplatesOnly) {
+    if (!templatesBackupApi?.importMerge) { showError('Templates import is unavailable.'); return false; }
+    const n = templatesBackupApi.importMerge(data.templates || []) || 0;
+    if (n === 0) { showError('No valid templates found in that file.'); return false; }
+    showToast(`Imported ${n} template${n === 1 ? '' : 's'} ✓`, 'success');
+    return true;
+  }
+
+  // ── Single diagram → new tab (original behaviour) ──
+  try {
+    const name = data.title || fallbackName || 'Imported';
+    if (data?.graph) sanitizeGraphJSON(data.graph);
+    if (onImportCallback && data?.graph) {
+      onImportCallback(name, normalizeDiagramType(data.diagramType), data.graph, data.viewport);
+    } else if (data?.graph) {
+      canvasModule.setLoadingJSON(true);
+      try { graph.fromJSON(data.graph); } finally { canvasModule.setLoadingJSON(false); }
+      if (data?.viewport) canvasModule.setViewport(data.viewport);
+    } else {
+      throw new Error('No graph data found in JSON.');
+    }
+    showToast(`Loaded "${name}" ✓`, 'success');
+    return true;
+  } catch (err) {
+    showError(`Failed to load ${fallbackName ? `"${fallbackName}"` : 'JSON'}: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Paste-from-JSON modal: shows a textarea, validates the input is parseable
+ * JSON with a `graph` field, and loads it via the same pipeline as `importJSON`.
+ */
+export function pasteJSON() {
+  const { normalizeDiagramType, appVersion: APP_VERSION } = pctx;
+  document.querySelector('.sf-paste-json-modal')?.remove();
+
+  const { dialog, body, footer, close } = buildModal({
+    title: 'Paste JSON',
+    className: 'sf-paste-json-modal',
+    width: '620px',
+    bodyStyle: 'padding:var(--spacing-md) var(--spacing-lg)',
+    bodyHtml: `
+      <p style="margin:0 0 var(--spacing-sm);color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5">
+        Paste a Diagramforce JSON:
+      </p>
+      <textarea class="sf-paste-json-modal__input" spellcheck="false" rows="14"
+        placeholder='{ "appVersion": "${APP_VERSION}", "diagramType": "architecture", "graph": { "cells": [...] } }'
+        style="width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;padding:8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-panel);color:var(--text-primary);resize:vertical"></textarea>
+      <p class="sf-paste-json-modal__status" style="margin:var(--spacing-sm) 0 0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.5;min-height:1.4em">
+        Paste a diagram exported via <strong>Save → Export to JSON</strong> or generated using <a href="https://github.com/MateuszDabrowski/diagramforce/blob/main/DIAGRAM_JSON_SPEC.md" target="_blank" rel="noopener" style="color:var(--color-primary)">Diagram JSON Spec for LLMs</a>.
+      </p>`,
+    footerHtml: '<button class="sf-modal__btn sf-modal__btn--primary sf-paste-json-modal__load" style="margin-left:auto" disabled>Load</button>',
+  });
+  dialog.style.maxWidth = '92vw'; // preserve prior inline override (CSS default is calc(100vw - 32px))
+
+  const input = body.querySelector('.sf-paste-json-modal__input');
+  const status = body.querySelector('.sf-paste-json-modal__status');
+  const loadBtn = footer.querySelector('.sf-paste-json-modal__load');
+  const errColor = 'var(--color-error, #ba0517)';
+  const okColor = 'var(--text-secondary)';
+
+  const validate = () => {
+    const text = input.value.trim();
+    if (!text) {
+      status.style.color = okColor;
+      status.innerHTML = 'Paste a diagram exported via <strong>Save → Export to JSON</strong> or generated using <a href="https://github.com/MateuszDabrowski/diagramforce/blob/main/DIAGRAM_JSON_SPEC.md" target="_blank" rel="noopener" style="color:var(--color-primary)">Diagram JSON Spec for LLMs</a>.';
+      loadBtn.disabled = true;
+      return;
+    }
+    try {
+      const data = JSON.parse(text);
+      // Accept any format loadJSONText handles: single diagram, export bundle,
+      // or templates file.
+      const isBundle = data?.schema === 'diagramforce-export' || data?.schema === 'diagramforce-diagrams' || Array.isArray(data?.diagrams);
+      const isTemplates = data?.schema === 'diagramforce-templates' || (Array.isArray(data?.templates) && !data?.graph && !Array.isArray(data?.diagrams));
+      let detected;
+      if (data?.graph?.cells) {
+        detected = `<strong>${escHtml(data.title || 'Untitled')}</strong> (${escHtml(normalizeDiagramType(data.diagramType))}, ${data.graph.cells.length} cells)`;
+      } else if (isBundle) {
+        const dN = Array.isArray(data.diagrams) ? data.diagrams.length : 0;
+        const tN = Array.isArray(data.templates) ? data.templates.length : 0;
+        detected = `Bundle — ${dN} diagram${dN === 1 ? '' : 's'}${tN ? `, ${tN} template${tN === 1 ? '' : 's'}` : ''}`;
+      } else if (isTemplates) {
+        const tN = Array.isArray(data.templates) ? data.templates.length : 0;
+        detected = `Templates — ${tN} template${tN === 1 ? '' : 's'}`;
+      } else {
+        throw new Error('Unrecognised format (no graph, diagrams, or templates).');
+      }
+      status.style.color = okColor;
+      status.innerHTML = `Detected: ${detected}`;
+      loadBtn.disabled = false;
+    } catch (err) {
+      status.style.color = errColor;
+      status.textContent = `Invalid JSON: ${err.message}`;
+      loadBtn.disabled = true;
+    }
+  };
+  input.addEventListener('input', validate);
+
+  loadBtn.addEventListener('click', async () => {
+    const ok = await loadJSONText(input.value, 'Pasted');
+    if (ok) close();
+  });
+
+  setTimeout(() => input.focus(), 50);
+}

@@ -1,13 +1,13 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { wrapSelectionWithMarker } from './markdown.js?v=1.13.0';
-import { confirmModal, showToast } from './feedback.js?v=1.13.0';
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.13.0';
-import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.13.0';
-import * as stencilModule from './stencil.js?v=1.13.0';
-import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.13.0';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.13.0';
+import { wrapSelectionWithMarker } from './markdown.js?v=1.14.0';
+import { confirmModal, showToast, buildModal } from './feedback.js?v=1.14.0';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.14.0';
+import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.14.0';
+import * as stencilModule from './stencil.js?v=1.14.0';
+import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.14.0';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.14.0';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -16,11 +16,11 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.13.0';
-import * as history from './history.js?v=1.13.0';
-import { startImageAddFlow } from './image-component.js?v=1.13.0';
-import { escHtml } from './persistence.js?v=1.13.0';
-import { saveSelectionAsTemplate } from './templates.js?v=1.13.0';
+} from './clipboard.js?v=1.14.0';
+import * as history from './history.js?v=1.14.0';
+import { startImageAddFlow } from './image-component.js?v=1.14.0';
+import { escHtml } from './util.js?v=1.14.0';
+import { saveSelectionAsTemplate } from './templates.js?v=1.14.0';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
@@ -96,7 +96,7 @@ const DEFAULT_SIZES = {
   'sf.TextLabel':      { width: 200, height: 32 },
   'sf.Note':           { width: 200, height: 120 },
   'sf.Image':          { width: 240, height: 180 },
-  'sf.Task':           { width: 520, height: 160 },
+  'sf.Task':           { width: 540, height: 160 },
   'sf.BpmnEvent':      { width: 40,  height: 40 },
   'sf.BpmnTask':       { width: 120, height: 60 },
   'sf.BpmnGateway':    { width: 48,  height: 48 },
@@ -109,7 +109,7 @@ const DEFAULT_SIZES = {
   'sf.FlowTerminator': { width: 120, height: 60 },
   'sf.FlowDatabase':   { width: 80,  height: 60 },
   'sf.FlowDocument':   { width: 120, height: 60 },
-  'sf.FlowIO':         { width: 120, height: 60 },
+  'sf.FlowIO':         { width: 140, height: 60 },
   'sf.FlowPredefined': { width: 120, height: 60 },
   'sf.FlowOffPage':    { width: 60,  height: 60 },
   'sf.Annotation':     { width: 100, height: 120 },
@@ -1280,6 +1280,7 @@ function renderTextLabelProps(cell) {
   addNumberPair(size,
     'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
     'Height', cell.size().height, h => cell.resize(cell.size().width, h));
+  addRotationField(size, cell);
   addAutoSizeBtn(size, () => {
     const def = DEFAULT_SIZES['sf.TextLabel'];
     cell.resize(def.width, def.height);
@@ -1325,12 +1326,23 @@ function renderLineProps(cell) {
     history.startBatch();
     try {
       cell.set('lineStyle', style);
-      const dashMap = { solid: 'none', dashed: '12 6', dotted: '3 4', breaks: '16 8 2 8' };
+      // Patterns chosen to match the picklist previews 1:1 (the line has
+      // stroke-linecap:round, so `0 6` paints round dots; `16 8` = clean
+      // long-dashes). Previously dotted `3 4` read as small dashes and breaks
+      // `16 8 2 8` was a dash-DOT — neither matched its preview.
+      const dashMap = { solid: 'none', dashed: '12 6', dotted: '0 6', breaks: '16 8' };
       cell.attr('line/strokeDasharray', dashMap[style] || 'none');
     } finally {
       history.endBatch();
     }
   }
+
+  // Content — optional caption rendered above the line. Empty by default.
+  // Markdown supported, with the same shortcuts + hint as the Note description.
+  const content = section(bodyEl, 'Content');
+  const labelInput = addTextarea(content, 'Label', cell.attr('label/text') || '',
+    v => cell.attr('label/text', v));
+  wireMarkdownShortcuts(labelInput, content);
 
   // Appearance — canonical line ordering: Color → Line style → Line width
   // (identity first, then variant, then measurement).
@@ -1344,6 +1356,7 @@ function renderLineProps(cell) {
   addNumberPair(size,
     'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
     'Height', cell.size().height, h => cell.resize(cell.size().width, h));
+  addRotationField(size, cell);
   addAutoSizeBtn(size, () => {
     const def = DEFAULT_SIZES['sf.Line'];
     cell.resize(def.width, def.height);
@@ -1947,30 +1960,23 @@ function openFieldEditorModal(cell, onClose) {
   // Remove any existing modal
   document.getElementById('field-editor-modal')?.remove();
 
-  const overlay = document.createElement('div');
+  // buildModal owns the scaffold + focus-trap + focus-restore + backdrop/✕/Escape
+  // close. The bespoke borderless ✕ (closeClass + closeHtml) and footer scoping
+  // (footerClass) come from the extended factory API; onClose fires the caller's
+  // callback after teardown (matches the old close()).
+  const { overlay, body: bodyEl, close } = buildModal({
+    title: `Edit Fields — ${cell.get('objectName') || 'Object'}`, // textContent — buildModal escapes
+    dialogClass: 'sf-field-modal__dialog',
+    bodyClass: 'sf-field-modal__body',
+    footerClass: 'sf-field-modal__footer',
+    closeClass: 'sf-field-modal__close',
+    closeHtml: '✕',
+    footerHtml: `
+      <button class="sf-properties__btn sf-properties__btn--add-field sf-field-modal__add">+ Add Field</button>
+      <button class="sf-modal__btn sf-modal__btn--primary sf-field-modal__done">Done</button>`,
+    onClose,
+  });
   overlay.id = 'field-editor-modal';
-  overlay.className = 'sf-modal';
-
-  const fields = cell.get('fields') || [];
-
-  overlay.innerHTML = `
-    <div class="sf-modal__overlay sf-field-modal__backdrop"></div>
-    <div class="sf-modal__dialog sf-field-modal__dialog">
-      <div class="sf-modal__header">
-        <h2 class="sf-modal__title">Edit Fields — ${escHtml(cell.get('objectName') || 'Object')}</h2>
-        <button class="sf-modal__close sf-field-modal__close" title="Close">✕</button>
-      </div>
-      <div class="sf-modal__body sf-field-modal__body"></div>
-      <div class="sf-modal__footer sf-field-modal__footer">
-        <button class="sf-properties__btn sf-properties__btn--add-field sf-field-modal__add">+ Add Field</button>
-        <button class="sf-modal__btn sf-modal__btn--primary sf-field-modal__done">Done</button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-
-  const bodyEl = overlay.querySelector('.sf-field-modal__body');
 
   function rebuildModal() {
     bodyEl.innerHTML = '';
@@ -2171,15 +2177,8 @@ function openFieldEditorModal(cell, onClose) {
     rebuildModal();
   });
 
-  // Close handlers
-  function close() {
-    overlay.remove();
-    if (onClose) onClose();
-  }
-  overlay.querySelector('.sf-field-modal__backdrop').addEventListener('click', close);
-  overlay.querySelector('.sf-field-modal__close').addEventListener('click', close);
+  // Done closes; backdrop / ✕ / Escape are wired by buildModal.
   overlay.querySelector('.sf-field-modal__done').addEventListener('click', close);
-  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
 }
 
 function renderFlowShapeProps(cell) {
@@ -2261,6 +2260,10 @@ function renderAnnotationProps(cell) {
     }
   });
 
+  // Note: the annotation label is auto-kept horizontal regardless of the
+  // bracket's rotation (sf.AnnotationView counters the element angle), so no
+  // manual text-rotation control is needed.
+
   // Appearance
   const appearance = section(bodyEl, 'Appearance');
   addColor(appearance, 'Bracket color', cell.attr('bracket/stroke'), v => cell.attr('bracket/stroke', v));
@@ -2271,6 +2274,7 @@ function renderAnnotationProps(cell) {
   addNumberPair(size,
     'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
     'Height', cell.size().height, h => cell.resize(cell.size().width, h));
+  addRotationField(size, cell);
   addAutoSizeBtn(size, () => {
     const def = DEFAULT_SIZES['sf.Annotation'];
     cell.resize(def.width, def.height);
@@ -4227,6 +4231,49 @@ function addNumberPair(parent, labelA, valueA, onChangeA, labelB, valueB, onChan
   });
 
   parent.appendChild(pair);
+}
+
+// Generic rotation control: a degrees input + a quick "+90°" button. The caller
+// supplies how to read/write the angle. Currently drives the shape Rotation
+// (native `angle`); history merges a whole interaction (spinner / typing /
+// repeated +90) into ONE undo step (see js/history.js change:angle).
+function rotationField(parent, label, getDeg, setDeg) {
+  const norm = a => ((Math.round(a) % 360) + 360) % 360;
+  const f = field(parent, label);
+  f.classList.add('sf-prop-rotation');
+  const row = document.createElement('div');
+  row.className = 'sf-prop-rotation-row';
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'sf-properties__input';
+  input.min = 0; input.max = 360;
+  input.value = String(norm(getDeg() || 0));
+  let lastValid = input.value;
+  input.addEventListener('change', () => {
+    const raw = parseFloat(input.value);
+    if (isNaN(raw)) { input.value = lastValid; return; }
+    const v = norm(raw);
+    input.value = String(v); lastValid = input.value;
+    setDeg(v);
+  });
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sf-prop-rotate-90';
+  btn.textContent = '+90°';
+  btn.title = 'Rotate 90° clockwise';
+  btn.addEventListener('click', () => {
+    const v = norm((getDeg() || 0) + 90);
+    setDeg(v);
+    input.value = String(v); lastValid = input.value;
+  });
+  row.appendChild(input);
+  row.appendChild(btn);
+  f.appendChild(row);
+}
+
+// Shape rotation — writes the native `angle` via cell.rotate().
+function addRotationField(parent, cell) {
+  rotationField(parent, 'Rotation', () => cell.angle(), v => cell.rotate(v, true));
 }
 
 function addAutoSizeBtn(parent, onClick) {

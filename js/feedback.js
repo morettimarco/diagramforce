@@ -179,6 +179,93 @@ export function trapFocus(rootEl, opts = {}) {
   return () => document.removeEventListener('keydown', onKeydown, true);
 }
 
+// ── Generic modal scaffold ────────────────────────────────────────
+
+/**
+ * Build, mount, and wire a standard `.sf-modal` dialog. Centralises the
+ * overlay backdrop + `.sf-modal__dialog` + header (title + optional ✕) + body +
+ * optional footer, installs the focus trap, restores focus on close, and wires
+ * backdrop-click / ✕ / Escape → close. Returns the live nodes so the caller can
+ * attach handlers to its own body/footer buttons. Replaces ~15-20 lines of
+ * hand-rolled scaffolding per modal.
+ *
+ * @param {object} opts
+ * @param {string}  opts.title            Header heading (set via textContent — safe).
+ * @param {string} [opts.bodyHtml='']     Inner HTML of the body (caller-owned; caller escapes user content).
+ * @param {string} [opts.footerHtml]      Inner HTML of the footer; omit/null for no footer.
+ * @param {string} [opts.width]           Dialog width, e.g. '480px'.
+ * @param {number|string} [opts.zIndex=3000] Stacking context.
+ * @param {string} [opts.className='']    Extra class(es) on the `.sf-modal` root (scoping/cleanup).
+ * @param {string} [opts.dialogClass='']  Extra class(es) on `.sf-modal__dialog`.
+ * @param {string} [opts.bodyClass='']    Extra class(es) on `.sf-modal__body` (e.g. 'sf-modal__row-list').
+ * @param {string} [opts.bodyStyle='']    Inline style on the body.
+ * @param {string} [opts.footerClass='']  Extra class(es) on `.sf-modal__footer` (e.g. 'sf-field-modal__footer').
+ * @param {boolean}[opts.showClose=true]  Render the top-right ✕ dismiss button.
+ * @param {string} [opts.closeClass='']   Replaces the ✕ button's default `sf-toolbar__button` styling with the caller's own (the `sf-modal__close` wiring hook is always kept). Use for bespoke close buttons.
+ * @param {string} [opts.closeHtml='']    Custom inner HTML for the ✕ button (defaults to the SLDS close SVG). Use e.g. a plain text '✕'.
+ * @param {Function}[opts.onClose]        Called after the modal is removed (cleanup hook).
+ * @param {Function}[opts.onEscape]       Escape handler; defaults to close().
+ * @returns {{ overlay:HTMLElement, dialog:HTMLElement, header:HTMLElement, body:HTMLElement, footer:HTMLElement|null, close:Function }}
+ */
+export function buildModal(opts = {}) {
+  const {
+    title = '', bodyHtml = '', footerHtml = null, width, zIndex = 3000,
+    className = '', dialogClass = '', bodyClass = '', bodyStyle = '', footerClass = '',
+    showClose = true, closeClass = '', closeHtml = '', onClose, onEscape,
+  } = opts;
+
+  const prevFocus = document.activeElement;
+  const titleId = `sf-modal-title-${Math.random().toString(36).slice(2, 8)}`;
+
+  const overlay = document.createElement('div');
+  overlay.className = `sf-modal${className ? ' ' + className : ''}`;
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-labelledby', titleId);
+  overlay.style.zIndex = String(zIndex);
+
+  // `sf-modal__close` is always present (buildModal wires the click); `closeClass`
+  // swaps the default toolbar-button styling, `closeHtml` swaps the ✕ glyph.
+  const closeBtnClass = closeClass ? `sf-modal__close ${closeClass}` : 'sf-toolbar__button sf-modal__close';
+  const closeInner = closeHtml || '<svg class="sf-toolbar__icon" aria-hidden="true"><use href="#close"></use></svg>';
+  const closeBtn = showClose ? `<button class="${closeBtnClass}" aria-label="Close">${closeInner}</button>` : '';
+  overlay.innerHTML = `
+    <div class="sf-modal__overlay"></div>
+    <div class="sf-modal__dialog${dialogClass ? ' ' + dialogClass : ''}"${width ? ` style="width:${width}"` : ''}>
+      <div class="sf-modal__header">
+        <h2 id="${titleId}" class="sf-modal__title"></h2>
+        ${closeBtn}
+      </div>
+      <div class="sf-modal__body${bodyClass ? ' ' + bodyClass : ''}"${bodyStyle ? ` style="${bodyStyle}"` : ''}>${bodyHtml}</div>
+      ${footerHtml != null ? `<div class="sf-modal__footer${footerClass ? ' ' + footerClass : ''}">${footerHtml}</div>` : ''}
+    </div>`;
+  overlay.querySelector('.sf-modal__title').textContent = title; // textContent — no title injection
+
+  document.body.appendChild(overlay);
+
+  let releaseTrap = () => {};
+  const close = () => {
+    releaseTrap();
+    overlay.remove();
+    if (prevFocus && typeof prevFocus.focus === 'function') {
+      try { prevFocus.focus(); } catch { /* element may be gone */ }
+    }
+    onClose?.();
+  };
+  releaseTrap = trapFocus(overlay, { onEscape: onEscape || close });
+  overlay.querySelector('.sf-modal__overlay').addEventListener('click', close);
+  overlay.querySelector('.sf-modal__close')?.addEventListener('click', close);
+
+  return {
+    overlay,
+    dialog: overlay.querySelector('.sf-modal__dialog'),
+    header: overlay.querySelector('.sf-modal__header'),
+    body: overlay.querySelector('.sf-modal__body'),
+    footer: overlay.querySelector('.sf-modal__footer'),
+    close,
+  };
+}
+
 // ── Confirm modal ─────────────────────────────────────────────────
 
 /**
@@ -210,57 +297,32 @@ export function confirmModal(opts) {
   } = opts || {};
 
   return new Promise((resolve) => {
-    const overlay = document.createElement('div');
-    overlay.className = 'sf-modal sf-confirm-modal';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.style.zIndex = '10002';
-
-    // Snapshot the currently-focused element so we can restore focus on close —
-    // simple a11y win without a full focus-trap implementation.
-    const prevFocus = document.activeElement;
-
-    const titleId = `sf-confirm-title-${Math.random().toString(36).slice(2, 8)}`;
-    overlay.setAttribute('aria-labelledby', titleId);
-
-    overlay.innerHTML = `
-      <div class="sf-modal__overlay"></div>
-      <div class="sf-modal__dialog sf-confirm-modal__dialog">
-        <div class="sf-modal__header">
-          <h2 id="${titleId}" class="sf-modal__title"></h2>
-        </div>
-        <div class="sf-modal__body sf-confirm-modal__body"></div>
-        <div class="sf-modal__footer sf-confirm-modal__footer">
-          <button class="sf-modal__btn sf-confirm-modal__cancel"></button>
-          <button class="sf-modal__btn sf-modal__btn--${tone === 'danger' ? 'danger' : 'primary'} sf-confirm-modal__ok"></button>
-        </div>
-      </div>
-    `;
+    let result = false; // resolve value; flips true only on OK / Enter
+    // buildModal owns the scaffold + focus-trap + focus-restore; this dialog has
+    // no ✕ (showClose:false) and resolves via the result/onClose pattern.
+    const { body, footer, close } = buildModal({
+      title: title || '',
+      className: 'sf-confirm-modal',
+      zIndex: 10002,
+      showClose: false,
+      dialogClass: 'sf-confirm-modal__dialog',
+      bodyClass: 'sf-confirm-modal__body',
+      footerClass: 'sf-confirm-modal__footer',
+      footerHtml: `
+        <button class="sf-modal__btn sf-confirm-modal__cancel"></button>
+        <button class="sf-modal__btn sf-modal__btn--${tone === 'danger' ? 'danger' : 'primary'} sf-confirm-modal__ok"></button>`,
+      // Escape / backdrop / cancel resolve false; cleanup the Enter handler here.
+      onClose: () => { document.removeEventListener('keydown', onEnter, true); resolve(result); },
+    });
     // textContent everywhere — no raw-HTML path is available (see S2 note above).
-    overlay.querySelector('.sf-modal__title').textContent = title || '';
-    overlay.querySelector('.sf-confirm-modal__body').textContent = message;
-    overlay.querySelector('.sf-confirm-modal__ok').textContent = okLabel;
-    overlay.querySelector('.sf-confirm-modal__cancel').textContent = cancelLabel;
+    body.textContent = message;
+    const okBtn = footer.querySelector('.sf-confirm-modal__ok');
+    const cancelBtn = footer.querySelector('.sf-confirm-modal__cancel');
+    okBtn.textContent = okLabel;
+    cancelBtn.textContent = cancelLabel;
 
-    document.body.appendChild(overlay);
-
-    // Focus trap — Tab/Shift+Tab stay inside the modal; Escape cancels.
-    const releaseTrap = trapFocus(overlay, { onEscape: () => finish(false) });
-
-    const finish = (value) => {
-      releaseTrap();
-      document.removeEventListener('keydown', onEnter, true);
-      overlay.remove();
-      // Restore focus to whatever had it before the modal opened.
-      if (prevFocus && typeof prevFocus.focus === 'function') {
-        try { prevFocus.focus(); } catch { /* element may be gone */ }
-      }
-      resolve(value);
-    };
-
-    overlay.querySelector('.sf-confirm-modal__ok').addEventListener('click', () => finish(true));
-    overlay.querySelector('.sf-confirm-modal__cancel').addEventListener('click', () => finish(false));
-    overlay.querySelector('.sf-modal__overlay').addEventListener('click', () => finish(false));
+    okBtn.addEventListener('click', () => { result = true; close(); });
+    cancelBtn.addEventListener('click', () => close());
 
     // Separate handler for Enter — the focus trap handles Tab + Escape, but
     // Enter as "confirm" is a convention this modal owns.
@@ -269,16 +331,14 @@ export function confirmModal(opts) {
       const tag = (evt.target && evt.target.tagName) || '';
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       evt.preventDefault();
-      finish(true);
+      result = true;
+      close();
     }
     document.addEventListener('keydown', onEnter, true);
 
     // Focus the cancel button by default — safety bias for destructive prompts.
-    // Caller can override via the `tone: 'primary'` form for non-destructive cases:
-    // for those the OK button takes focus instead so Enter confirms naturally.
-    const defaultBtn = tone === 'danger'
-      ? overlay.querySelector('.sf-confirm-modal__cancel')
-      : overlay.querySelector('.sf-confirm-modal__ok');
+    // Non-destructive (tone:'primary') focuses OK so Enter confirms naturally.
+    const defaultBtn = tone === 'danger' ? cancelBtn : okBtn;
     setTimeout(() => defaultBtn?.focus(), 0);
   });
 }
@@ -339,64 +399,40 @@ export function promptModal(opts) {
   } = opts || {};
 
   return new Promise((resolve) => {
-    const overlay = document.createElement('div');
-    overlay.className = 'sf-modal sf-confirm-modal sf-prompt-modal';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.style.zIndex = '10002';
-
-    const prevFocus = document.activeElement;
-    const titleId = `sf-prompt-title-${Math.random().toString(36).slice(2, 8)}`;
     const inputId = `sf-prompt-input-${Math.random().toString(36).slice(2, 8)}`;
-    overlay.setAttribute('aria-labelledby', titleId);
-
-    overlay.innerHTML = `
-      <div class="sf-modal__overlay"></div>
-      <div class="sf-modal__dialog sf-confirm-modal__dialog">
-        <div class="sf-modal__header">
-          <h2 id="${titleId}" class="sf-modal__title"></h2>
-        </div>
-        <div class="sf-modal__body sf-confirm-modal__body">
-          <p class="sf-prompt-modal__message"></p>
-          <label class="sf-prompt-modal__label" for="${inputId}"></label>
-          <input id="${inputId}" type="text" class="sf-prompt-modal__input" spellcheck="false" autocomplete="off">
-        </div>
-        <div class="sf-modal__footer sf-confirm-modal__footer">
-          <button class="sf-modal__btn sf-confirm-modal__cancel"></button>
-          <button class="sf-modal__btn sf-modal__btn--primary sf-confirm-modal__ok"></button>
-        </div>
-      </div>
-    `;
-    overlay.querySelector('.sf-modal__title').textContent = title || '';
-    const msgEl = overlay.querySelector('.sf-prompt-modal__message');
+    let result = null; // resolve value; set by submit(). null = cancel/escape.
+    const { body, footer, close } = buildModal({
+      title: title || '',
+      className: 'sf-confirm-modal sf-prompt-modal',
+      zIndex: 10002,
+      showClose: false,
+      dialogClass: 'sf-confirm-modal__dialog',
+      bodyClass: 'sf-confirm-modal__body',
+      footerClass: 'sf-confirm-modal__footer',
+      bodyHtml: `
+        <p class="sf-prompt-modal__message"></p>
+        <label class="sf-prompt-modal__label" for="${inputId}"></label>
+        <input id="${inputId}" type="text" class="sf-prompt-modal__input" spellcheck="false" autocomplete="off">`,
+      footerHtml: `
+        <button class="sf-modal__btn sf-confirm-modal__cancel"></button>
+        <button class="sf-modal__btn sf-modal__btn--primary sf-confirm-modal__ok"></button>`,
+      onClose: () => resolve(result), // backdrop / Escape / cancel resolve null
+    });
+    const msgEl = body.querySelector('.sf-prompt-modal__message');
     if (message instanceof Node) msgEl.appendChild(message);
     else if (message) msgEl.textContent = message;
     else msgEl.remove();
-    const labelEl = overlay.querySelector('.sf-prompt-modal__label');
+    const labelEl = body.querySelector('.sf-prompt-modal__label');
     if (label) labelEl.textContent = label; else labelEl.remove();
-    overlay.querySelector('.sf-confirm-modal__ok').textContent = okLabel;
-    overlay.querySelector('.sf-confirm-modal__cancel').textContent = cancelLabel;
+    const okBtn = footer.querySelector('.sf-confirm-modal__ok');
+    const cancelBtn = footer.querySelector('.sf-confirm-modal__cancel');
+    okBtn.textContent = okLabel;
+    cancelBtn.textContent = cancelLabel;
 
-    const input = overlay.querySelector('.sf-prompt-modal__input');
+    const input = body.querySelector('.sf-prompt-modal__input');
     input.value = defaultValue;
     input.maxLength = maxLength;
     if (placeholder) input.placeholder = placeholder;
-
-    document.body.appendChild(overlay);
-
-    // onEscape is invoked later, by which time `finish` is assigned.
-    const releaseTrap = trapFocus(overlay, { onEscape: () => finish(null) });
-
-    const finish = (value) => {
-      releaseTrap();
-      overlay.remove();
-      if (prevFocus && typeof prevFocus.focus === 'function') {
-        try { prevFocus.focus(); } catch { /* element may be gone */ }
-      }
-      resolve(value);
-    };
-
-    const okBtn = overlay.querySelector('.sf-confirm-modal__ok');
 
     // Empty input resolves to null (treated as cancel) unless `allowEmpty` is
     // set, in which case it resolves to '' so the caller can apply a fallback.
@@ -404,12 +440,12 @@ export function promptModal(opts) {
     const submit = () => {
       const v = input.value.trim();
       if (v === '' && requireValue) return;
-      finish(v === '' ? (allowEmpty ? '' : null) : v);
+      result = (v === '' ? (allowEmpty ? '' : null) : v);
+      close();
     };
 
     okBtn.addEventListener('click', submit);
-    overlay.querySelector('.sf-confirm-modal__cancel').addEventListener('click', () => finish(null));
-    overlay.querySelector('.sf-modal__overlay').addEventListener('click', () => finish(null));
+    cancelBtn.addEventListener('click', () => close());
     input.addEventListener('keydown', (evt) => {
       if (evt.key === 'Enter') { evt.preventDefault(); submit(); }
     });

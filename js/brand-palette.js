@@ -18,7 +18,7 @@ const listeners = new Set();
 
 /** Normalise any hex variant to lowercase 6-char `#rrggbb`. Returns null
  *  for non-hex input so callers can decide whether to fall through. */
-export function normaliseHex(raw) {
+function normaliseHex(raw) {
   if (raw == null) return null;
   const s = String(raw).trim();
   if (!HEX_RE.test(s)) return null;
