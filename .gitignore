@@ -1,30 +1,43 @@
-# OS files
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagramforce — PRODUCTION (GitHub Pages) repo
+#
+# Ships ONLY the static app. Everything dev-only is filtered, so `git add -A`
+# after copying from the dev folder stages just the app files. (Listed files may
+# physically exist in the folder after a copy — git won't track them, so Pages
+# never serves them.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Test suite + its tooling (the app itself is build-free & dependency-free)
+tests/
+scripts/
+playwright.config.js
+package.json
+package-lock.json
+node_modules/
+test-results/
+playwright-report/
+playwright/.cache/
+blob-report/
+
+# CI lives on the private dev repo, not here. A copied workflow would run and
+# fail (no test suite in this repo).
+.github/
+
+# Internal dev docs + assistant files — not public
+Documentation/
+CLAUDE.md
+.claude/
+diagramforce.mdx
+examples/
+
+# Dev-only debug pages
+reset.html
+
+# OS / editor noise
 .DS_Store
 Thumbs.db
-
-# Editor
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
-
-# Claude Code
-.claude/
-CLAUDE.md
-
-# Internal developer docs (APP_LOGIC, ARCHITECTURE, GOTCHAS)
-Documentation/
-
-# Tool Page
-diagramforce.mdx
-
-# Local examples
-examples/
-
-# Dev-only debug utilities (cache reset + CSS pipeline diagnostic). Kept
-# locally for any future Safari / SW cache investigation but not shipped.
-reset.html
-diag.html
-test-min.html
-test-nocsp.html

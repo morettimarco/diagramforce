@@ -1,13 +1,13 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { wrapSelectionWithMarker } from './markdown.js?v=1.15.1';
-import { confirmModal, showToast, buildModal } from './feedback.js?v=1.15.1';
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.15.1';
-import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, updateDataObjectHeaderLayout, syncMobilePanelHeight, canEmbed, applyMappingLinkStyle, applyRelationshipLinkStyle, syncMappingTypeBadge, syncFrequencyLabel } from './canvas.js?v=1.15.1';
-import * as stencilModule from './stencil.js?v=1.15.1';
-import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.15.1';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.15.1';
+import { wrapSelectionWithMarker } from './markdown.js?v=1.15.2';
+import { confirmModal, showToast, buildModal } from './feedback.js?v=1.15.2';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.15.2';
+import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, updateDataObjectHeaderLayout, syncMobilePanelHeight, canEmbed, applyMappingLinkStyle, applyRelationshipLinkStyle, syncMappingTypeBadge, syncFrequencyLabel } from './canvas.js?v=1.15.2';
+import * as stencilModule from './stencil.js?v=1.15.2';
+import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.15.2';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.15.2';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -16,13 +16,13 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.15.1';
-import * as history from './history.js?v=1.15.1';
-import { startImageAddFlow } from './image-component.js?v=1.15.1';
-import { escHtml, sanitizeFilenamePart } from './util.js?v=1.15.1';
-import { getActiveTabName } from './tabs.js?v=1.15.1';
-import { saveSelectionAsTemplate } from './templates.js?v=1.15.1';
-import { newFid } from './shapes.js?v=1.15.1';
+} from './clipboard.js?v=1.15.2';
+import * as history from './history.js?v=1.15.2';
+import { startImageAddFlow } from './image-component.js?v=1.15.2';
+import { escHtml, sanitizeFilenamePart } from './util.js?v=1.15.2';
+import { getActiveTabName } from './tabs.js?v=1.15.2';
+import { saveSelectionAsTemplate } from './templates.js?v=1.15.2';
+import { newFid } from './shapes.js?v=1.15.2';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many

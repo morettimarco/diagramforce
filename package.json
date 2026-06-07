@@ -1,10 +1,16 @@
 {
   "name": "diagramforce-tests",
-  "version": "1.15.1",
+  "version": "1.15.2",
   "private": true,
   "type": "module",
-  "description": "Zero-build characterization/regression tests for Diagramforce. Uses Node's native test runner (node:test) only — NO Jest/Vitest/Babel/bundler. The app itself stays build-free; this package.json exists purely so Node treats the test files as ES modules and exposes `npm test`.",
+  "description": "Two-tier regression tests for Diagramforce — both DEV-ONLY; the shipped app stays build-free and zero-runtime-dependency. (1) `npm test`: fast unit/characterization suites on Node's native runner (node:test) — NO Jest/Vitest/Babel/bundler. (2) `npm run test:e2e`: real-browser E2E (Chromium/WebKit/Firefox) via @playwright/test, booting the actual app served as static files (tests/e2e/). `type:module` so Node treats the specs as ES modules.",
   "scripts": {
-    "test": "node --test 'tests/**/*.test.js'"
+    "test": "node --test 'tests/**/*.test.js'",
+    "test:e2e": "playwright test",
+    "test:all": "npm test && npm run test:e2e",
+    "bump": "node scripts/bump-version.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
   }
 }
