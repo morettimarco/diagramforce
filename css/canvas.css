@@ -21,6 +21,13 @@
   pointer-events: all;
 }
 
+/* Data Cloud mapping mode puts a port on EVERY field — revealing them all just
+   because the object is SELECTED is visual clutter. For DataObjects, reveal ports
+   only on object HOVER, never on bare selection (CR). The selected+hover rule wins
+   by specificity so hovering a selected object still shows them. */
+.joint-type-sf-dataobject.selected .joint-port { opacity: 0; pointer-events: none; }
+.joint-type-sf-dataobject.selected:hover .joint-port { opacity: 1; pointer-events: all; }
+
 /* sf.Link: the external-link icon hit area is a circle button — highlight on hover
    to signal it's clickable (opens the URL). The rest of the element just selects. */
 .joint-element[data-type="sf.Link"] [joint-selector="iconHit"] {
@@ -38,8 +45,11 @@
   stroke-width: 2 !important;
 }
 
-/* Also target the first rect child for shapes that don't use .body selector */
-.joint-element.selected > g > rect:first-child {
+/* Also target the first rect child for shapes that don't use .body selector.
+   Exclude .do-badges-g — the DataObject Data-Cloud category pill is a hollow
+   badge that must NOT pick up the selection stroke when the object is selected
+   (the object's own body highlight comes from the .body rule above). */
+.joint-element.selected > g:not(.do-badges-g) > rect:first-child {
   stroke: var(--selection-color) !important;
   stroke-width: 2 !important;
 }
@@ -96,12 +106,15 @@
   opacity: 1 !important;
 }
 
-/* Element dimming — applied to elements that participate in the link
- * graph but aren't connected to the selected element. Less aggressive
- * than the link fade (0.4 vs 0.18) because elements carry more visual
- * weight (filled rectangles vs thin lines) and over-dimming makes them
- * unreadable. Background-only shapes (Zones, Notes, TextLabels) never
- * get this class — selection.js filters them out via `elementsWithLinks`. */
+/* Element dimming — fades non-focused elements. Less aggressive than the
+ * link fade (0.4 vs 0.18) because elements carry more visual weight (filled
+ * rectangles vs thin lines) and over-dimming makes them unreadable. Two
+ * paths in selection.js apply it: element-focus dims linked-but-not-neighbour
+ * elements (via `elementsWithLinks`, so disconnected nodes stay lit); mapping-
+ * flow focus (selecting a mapping connector) dims EVERY DataObject not on the
+ * traced flow (via `type === 'sf.DataObject'`, so even disconnected objects
+ * fade). Background-only shapes (Zones/Layers, Notes, TextLabels) never get
+ * this class in either path. */
 .joint-element.sf-element-dimmed {
   opacity: 0.4 !important;
   transition: opacity 180ms ease-out;
@@ -109,6 +122,16 @@
 .joint-element.sf-element-dimmed:hover,
 .joint-element.sf-element-dimmed.selected {
   opacity: 1 !important;
+}
+
+/* Field-level focus (Data Mapping flow tracing) — when a connector/object/field-hover
+ * traces a data lineage, the object stays lit but its rows that aren't on the lineage
+ * fade. More aggressive than object dimming (0.22) so the traced field-thread pops
+ * against its own object's other fields. selection.js toggles `.sf-field-dimmed` on the
+ * per-field `.do-field-row` groups. */
+.do-field-row.sf-field-dimmed {
+  opacity: 0.22;
+  transition: opacity 160ms ease-out;
 }
 
 /* Hover + selection focus — tint the line in --selection-color so the
@@ -135,9 +158,19 @@
   background: rgba(218, 78, 85, 0.08);
 }
 
-/* Highlight available connection targets */
-.joint-paper .available-cell .body,
-.joint-paper .available-cell rect {
+/* LINK drag (`.available-cell`, added by JointJS markAvailable) is signalled on the
+ * PORTS only (revealed + amber valid-magnet above), NOT on the object body. The cell
+ * body / header / field-row rects are never magnets (validateMagnet accepts only
+ * `magnet="true"` ports), so stroking them amber during a link drag implied a target
+ * you can't connect to — worst on the many-rect DataObject (Data Model / Data Mapping),
+ * where it drew "yellow lines" across the whole object. So no body outline on link drag.
+ *
+ * STENCIL drag-over keeps the body outline — but on its OWN class (`sf-drop-target`,
+ * set by stencil.js refreshDropHighlight) so it's independent of link-drag. It marks the
+ * structured embedding parents (Gantt timeline, sequence participant/actor, RACI Task)
+ * where the drop lands positionally (the free-form groupers use the dashed drop-ghost). */
+.joint-paper .sf-drop-target .body,
+.joint-paper .sf-drop-target rect {
   stroke: var(--brand-amber) !important;
   stroke-width: 2px !important;
 }
@@ -155,18 +188,52 @@
   vector-effect: non-scaling-stroke;
 }
 
-/* Gap 3 (v1.12.0) — empty-canvas onboarding hint. Sits inside the
-   joint-layers group at the viewport centre. Pointer-events:none lets
-   pan + zoom pass through. Fades when present so it doesn't visually
-   compete with the grid. */
-.sf-canvas-hint {
+/* Empty-canvas ghost wireframe (v1.15.0, replaces the Gap-3 text hint) — a faint,
+   type-specific best-practice blueprint shown ONLY while the active tab has zero cells.
+   The overlay sits over the (transparent, empty) paper; pointer-events:none lets pan +
+   zoom pass through. View-only: canvas.js toggles `.is-empty` on #canvas-container by
+   cell count and tabs.js sets `data-diagram-type` — the graph / history are never touched.
+   Blueprints use `currentColor` (→ --text-muted) so they adapt to light / dark. */
+.sf-canvas-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  pointer-events: none;
+  color: var(--text-muted);
+  user-select: none;
+}
+#canvas-container.is-empty .sf-canvas-empty { display: flex; }
+/* Hide the ghost while the read-only Table view owns the canvas area. */
+#canvas-container:has(.sf-table-view:not([hidden])) .sf-canvas-empty { display: none; }
+.sf-canvas-empty__wf {
+  display: none;
+  width: min(44%, 400px);
+  height: auto;
+  opacity: 0.16;
+}
+/* Reveal only the blueprint matching the active diagram type. */
+#canvas-container.is-empty[data-diagram-type="architecture"] .sf-canvas-empty__wf[data-wf="architecture"],
+#canvas-container.is-empty[data-diagram-type="process"]      .sf-canvas-empty__wf[data-wf="process"],
+#canvas-container.is-empty[data-diagram-type="sequence"]     .sf-canvas-empty__wf[data-wf="sequence"],
+#canvas-container.is-empty[data-diagram-type="datamodel"]    .sf-canvas-empty__wf[data-wf="datamodel"],
+#canvas-container.is-empty[data-diagram-type="datamapping"]  .sf-canvas-empty__wf[data-wf="datamapping"],
+#canvas-container.is-empty[data-diagram-type="gantt"]        .sf-canvas-empty__wf[data-wf="gantt"],
+#canvas-container.is-empty[data-diagram-type="org"]          .sf-canvas-empty__wf[data-wf="org"] {
+  display: block;
+}
+.sf-canvas-empty__caption {
+  margin: 0;
   font-family: var(--font-family);
   font-size: 14px;
   font-weight: 500;
-  fill: var(--text-muted);
-  opacity: 0.55;
+  color: var(--text-muted);
+  opacity: 0.6;
   letter-spacing: 0.3px;
-  user-select: none;
 }
 
 /* CR-6.1: inline markdown inside sf.TextLabel / sf.Note foreignObjects.
@@ -272,4 +339,127 @@ foreignObject[data-md] del { text-decoration: line-through; }
   stroke: var(--bg-canvas) !important;
   pointer-events: none;
   fill: none;
+}
+
+/* ── Data Mapping table view — read-only Excel/CSV-contract projection ──────── */
+.sf-table-view {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-canvas);
+  overflow: hidden;
+  z-index: 6;
+}
+.sf-tbl { height: 100%; display: flex; flex-direction: column; }
+.sf-tbl__topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 var(--spacing-md);
+  /* Height matches the right-sidebar search header (--panel-header-height) so the
+     two bottom borders form one continuous horizontal rule across the screen. */
+  height: var(--panel-header-height);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border-color);
+  flex: 0 0 auto;
+}
+.sf-tbl__title { margin: 0; font-size: 15px; font-weight: 700; color: var(--text-primary); white-space: nowrap; }
+.sf-tbl__note { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+/* CSV export — compact icon+label button, pushed to the right edge (and pulling
+   the Show/Hide-Unmapped toggle with it). */
+.sf-tbl__csv {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-app);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+.sf-tbl__csv:hover { color: var(--text-primary); border-color: var(--border-color-strong); }
+.sf-tbl__csv svg { flex-shrink: 0; }
+/* Show/Hide Unmapped — Display-menu toggle styling, but inline (not full-width). */
+.sf-tbl__toggle.sf-toolbar__menu-item {
+  width: auto;
+  height: 30px;
+  margin: 0;
+  white-space: nowrap;
+}
+/* overflow-x:auto for wide technical sheets; -y for tall ones */
+.sf-tbl__scroll { flex: 1 1 auto; overflow: auto; }
+.sf-tbl__table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+  white-space: nowrap;
+  /* Fill the available width when columns are narrow; the nowrap cells keep their
+     min-content width, so when the 15 columns exceed the viewport the table grows
+     past 100% and .sf-tbl__scroll takes over with a horizontal scrollbar. */
+  width: 100%;
+}
+/* Tier 1 — coloured section blocks */
+.sf-tbl__sec {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: 8px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+}
+.sf-tbl__sec--src { background: #F6B355; }   /* Data Sources — brand amber */
+.sf-tbl__sec--map { background: #DA4E55; }   /* Data Mapping — brand red */
+.sf-tbl__sec--tgt { background: #1D73C9; }   /* Data Targets — brand blue */
+/* Tier 2 — column headers (stick just below the section blocks) */
+.sf-tbl__cols th {
+  position: sticky;
+  top: 33px;
+  z-index: 2;
+  background: var(--bg-surface-raised);
+  color: var(--text-secondary);
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  border-bottom: 2px solid var(--border-color-strong);
+}
+.sf-tbl__table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+}
+.sf-tbl__table tbody tr:hover td { background: rgba(127, 127, 127, 0.07); }
+.sf-tbl__center { text-align: center; }
+.sf-tbl__placeholder { color: var(--text-muted); font-style: italic; }
+/* Deprecated field — its API Name / Label cells render struck-through + dimmed. */
+.sf-tbl__strike { text-decoration: line-through; color: var(--text-muted); }
+/* Click-to-sort column headers */
+.sf-tbl__th--sortable { cursor: pointer; user-select: none; }
+.sf-tbl__th--sortable:hover { color: var(--text-primary); }
+.sf-tbl__th--sorted { color: var(--text-primary); }
+.sf-tbl__sort-ind { margin-left: 4px; font-size: 9px; opacity: 0.9; }
+/* Data-type mismatch warning badge (Standard mapping across differing types) */
+.sf-tbl__warn-wrap { display: inline-flex; vertical-align: -2px; margin-left: 6px; cursor: help; }
+.sf-tbl__warn { flex-shrink: 0; }
+/* divider between the blue (source) & orange (target) sections */
+.sf-tbl__divider { border-left: 2px solid var(--border-color-strong); }
+.sf-tbl__row--unmapped td { color: var(--text-muted); font-style: italic; }
+.sf-tbl__empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 44px 24px;
+  white-space: normal;
+  font-size: 13px;
 }

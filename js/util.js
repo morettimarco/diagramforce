@@ -63,3 +63,28 @@ export function normalizeDateSuffix(name) {
     return (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) ? ` ${y}-${mo}-${d}` : full;
   });
 }
+
+// Characters illegal in a filename on Windows + control chars + zero-width chars.
+// Built via new RegExp from an all-ASCII escape string so no literal control chars
+// ever live in the source.
+const FILENAME_BAD = new RegExp('[<>:"/\\\\|?*\\u0000-\\u001F\\u200B-\\u200D\\uFEFF]', 'g');
+
+/**
+ * Normalise an arbitrary string (a tab name, object name, …) into a single,
+ * cross-platform-safe download-filename PART (no extension). Strips characters
+ * illegal on Windows (`< > : " / \ | ? *`) + control + zero-width chars, trims
+ * leading/trailing dots & spaces (also Windows-illegal), collapses whitespace to
+ * single dashes, and caps length. Returns `fallback` when nothing usable remains
+ * so a file always gets a name. Safe on Windows, macOS, and Linux.
+ */
+export function sanitizeFilenamePart(s, fallback = 'untitled') {
+  let v = String(s ?? '')
+    .replace(FILENAME_BAD, '')
+    .trim()
+    .replace(/^[.\s]+|[.\s]+$/g, '')   // no leading / trailing dots or spaces (Windows)
+    .replace(/[\s_]+/g, '-')           // spaces + underscores → single dash (a `_` is reserved
+                                       // as the inter-section separator in CSV filenames)
+    .replace(/-+/g, '-');              // collapse runs of dashes
+  if (!v) v = fallback;
+  return v.slice(0, 80);
+}

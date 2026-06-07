@@ -1,13 +1,13 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { wrapSelectionWithMarker } from './markdown.js?v=1.14.1';
-import { confirmModal, showToast, buildModal } from './feedback.js?v=1.14.1';
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.14.1';
-import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.14.1';
-import * as stencilModule from './stencil.js?v=1.14.1';
-import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.14.1';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.14.1';
+import { wrapSelectionWithMarker } from './markdown.js?v=1.15.0';
+import { confirmModal, showToast, buildModal } from './feedback.js?v=1.15.0';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.15.0';
+import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, updateDataObjectHeaderLayout, syncMobilePanelHeight, canEmbed, applyMappingLinkStyle, applyRelationshipLinkStyle, syncMappingTypeBadge, syncFrequencyLabel } from './canvas.js?v=1.15.0';
+import * as stencilModule from './stencil.js?v=1.15.0';
+import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.15.0';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.15.0';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -16,11 +16,13 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.14.1';
-import * as history from './history.js?v=1.14.1';
-import { startImageAddFlow } from './image-component.js?v=1.14.1';
-import { escHtml } from './util.js?v=1.14.1';
-import { saveSelectionAsTemplate } from './templates.js?v=1.14.1';
+} from './clipboard.js?v=1.15.0';
+import * as history from './history.js?v=1.15.0';
+import { startImageAddFlow } from './image-component.js?v=1.15.0';
+import { escHtml, sanitizeFilenamePart } from './util.js?v=1.15.0';
+import { getActiveTabName } from './tabs.js?v=1.15.0';
+import { saveSelectionAsTemplate } from './templates.js?v=1.15.0';
+import { newFid } from './shapes.js?v=1.15.0';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
@@ -56,6 +58,7 @@ const TYPE_LABELS = {
   'sf.Note':           'Note',
   'sf.Image':          'Image',
   'sf.Task':           'Task',
+  'sf.TaskGroup':      'Task Group',
   'sf.Zone':           'Zone',
   'sf.BpmnEvent':      'Event',
   'sf.BpmnTask':       'Task',
@@ -93,6 +96,7 @@ const DEFAULT_SIZES = {
   'sf.SimpleNode':     { width: 180, height: 64 },
   'sf.Container':      { width: 360, height: 240 },
   'sf.Zone':           { width: 400, height: 300 },
+  'sf.TaskGroup':      { width: 640, height: 360 },
   'sf.TextLabel':      { width: 200, height: 32 },
   'sf.Note':           { width: 200, height: 120 },
   'sf.Image':          { width: 240, height: 180 },
@@ -174,6 +178,14 @@ const COLOR_SCHEMA = {
       set: (c, v) => c.attr('label/fill', v) },
   ],
   'sf.Zone': [
+    { label: 'Fill',
+      get: c => c.attr('body/fill'),
+      set: (c, v) => c.attr('body/fill', v) },
+    { label: 'Border',
+      get: c => c.attr('body/stroke'),
+      set: (c, v) => c.attr('body/stroke', v) },
+  ],
+  'sf.TaskGroup': [
     { label: 'Fill',
       get: c => c.attr('body/fill'),
       set: (c, v) => c.attr('body/fill', v) },
@@ -360,6 +372,20 @@ COLOR_SCHEMA['sf.BpmnPool'] = [
 
 let graph, paper, selection;
 let panelEl, typeBadgeEl, titleEl, bodyEl, footerEl;
+
+// Data Cloud mapping mode — provided by tabs via app.js wiring. The DataObject
+// property panel reveals its Data Cloud section only when this returns true, so
+// the default Data Model panel is unchanged when mapping mode is off.
+let mappingModeGetter = null;
+export function setMappingModeGetter(fn) { mappingModeGetter = fn; }
+export function isMappingMode() { return !!(mappingModeGetter && mappingModeGetter()); }
+
+// Re-render the property panel for the current single selection (used when
+// mapping mode toggles so the Data Cloud section appears/disappears live).
+export function refresh() {
+  const c = getActiveCell();
+  if (c) showProperties(c);
+}
 
 export function init(_graph, _paper, _selection) {
   graph = _graph;
@@ -718,6 +744,7 @@ function showProperties(cell) {
   else if (type === 'sf.TextLabel')  renderTextLabelProps(cell);
   else if (type === 'sf.Note')       renderNoteProps(cell);
   else if (type === 'sf.Zone')       renderZoneProps(cell);
+  else if (type === 'sf.TaskGroup')  renderTaskGroupProps(cell);
   else if (type === 'sf.BpmnEvent')  renderBpmnEventProps(cell);
   else if (type === 'sf.BpmnTask')   renderBpmnTaskProps(cell);
   else if (type === 'sf.BpmnGateway') renderBpmnGatewayProps(cell);
@@ -907,13 +934,22 @@ function showMultiProperties(count) {
     </svg>
     Bring to Front`;
   multiFrontBtn.addEventListener('click', () => {
-    elements.forEach(c => {
-      const type = c.get('type');
-      const tierBase = Z_BASE[type] ?? 2000;
-      const peers = graph.getElements().filter(el => !ids.includes(el.id) && el.get('z') >= tierBase && el.get('z') < tierBase + Z_TIER_SPAN);
-      const maxZ = peers.length ? Math.max(...peers.map(el => el.get('z') ?? tierBase)) : tierBase;
-      c.set('z', maxZ + 1);
-    });
+    history.startBatch();
+    try {
+      elements.forEach(c => {
+        const type = c.get('type');
+        const tierBase = Z_BASE[type] ?? 2000;
+        const peers = graph.getElements().filter(el => !ids.includes(el.id) && el.get('z') >= tierBase && el.get('z') < tierBase + Z_TIER_SPAN);
+        const maxZ = peers.length ? Math.max(...peers.map(el => el.get('z') ?? tierBase)) : tierBase;
+        const oldZ = c.get('z'); const newZ = maxZ + 1;
+        if (oldZ === newZ) return;
+        c.set('z', newZ);
+        const id = c.id;
+        history.recordCommand(
+          () => { const cc = graph.getCell(id); if (cc) cc.set('z', oldZ); },
+          () => { const cc = graph.getCell(id); if (cc) cc.set('z', newZ); });
+      });
+    } finally { history.endBatch(); }
   });
 
   const multiBackBtn = document.createElement('button');
@@ -924,13 +960,22 @@ function showMultiProperties(count) {
     </svg>
     Send to Back`;
   multiBackBtn.addEventListener('click', () => {
-    elements.forEach(c => {
-      const type = c.get('type');
-      const tierBase = Z_BASE[type] ?? 2000;
-      const peers = graph.getElements().filter(el => !ids.includes(el.id) && el.get('z') >= tierBase && el.get('z') < tierBase + Z_TIER_SPAN);
-      const minZ = peers.length ? Math.min(...peers.map(el => el.get('z') ?? tierBase)) : tierBase;
-      c.set('z', Math.max(tierBase, minZ - 1));
-    });
+    history.startBatch();
+    try {
+      elements.forEach(c => {
+        const type = c.get('type');
+        const tierBase = Z_BASE[type] ?? 2000;
+        const peers = graph.getElements().filter(el => !ids.includes(el.id) && el.get('z') >= tierBase && el.get('z') < tierBase + Z_TIER_SPAN);
+        const minZ = peers.length ? Math.min(...peers.map(el => el.get('z') ?? tierBase)) : tierBase;
+        const oldZ = c.get('z'); const newZ = Math.max(tierBase, minZ - 1);
+        if (oldZ === newZ) return;
+        c.set('z', newZ);
+        const id = c.id;
+        history.recordCommand(
+          () => { const cc = graph.getCell(id); if (cc) cc.set('z', oldZ); },
+          () => { const cc = graph.getCell(id); if (cc) cc.set('z', newZ); });
+      });
+    } finally { history.endBatch(); }
   });
   orderRow.appendChild(multiFrontBtn);
   orderRow.appendChild(multiBackBtn);
@@ -1553,6 +1598,39 @@ function renderZoneProps(cell) {
   addDeleteBtn(footerEl, () => { graph.removeCells([cell]); selection.clearSelection(); });
 }
 
+// RACI section grouper — same surface as a Zone (label + fill/border + size), but
+// its own default size and "Task Group" identity. Drop Tasks inside to build a
+// labelled section of RACI rows.
+function renderTaskGroupProps(cell) {
+  // Content
+  const content = section(bodyEl, 'Content');
+  addText(content, 'Label', cell.attr('label/text'), v => {
+    cell.attr('label/text', v);
+    titleEl.textContent = v || '';
+  });
+
+  // Appearance — Fill → Border
+  const appearance = section(bodyEl, 'Appearance');
+  addColor(appearance, 'Fill',   cell.attr('body/fill'),   v => cell.attr('body/fill', v));
+  addColor(appearance, 'Border', cell.attr('body/stroke'), v => cell.attr('body/stroke', v));
+
+  // Size & Order
+  const size = section(bodyEl, 'Size & Order');
+  addNumberPair(size,
+    'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
+    'Height', cell.size().height, h => cell.resize(cell.size().width, h));
+  addAutoSizeBtn(size, () => {
+    const def = DEFAULT_SIZES['sf.TaskGroup'];
+    cell.resize(def.width, def.height);
+  });
+  addApplySizeBtn(size, cell);
+  addOrderButtons(size, cell);
+
+  // Delete (in footer)
+  addCloneBtn(footerEl, cell);
+  addDeleteBtn(footerEl, () => { graph.removeCells([cell]); selection.clearSelection(); });
+}
+
 function renderBpmnEventProps(cell) {
   // Content
   const content = section(bodyEl, 'Content');
@@ -1800,9 +1878,11 @@ function renderBpmnDataObjectProps(cell) {
   addDeleteBtn(footerEl, () => { graph.removeCells([cell]); selection.clearSelection(); });
 }
 
-// Common Salesforce field types for the type dropdown
+// Core Salesforce CRM field types + Data Cloud primitives (the shared dictionary used by
+// both the sidebar field editor and the Edit Fields modal). 'Boolean' is the Data Cloud
+// primitive alongside the CRM 'Checkbox'; both live in the Boolean compatibility group.
 const SF_FIELD_TYPES = [
-  'Auto Number', 'Checkbox', 'Currency', 'Date', 'DateTime', 'Email',
+  'Auto Number', 'Boolean', 'Checkbox', 'Currency', 'Date', 'DateTime', 'Email',
   'Formula', 'ID', 'Lookup', 'Master-Detail', 'Number', 'Percent',
   'Phone', 'Picklist', 'Multi-Picklist', 'Rich Text Area',
   'Text', 'Text Area', 'Long Text Area', 'URL',
@@ -1817,21 +1897,46 @@ function renderDataObjectProps(cell) {
     cell.attr('headerLabel/text', v);
     titleEl.textContent = v || '';
   }, cell, { placeholder: 'Object name' });
+  // Optional contextual header icon — empty by default. Sits under the Label to
+  // match the Node / Container icon picker. Account/Contact/Email/Snowflake etc.
+  // make a large schema scannable. White to match the header label;
+  // updateDataObjectHeaderLayout shows it + shifts the object name right (or
+  // restores the left padding when cleared via the picker's × button → onChange('')).
+  // addIconPicker batches its onChange, so the href + layout attr writes are one undo step.
+  addIconPicker(content, 'Icon', cell.attr('headerIcon/href'),
+    v => { cell.attr('headerIcon/href', v); updateDataObjectHeaderLayout(cell); },
+    () => '#FFFFFF');
 
-  // Appearance — header fill is an appearance property, kept here so DataObject
-  // matches the consistent Content / Appearance / Fields / Size & Order layout
-  // used by every other shape with a coloured header (BpmnPool, Container…).
+  // Data Cloud mapping metadata — shown only in mapping mode so the default
+  // Data Model panel is unchanged when off. Stored as cell attrs (serialize
+  // automatically); unset when blank so empty values aren't persisted.
+  // Data Cloud category (Profile / Engagement / Other) lives in CONTENT — it's the
+  // single object-level mapping attribute, so it no longer warrants its own section.
+  // Shown only in mapping mode; a three-position segmented slider with no segment
+  // active until the user picks one (uncategorised ⇒ no header badge). Category is
+  // optional, so `allowDeselect` lets a click on the active segment clear it back to
+  // uncategorised.
+  if (isMappingMode()) {
+    addSegmented(content, 'Category', cell.get('category') || '', [
+      { value: 'Profile', label: 'Profile' },
+      { value: 'Engagement', label: 'Engagement' },
+      { value: 'Other', label: 'Other' },
+    ], v => { cell.set('category', v); }, { allowDeselect: true });
+  }
+
+  // Fields lead — the rows are a DataObject's primary content, so they sit
+  // directly under Content, ahead of the lighter Appearance (header colour) block.
+  const fieldsSec = section(bodyEl, 'Fields');
+
+  renderFieldEditor(fieldsSec, cell);
+
+  // Appearance — header fill is an appearance property.
   const appearance = section(bodyEl, 'Appearance');
   addColor(appearance, 'Header fill', cell.get('headerColor') || '#1D73C9', v => {
     cell.set('headerColor', v);
     cell.attr('header/fill', v);
     cell.attr('headerCover/fill', v);
   }, { defaultValue: '#1D73C9' });
-
-  // Fields
-  const fieldsSec = section(bodyEl, 'Fields');
-
-  renderFieldEditor(fieldsSec, cell);
 
   // Size & Order
   const size = section(bodyEl, 'Size & Order');
@@ -1868,13 +1973,14 @@ function renderFieldEditor(parent, cell) {
       // Key type toggle
       const keyBtn = document.createElement('button');
       keyBtn.className = 'sf-field-key sf-field-key--' + (field.keyType || 'none');
-      keyBtn.textContent = field.keyType === 'pk' ? 'PK' : field.keyType === 'fk' ? 'FK' : '—';
-      keyBtn.title = 'Toggle key: None → PK → FK';
+      keyBtn.textContent = field.keyType === 'pk' ? 'PK' : field.keyType === 'fk' ? 'FK' : field.keyType === 'fqk' ? 'FQK' : '—';
+      keyBtn.title = 'Toggle key: None → PK → FK → FQK';
       keyBtn.addEventListener('click', () => {
         const cur = field.keyType;
-        const next = cur === 'pk' ? 'fk' : cur === 'fk' ? null : 'pk';
+        const next = cur === 'pk' ? 'fk' : cur === 'fk' ? 'fqk' : cur === 'fqk' ? null : 'pk';
         const updated = [...cell.get('fields')];
-        updated[i] = { ...updated[i], keyType: next };
+        // A primary / fully-qualified key is inherently mandatory — auto-mark required.
+        updated[i] = { ...updated[i], keyType: next, ...(next === 'pk' || next === 'fqk' ? { required: true } : {}) };
         cell.set('fields', updated);
         resizeDataObjectToFit(cell);
         rebuild();
@@ -1956,6 +2062,26 @@ function renderFieldEditor(parent, cell) {
 
 /* ── Full Edit Mode modal for DataObject fields ───────────── */
 
+// A compact checkbox toggle matching the Display menu's checkbox (a square that shows
+// a tick when on). Used for the field modal's Required / Deprecated columns
+// instead of raw browser checkboxes, for app-consistent styling.
+function makeFieldCheckToggle(checked, title, extraClass, onChange) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sf-field-modal__check-toggle' + (extraClass ? ' ' + extraClass : '') + (checked ? ' is-checked' : '');
+  btn.title = title;
+  btn.setAttribute('role', 'checkbox');
+  btn.setAttribute('aria-checked', String(checked));
+  btn.innerHTML = '<svg class="sf-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="sf-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  btn.addEventListener('click', () => {
+    const next = !btn.classList.contains('is-checked');
+    btn.classList.toggle('is-checked', next);
+    btn.setAttribute('aria-checked', String(next));
+    onChange(next);
+  });
+  return btn;
+}
+
 function openFieldEditorModal(cell, onClose) {
   // Remove any existing modal
   document.getElementById('field-editor-modal')?.remove();
@@ -1985,7 +2111,7 @@ function openFieldEditorModal(cell, onClose) {
     // Header row
     const hdr = document.createElement('div');
     hdr.className = 'sf-field-modal__row sf-field-modal__row--header';
-    hdr.innerHTML = '<span class="sf-field-modal__col--handle"></span><span class="sf-field-modal__col--key">Key</span><span class="sf-field-modal__col--api">API Name</span><span class="sf-field-modal__col--label">Label</span><span class="sf-field-modal__col--type">Type</span><span class="sf-field-modal__col--len">Length</span><span class="sf-field-modal__col--flag">Req</span><span class="sf-field-modal__col--flag">Decom</span><span class="sf-field-modal__col--del"></span>';
+    hdr.innerHTML = '<span class="sf-field-modal__col--handle"></span><span class="sf-field-modal__col--key">Key</span><span class="sf-field-modal__col--api">API Name</span><span class="sf-field-modal__col--label">Label</span><span class="sf-field-modal__col--type">Type</span><span class="sf-field-modal__col--len">Length</span><span class="sf-field-modal__col--req">REQUIRED</span><span class="sf-field-modal__col--decom">DEPRECATED</span><span class="sf-field-modal__col--del"></span>';
     bodyEl.appendChild(hdr);
 
     currentFields.forEach((field, i) => {
@@ -2008,12 +2134,13 @@ function openFieldEditorModal(cell, onClose) {
       // Key toggle
       const keyBtn = document.createElement('button');
       keyBtn.className = 'sf-field-key sf-field-key--' + (field.keyType || 'none') + ' sf-field-modal__col--key';
-      keyBtn.textContent = field.keyType === 'pk' ? 'PK' : field.keyType === 'fk' ? 'FK' : '—';
-      keyBtn.title = 'Toggle key: None → PK → FK';
+      keyBtn.textContent = field.keyType === 'pk' ? 'PK' : field.keyType === 'fk' ? 'FK' : field.keyType === 'fqk' ? 'FQK' : '—';
+      keyBtn.title = 'Toggle key: None → PK → FK → FQK';
       keyBtn.addEventListener('click', () => {
-        const next = field.keyType === 'pk' ? 'fk' : field.keyType === 'fk' ? null : 'pk';
+        const next = field.keyType === 'pk' ? 'fk' : field.keyType === 'fk' ? 'fqk' : field.keyType === 'fqk' ? null : 'pk';
         const updated = [...cell.get('fields')];
-        updated[i] = { ...updated[i], keyType: next };
+        // A primary / fully-qualified key is inherently mandatory — auto-mark required.
+        updated[i] = { ...updated[i], keyType: next, ...(next === 'pk' || next === 'fqk' ? { required: true } : {}) };
         cell.set('fields', updated);
         resizeDataObjectToFit(cell);
         rebuildModal();
@@ -2072,27 +2199,16 @@ function openFieldEditorModal(cell, onClose) {
         cell.set('fields', updated);
       });
 
-      // Required checkbox
-      const reqCheck = document.createElement('input');
-      reqCheck.type = 'checkbox';
-      reqCheck.className = 'sf-field-modal__check sf-field-modal__col--flag';
-      reqCheck.checked = !!field.required;
-      reqCheck.title = 'Required';
-      reqCheck.addEventListener('change', () => {
+      // Required + Deprecated — Display-menu-style checkbox toggles (a tick that
+      // appears when on), not raw browser checkboxes, for app-consistent styling.
+      const reqCheck = makeFieldCheckToggle(!!field.required, 'Required', 'sf-field-modal__col--req', on => {
         const updated = [...cell.get('fields')];
-        updated[i] = { ...updated[i], required: reqCheck.checked };
+        updated[i] = { ...updated[i], required: on };
         cell.set('fields', updated);
       });
-
-      // Decommissioned checkbox
-      const decomCheck = document.createElement('input');
-      decomCheck.type = 'checkbox';
-      decomCheck.className = 'sf-field-modal__check sf-field-modal__col--flag';
-      decomCheck.checked = !!field.decommissioned;
-      decomCheck.title = 'Decommissioned';
-      decomCheck.addEventListener('change', () => {
+      const decomCheck = makeFieldCheckToggle(!!field.deprecated, 'Deprecated', 'sf-field-modal__col--decom', on => {
         const updated = [...cell.get('fields')];
-        updated[i] = { ...updated[i], decommissioned: decomCheck.checked };
+        updated[i] = { ...updated[i], deprecated: on };
         cell.set('fields', updated);
       });
 
@@ -2179,6 +2295,200 @@ function openFieldEditorModal(cell, onClose) {
 
   // Done closes; backdrop / ✕ / Escape are wired by buildModal.
   overlay.querySelector('.sf-field-modal__done').addEventListener('click', close);
+
+  // Import / Export Fields (CSV) — a persistent panel between the (rebuilt) field list
+  // and the footer. Three exports/imports + a paste box; importing OVERWRITES every
+  // field on this object (behind a confirmation), so the round-trip is: export →
+  // edit in a spreadsheet → re-import.
+  const dialog = overlay.querySelector('.sf-field-modal__dialog');
+  const footer = overlay.querySelector('.sf-field-modal__footer');
+  if (dialog && footer) {
+    const objLabel = cell.get('objectName') || 'Object';
+    const panel = document.createElement('details');
+    panel.className = 'sf-csv-tools';
+    panel.innerHTML = `
+      <summary class="sf-csv-tools__summary">Import / Export Fields (CSV)</summary>
+      <div class="sf-csv-tools__body">
+        <div class="sf-csv-tools__row">
+          <button type="button" class="sf-modal__btn sf-csv-tools__btn sf-csv-tools__sample">Export Sample CSV</button>
+          <button type="button" class="sf-modal__btn sf-csv-tools__btn sf-csv-tools__export">Export Fields to CSV</button>
+          <button type="button" class="sf-modal__btn sf-csv-tools__btn sf-csv-tools__import-file">Import Fields from CSV…</button>
+          <button type="button" class="sf-modal__btn sf-csv-tools__btn sf-csv-tools__import-paste">Import Fields from Paste</button>
+        </div>
+        <textarea class="sf-csv-tools__textarea" rows="4" spellcheck="false" placeholder="API Name,Label,Type,Length,Required,Deprecated,Key&#10;Id,Record ID,ID,,Yes,No,PK&#10;AccountId,Account,Lookup,,Yes,No,FK&#10;Email__c,Email,Email,,No,No,"></textarea>
+        <p class="sf-csv-tools__hint">Paste rows in the box above, then <strong>Import Fields from Paste</strong>. Columns: <strong>API&nbsp;Name, Label, Type, Length, Required, Deprecated, Key</strong> — a header row is auto-detected; importing <strong>overwrites every field</strong> on this object. Grab the Sample CSV for the full list of valid Type / Key values.</p>
+        <span class="sf-csv-tools__status" aria-live="polite"></span>
+        <input type="file" accept=".csv,text/csv" class="sf-csv-tools__file" hidden>
+      </div>`;
+    dialog.insertBefore(panel, footer);
+
+    const status = panel.querySelector('.sf-csv-tools__status');
+    const ta = panel.querySelector('.sf-csv-tools__textarea');
+    const fileInput = panel.querySelector('.sf-csv-tools__file');
+    const setStatus = (msg, err) => { status.textContent = msg; status.classList.toggle('sf-csv-tools__status--err', !!err); };
+
+    // Import = OVERWRITE, behind a confirmation. The whole ingestion (field replace +
+    // auto-resize) is wrapped in ONE explicit history batch so it collapses to a single
+    // undo entry — flushPendingDragCommit folds the debounce-merged change:fields/size
+    // into the open batch before it closes.
+    const doImport = async (text) => {
+      const parsed = parseBulkFields(text);
+      if (!parsed.length) { setStatus('No valid rows found — check the format (see Sample CSV).', true); return; }
+      const prevCount = (cell.get('fields') || []).length;
+      const ok = await confirmModal({
+        title: 'Overwrite fields?',
+        message: `This replaces all ${prevCount} field${prevCount === 1 ? '' : 's'} on “${objLabel}” with ${parsed.length} imported field${parsed.length === 1 ? '' : 's'}. You can undo it afterwards.`,
+        okLabel: 'Overwrite',
+        cancelLabel: 'Cancel',
+        tone: 'danger',
+      });
+      if (!ok) { setStatus('Import cancelled.'); return; }
+      history.startBatch();
+      try {
+        cell.set('fields', parsed);              // OVERWRITE the whole field list
+        resizeDataObjectToFit(cell);
+        history.flushPendingDragCommit();        // fold field + size changes into this batch
+      } finally {
+        history.endBatch();
+      }
+      ta.value = '';
+      setStatus(`Imported ${parsed.length} field${parsed.length === 1 ? '' : 's'} (replaced ${prevCount}).`);
+      rebuildModal();
+    };
+
+    // Filesystem-safe, cross-platform filenames (df_ prefix; `_` between sections, `-`
+    // within — tab + object names normalised via sanitizeFilenamePart).
+    const tabPart = sanitizeFilenamePart(getActiveTabName(), 'tab');
+    const objPart = sanitizeFilenamePart(objLabel, 'object');
+    panel.querySelector('.sf-csv-tools__sample').addEventListener('click', () => downloadCsv('df_object-sample.csv', buildSampleFieldsCsv()));
+    panel.querySelector('.sf-csv-tools__export').addEventListener('click', () => downloadCsv(`df_${tabPart}_${objPart}_fields.csv`, fieldsToCsv(cell.get('fields') || [])));
+    panel.querySelector('.sf-csv-tools__import-file').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => { doImport(String(reader.result || '')); fileInput.value = ''; };
+      reader.onerror = () => { setStatus('Could not read that file.', true); fileInput.value = ''; };
+      reader.readAsText(file);
+    });
+    panel.querySelector('.sf-csv-tools__import-paste').addEventListener('click', () => {
+      if (!ta.value.trim()) { setStatus('Paste some CSV rows first.', true); return; }
+      doImport(ta.value);
+    });
+  }
+}
+
+// Field ↔ CSV columns (the full set the editor exposes), in a fixed order shared by
+// the Sample, Export, and Import paths.
+const FIELD_CSV_COLUMNS = ['API Name', 'Label', 'Type', 'Length', 'Required', 'Deprecated', 'Key'];
+const csvCell = v => { const s = String(v ?? '').trim(); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+const keyToCsv = k => k === 'pk' ? 'PK' : k === 'fk' ? 'FK' : k === 'fqk' ? 'FQK' : '';
+
+function fieldsToCsv(fields) {
+  const rows = (fields || []).map(f => [
+    f.apiName || '', f.label || '', f.type || '', f.length || '',
+    f.required ? 'Yes' : 'No', f.deprecated ? 'Yes' : 'No', keyToCsv(f.keyType),
+  ]);
+  return '﻿' + [FIELD_CSV_COLUMNS, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n');
+}
+
+// A documentation-grade template: canonical PK/FK/FQK rows up top, then one row per
+// remaining Salesforce field type so every valid Type value is spelled out, plus a
+// Required + a Deprecated example.
+function buildSampleFieldsCsv() {
+  const canonical = [
+    ['Id', 'Record ID', 'ID', '', 'Yes', 'No', 'PK'],
+    ['AccountId', 'Account', 'Lookup', '', 'Yes', 'No', 'FK'],
+    ['UnifiedId__c', 'Unified Profile Key', 'Text', '255', 'No', 'No', 'FQK'],
+  ];
+  const used = new Set(canonical.map(r => r[2]));
+  const rest = SF_FIELD_TYPES.filter(t => !used.has(t)).map(t => {
+    const api = t.replace(/[^a-z0-9]+/gi, '') + '__c';
+    const len = /text|char|area/i.test(t) ? '255' : '';
+    return [api, `${t} Example`, t, len, 'No', 'No', ''];
+  });
+  const all = [...canonical, ...rest];
+  if (all.length) all[all.length - 1][5] = 'Yes';   // last row demonstrates Deprecated
+  return '﻿' + [FIELD_CSV_COLUMNS, ...all].map(r => r.map(csvCell).join(',')).join('\r\n');
+}
+
+function downloadCsv(filename, text) {
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Parse a CSV/TSV block into a FULL replacement field list. Delimiter = tab if any
+// line has one, else comma. A header row (first cell is a known header token) maps
+// columns by name; otherwise positional API Name, Label, Type, Length, Required,
+// Deprecated, Key. Type falls back to the first cell that reads as a known SF
+// type (then Text); Required/Deprecated accept Yes/true/1/x. Fresh fids per row.
+function parseBulkFields(text) {
+  const out = [];
+  const lines = String(text || '').split(/\r?\n/).filter(l => l.trim());
+  if (!lines.length) return out;
+  const delim = lines.some(l => l.includes('\t')) ? '\t' : ',';
+  const split = l => l.split(delim).map(s => s.trim());
+  const typeOf = v => SF_FIELD_TYPES.find(t => t.toLowerCase() === String(v).toLowerCase());
+  const keyOf = v => {
+    const k = String(v).toLowerCase().trim();
+    if (k === 'pk' || /primary/.test(k)) return 'pk';
+    if (k === 'fk' || /foreign/.test(k)) return 'fk';
+    if (k === 'fqk' || /qualified/.test(k)) return 'fqk';
+    return null;
+  };
+  const truthy = v => /^(y|yes|true|1|x|✓)$/i.test(String(v).trim());
+
+  const firstLower = split(lines[0]).map(s => s.toLowerCase());
+  const HEADER_FIRST = ['api name', 'api_name', 'apiname', 'api', 'name', 'field', 'field name', 'field api name'];
+  let start = 0;
+  let map = { api: 0, label: 1, type: 2, length: 3, required: 4, decom: 5, key: 6 };   // positional default
+  if (HEADER_FIRST.includes(firstLower[0])) {
+    start = 1;
+    const find = re => firstLower.findIndex(h => re.test(h));
+    map = {
+      api: Math.max(0, find(/api|^name$|^field/)),
+      label: find(/label|display/),
+      type: find(/type/),
+      length: find(/len/),
+      required: find(/req/),
+      decom: find(/deprecat|decom/),   // new "Deprecated" header + legacy "Decommissioned"
+      key: find(/key|pk|fk|fqk/),
+    };
+  }
+
+  const seen = new Set();
+  for (let i = start; i < lines.length; i++) {
+    const cols = split(lines[i]);
+    const api = sanitizeFieldValue((map.api >= 0 ? cols[map.api] : cols[0]) || '');
+    if (!api) continue;
+    let type = (map.type >= 0 ? typeOf(cols[map.type]) : null) || '';
+    if (!type) { for (let j = 0; j < cols.length; j++) { if (j === map.api) continue; const m = typeOf(cols[j]); if (m) { type = m; break; } } }
+    if (!type) type = 'Text';
+    const label = sanitizeFieldValue((map.label >= 0 && cols[map.label]) ? cols[map.label] : api);
+    const length = sanitizeFieldValue((map.length >= 0 && cols[map.length]) ? cols[map.length] : '', 32);
+    const deprecated = map.decom >= 0 ? truthy(cols[map.decom]) : false;
+    let keyType = map.key >= 0 ? keyOf(cols[map.key]) : null;
+    if (!keyType) { for (let j = 0; j < cols.length; j++) { const k = keyOf(cols[j]); if (k) { keyType = k; break; } } }
+    // A PK / FQK is inherently mandatory; otherwise honour the Required column.
+    const required = (keyType === 'pk' || keyType === 'fqk') ? true : (map.required >= 0 ? truthy(cols[map.required]) : false);
+    const fid = newFid(seen); seen.add(fid);   // stable synthetic identity per imported row
+    out.push({ label, apiName: api, type, keyType, length, required, deprecated, fid });
+  }
+  return out;
+}
+
+// Sanitise a pasted/imported field string — parity with sanitizeGraphJSON for untrusted
+// input: drop control + zero-width chars, neutralise script-bearing URIs, trim, and cap
+// length so a hostile paste can't inject markup, bloat the model, or break the renderer.
+function sanitizeFieldValue(s, maxLen = 255) {
+  let v = String(s ?? '').replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '');
+  if (/^\s*(javascript|vbscript)\s*:|^\s*data\s*:\s*text\/html/i.test(v)) v = '';
+  v = v.trim();
+  return v.length > maxLen ? v.slice(0, maxLen) : v;
 }
 
 function renderFlowShapeProps(cell) {
@@ -3084,12 +3394,21 @@ function renderLinkProps(cell) {
   // Content — primary text only (Font size moved to Appearance for
   // consistency with every other shape's typography placement).
   const labelSec = section(bodyEl, 'Content');
-  const currentLabel = cell.labels()?.[0]?.attrs?.text?.text ?? '';
-  const currentLabelSize = cell.labels()?.[0]?.attrs?.text?.fontSize ?? 13;
+  // A mapping link may also carry a mapping-type code badge (selector `badgeBox`), and an
+  // architecture link a frequency overlay (selector `freqText`). Read the USER label past
+  // both, and preserve them when the primary label is edited.
+  const isBadge = l => !!(l?.attrs?.badgeBox);
+  const isFreq = l => !!(l?.attrs?.freqText);
+  const userLabel = (cell.labels() || []).find(l => !isBadge(l) && !isFreq(l));
+  const currentLabel = userLabel?.attrs?.text?.text ?? '';
+  const currentLabelSize = userLabel?.attrs?.text?.fontSize ?? 13;
   addText(labelSec, 'Label', currentLabel, v => {
-    const fontSize = cell.labels()?.[0]?.attrs?.text?.fontSize ?? 13;
+    const fontSize = (cell.labels() || []).find(l => !isBadge(l) && !isFreq(l))?.attrs?.text?.fontSize ?? 13;
     const lineColor = cell.attr('line/stroke') || '#888888';
-    cell.labels(v ? [{
+    // Keep the non-user labels (mapping badge + frequency overlay) when the label changes.
+    const others = (cell.labels() || []).filter(l => isBadge(l) || isFreq(l));
+    const arr = [];
+    if (v) arr.push({
       markup: [
         { tagName: 'rect', selector: 'body' },
         { tagName: 'text', selector: 'text' },
@@ -3099,9 +3418,80 @@ function renderLinkProps(cell) {
         body: { ref: 'text', refWidth: 12, refHeight: 4, refX: -6, refY: -2, fill: 'var(--bg-canvas, #FFFFFF)', stroke: 'none', rx: 2, ry: 2 },
       },
       position: { distance: 0.5, offset: 0 },
-    }] : []);
+    });
+    arr.push(...others);   // keep the F/ST/BT/CI badge and/or the frequency overlay
+    cell.labels(arr);
     titleEl.textContent = v || '';
   });
+
+  // Architecture only: integration-frequency overlay (clock icon + muted text below the
+  // line). `connectionFrequency` is the authoritative prop; syncFrequencyLabel derives the
+  // secondary label. addText already coalesces a focus session into one undo entry, so no
+  // explicit history batch is needed (matches the Label setter).
+  const isArchitecture = document.getElementById('canvas-container')?.dataset.diagramType === 'architecture';
+  if (isArchitecture) {
+    addText(labelSec, 'Frequency', cell.prop('connectionFrequency') || '', v => {
+      cell.prop('connectionFrequency', v || '');
+      syncFrequencyLabel(cell);
+    }, cell, { placeholder: 'Real-time / Hourly / Daily' });
+  }
+
+  // Connection type is meaningful ONLY for a field→field link (a DataObject field
+  // port on both ends): that link is a Data Cloud field mapping by default but can be
+  // toggled to a plain ER relationship via a two-value slider. Every other connector
+  // is just a relationship/line — no toggle is shown.
+  const src = cell.get('source'); const tgt = cell.get('target');
+  const isFieldToField = typeof src?.port === 'string' && src.port.startsWith('field-')
+    && typeof tgt?.port === 'string' && tgt.port.startsWith('field-');
+  if (isFieldToField) {
+    const isMapping = cell.prop('linkKind') === 'mapping';
+    addSegmented(labelSec, 'Connection type', isMapping ? 'mapping' : 'relationship', [
+      { value: 'relationship', label: 'Relationship' },
+      { value: 'mapping', label: 'Mapping' },
+    ], v => {
+      // One history step for the whole switch — it mutates linkKind + several attrs +
+      // router + connector + connectionPoints, and without batching undo/redo would
+      // step through each change instead of the single click the user made.
+      history.startBatch();
+      try {
+        if (v === 'mapping') { cell.prop('linkKind', 'mapping'); applyMappingLinkStyle(cell); }
+        else { cell.prop('linkKind', null); applyRelationshipLinkStyle(cell); }
+      } finally {
+        history.endBatch();
+      }
+      refresh();
+    });
+
+    // Data Cloud mapping properties — only meaningful for an ACTIVE field mapping.
+    // Grouped under Content: the transform Mapping Type (a 5-value picklist), plus a
+    // progressively-disclosed Expression note. Both feed the table view's MAPPING
+    // TYPE / Mapping Label columns; non-Standard types also drop a code badge (F / ST
+    // / BT / CI) on the connector's target stub via syncMappingTypeBadge.
+    if (cell.prop('linkKind') === 'mapping') {
+      const MAPPING_TYPES = ['Standard', 'Formula', 'Streaming Transform', 'Batch Transform', 'Calculated Insight'];
+      const curType = MAPPING_TYPES.includes(cell.prop('mappingType')) ? cell.prop('mappingType') : 'Standard';
+      addSelect(labelSec, 'Mapping type', curType,
+        MAPPING_TYPES.map(t => ({ value: t, label: t })),
+        v => {
+          // One undo step for the whole switch (prop + label badge).
+          history.startBatch();
+          try {
+            cell.prop('mappingType', v);
+            syncMappingTypeBadge(cell);
+          } finally {
+            history.endBatch();
+          }
+          refresh();   // re-render so the Expression field shows/hides for the new type
+        });
+      // Progressive disclosure: any non-Standard (computed) transform exposes the
+      // Expression / rules note, bound to `expressionRule` → table Expression / Rule column.
+      if (curType !== 'Standard') {
+        addText(labelSec, 'Expression / rules', cell.prop('expressionRule') || cell.prop('mappingLabel') || '', v => {
+          cell.prop('expressionRule', v || '');
+        });
+      }
+    }
+  }
 
   // Appearance
   const appearance = section(bodyEl, 'Appearance');
@@ -3110,6 +3500,8 @@ function renderLinkProps(cell) {
       // Full attrs replacement with sync rendering for Safari compatibility.
       // Arrow markers (no explicit fill/stroke) auto-inherit from line stroke.
       // ER markers with explicit stroke need manual sync.
+      history.startBatch();   // attrs + (mapping) badge label = one undo step
+      try {
       const allAttrs = JSON.parse(JSON.stringify(cell.get('attrs') || {}));
       if (!allAttrs.line) allAttrs.line = {};
       allAttrs.line.stroke = v;
@@ -3118,6 +3510,8 @@ function renderLinkProps(cell) {
       const tm = allAttrs.line.targetMarker;
       if (tm && tm.stroke && tm.stroke !== 'none') tm.stroke = v;
       cell.set('attrs', allAttrs);
+      // A mapping-type badge's border + letters track the connector's colour.
+      if (cell.prop('linkKind') === 'mapping') syncMappingTypeBadge(cell);
       paper.updateViews();
       // Safari SVG marker cache workaround — see applyMarker() below for the
       // why. Same DOM re-insert pattern.
@@ -3128,6 +3522,9 @@ function renderLinkProps(cell) {
         parent.removeChild(view.el);
         if (next) parent.insertBefore(view.el, next);
         else parent.appendChild(view.el);
+      }
+      } finally {
+        history.endBatch();
       }
     });
   // Same name → em-space gap → line-sample convention as
@@ -3152,7 +3549,14 @@ function renderLinkProps(cell) {
     if (cell.attr('line/strokeDasharray')) cell.attr('line/strokeDasharray', null);
   });
   addNumber(appearance, 'Line width', cell.attr('line/strokeWidth') ?? 2,
-    v => cell.attr('line/strokeWidth', v));
+    v => {
+      cell.attr('line/strokeWidth', v);
+      // A plain "None" end is a continuation of the line, so it tracks the line
+      // width; any decorated end (arrow / crow's foot) keeps its own weight.
+      for (const end of ['sourceMarker', 'targetMarker']) {
+        if (cell.attr(`line/${end}`)?.d === 'M 0 0 L -12 0') cell.attr(`line/${end}/stroke-width`, v);
+      }
+    });
   // Font size — connector label typography. Lives in Appearance for
   // consistency with the universal convention (text content in Content;
   // text styling in Appearance).
@@ -3163,6 +3567,7 @@ function renderLinkProps(cell) {
     }
   }, { min: 8, max: 24 });
   const stroke = cell.attr('line/stroke') || '#333333';
+  const lineWidth = cell.attr('line/strokeWidth') ?? 2; // None stub follows the line weight
   // ER crow's foot markers — negative-x convention (toward element).
   // Crow's foot prongs fan out toward negative-x (toward the entity).
   // Explicit fill/stroke is set because ER markers are open paths (no
@@ -3176,7 +3581,7 @@ function renderLinkProps(cell) {
   // dasharray.
   const markerDefs = {
     // None: simple stub line extending toward element (fills the connectionPoint gap)
-    none:        { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: stroke, 'stroke-width': 2, 'stroke-dasharray': 'none' },
+    none:        { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: stroke, 'stroke-width': lineWidth, 'stroke-dasharray': 'none' },
     // Arrow: NO explicit fill/stroke — JointJS auto-inherits from line stroke
     // and auto-trims the line at the marker boundary. Using JointJS native
     // coordinate convention: tip at negative-x, base at x=0.
@@ -3288,6 +3693,26 @@ function renderLinkProps(cell) {
   addMarkerPicker(appearance, 'Target end', detectMarker(cell.attr('line/targetMarker')), markerOpts, markerSvgs, v => {
     applyMarker(cell, 'targetMarker', markerDefs[v]);
   }, { strokeColor: lineStroke });
+
+  // Reverse direction + Simplify path — generic link actions available on EVERY
+  // connector (any diagram type), stacked at the foot of Appearance with Reverse
+  // directly above Simplify, sharing one button style.
+  const reverseBtn = document.createElement('button');
+  reverseBtn.className = 'sf-properties__btn sf-properties__btn--auto-size';
+  reverseBtn.style.marginTop = '6px';
+  reverseBtn.innerHTML = `
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M2 5 L13 5 M10 2 L13 5 L10 8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M14 11 L3 11 M6 8 L3 11 L6 14" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    Reverse direction`;
+  reverseBtn.addEventListener('click', () => {
+    // Swap endpoints — the link redraws in the opposite direction (markers follow
+    // their ends). A single set keeps it one undo step.
+    const s = cell.get('source'); const t = cell.get('target');
+    cell.set({ source: t, target: s });
+  });
+  appearance.appendChild(reverseBtn);
 
   // Simplify path button
   const simplifyBtn = document.createElement('button');
@@ -3414,7 +3839,16 @@ function addOrderButtons(sec, cell) {
     const maxZ = peers.length
       ? Math.max(...peers.map(el => el.get('z') ?? tierBase))
       : tierBase;
-    cell.set('z', maxZ + 1);
+    const oldZ = cell.get('z');
+    const newZ = maxZ + 1;
+    if (oldZ === newZ) return;
+    cell.set('z', newZ);
+    // `z` is auto-managed by the canvas tier system (no blanket change:z listener),
+    // so record this explicit reorder ourselves to make it undoable.
+    history.recordCommand(
+      () => { const c = graph.getCell(cell.id); if (c) c.set('z', oldZ); },
+      () => { const c = graph.getCell(cell.id); if (c) c.set('z', newZ); },
+    );
   });
 
   // Send to Back
@@ -3431,7 +3865,14 @@ function addOrderButtons(sec, cell) {
     const minZ = peers.length
       ? Math.min(...peers.map(el => el.get('z') ?? tierBase))
       : tierBase;
-    cell.set('z', Math.max(tierBase, minZ - 1));
+    const oldZ = cell.get('z');
+    const newZ = Math.max(tierBase, minZ - 1);
+    if (oldZ === newZ) return;
+    cell.set('z', newZ);
+    history.recordCommand(
+      () => { const c = graph.getCell(cell.id); if (c) c.set('z', oldZ); },
+      () => { const c = graph.getCell(cell.id); if (c) c.set('z', newZ); },
+    );
   });
 
   btnRow.appendChild(frontBtn);
@@ -3948,7 +4389,12 @@ function addColor(parent, label, value, onChange, opts = {}) {
   // and fires the onChange. The button is dimmed when the current value
   // already matches the default so users can see the "nothing to reset"
   // state at a glance.
-  const defaultHex = opts.defaultValue ? toHex(opts.defaultValue) : null;
+  // Revert target: an explicit default if the field declares one (e.g. brand blue for
+  // a Header fill), otherwise the value the field opened with — so EVERY colour input
+  // can snap back to where it started. `resetRaw` keeps the original raw string
+  // (rgba/var) so reverting restores translucency exactly, not a flattened hex.
+  const resetRaw = opts.defaultValue != null ? opts.defaultValue : value;
+  const defaultHex = resetRaw ? toHex(resetRaw) : null;
   let resetBtn = null;
   const refreshResetState = () => {
     if (!resetBtn) return;
@@ -3993,7 +4439,7 @@ function addColor(parent, label, value, onChange, opts = {}) {
     resetBtn = document.createElement('button');
     resetBtn.type = 'button';
     resetBtn.className = 'sf-prop-color-reset';
-    resetBtn.title = `Reset to default (${defaultHex})`;
+    resetBtn.title = `${opts.defaultValue != null ? 'Reset to default' : 'Revert to original'} (${defaultHex})`;
     resetBtn.setAttribute('aria-label', 'Reset colour to default');
     // Counter-clockwise arrow ↺ — matches the visual idiom users already
     // associate with "reset" / "undo" without conflicting with the toolbar
@@ -4004,7 +4450,7 @@ function addColor(parent, label, value, onChange, opts = {}) {
       swatch.value = defaultHex;
       textInput.value = defaultHex;
       lastValid = defaultHex;
-      batched(defaultHex);
+      batched(resetRaw);
       refreshResetState();
     });
     row.appendChild(resetBtn);
@@ -4293,6 +4739,7 @@ const TYPE_PLURALS = {
   'sf.SimpleNode':     'Nodes',
   'sf.Container':      'Containers',
   'sf.Zone':           'Zones',
+  'sf.TaskGroup':      'Task Groups',
   'sf.Note':           'Notes',
   'sf.BpmnEvent':      'Events',
   'sf.BpmnTask':       'Tasks',
@@ -4573,12 +5020,16 @@ function addToggle(parent, label, value, onChange) {
 // so each state has an explicit name (e.g. "Show" / "Hide"). `options` is
 // `[{ value, label }, ...]`; `onChange` fires with the selected value when
 // the user picks a different one.
-function addSegmented(parent, label, value, options, onChange) {
+function addSegmented(parent, label, value, options, onChange, opts = {}) {
   const f = field(parent, label);
   const wrap = document.createElement('div');
   wrap.className = 'sf-properties__segmented';
   wrap.setAttribute('role', 'radiogroup');
   const buttons = [];
+  const clearAll = () => buttons.forEach(b => {
+    b.classList.remove('sf-properties__segmented-option--active');
+    b.setAttribute('aria-checked', 'false');
+  });
   options.forEach(opt => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -4589,11 +5040,15 @@ function addSegmented(parent, label, value, options, onChange) {
     btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
     if (isActive) btn.classList.add('sf-properties__segmented-option--active');
     btn.addEventListener('click', () => {
-      if (btn.classList.contains('sf-properties__segmented-option--active')) return;
-      buttons.forEach(b => {
-        b.classList.remove('sf-properties__segmented-option--active');
-        b.setAttribute('aria-checked', 'false');
-      });
+      if (btn.classList.contains('sf-properties__segmented-option--active')) {
+        // Re-clicking the active segment clears the choice — only where the control
+        // models an optional value (allowDeselect); binary sliders stay no-op.
+        if (!opts.allowDeselect) return;
+        clearAll();
+        onChange(opts.deselectValue ?? '');
+        return;
+      }
+      clearAll();
       btn.classList.add('sf-properties__segmented-option--active');
       btn.setAttribute('aria-checked', 'true');
       onChange(opt.value);
@@ -4605,6 +5060,10 @@ function addSegmented(parent, label, value, options, onChange) {
 }
 
 function addSelect(parent, label, value, options, onChange) {
+  // Discrete control: one `change` per action. Batch onChange so a type switch that
+  // also repaints multiple attrs (e.g. BpmnEvent / Gateway / SequenceFragment) is ONE
+  // undo step — the type prop + every attr land together.
+  onChange = asUndoBatch(onChange);
   const f = field(parent, label);
   const sel = document.createElement('select');
   sel.className = 'sf-properties__select';
@@ -4617,6 +5076,25 @@ function addSelect(parent, label, value, options, onChange) {
   });
   sel.addEventListener('change', () => onChange(sel.value));
   f.appendChild(sel);
+}
+
+// Extensible picklist: free-text input backed by a <datalist> of suggestions.
+// Lets users pick a standard tier (Source/DLO/DMO…) or type a custom one,
+// avoiding the fragmentation of pure free text without a rigid enum.
+function addDatalist(parent, label, value, suggestions, onChange) {
+  const f = field(parent, label);
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'sf-properties__input';
+  input.value = value || '';
+  const listId = 'sf-dl-' + Math.random().toString(36).slice(2, 9);
+  const dl = document.createElement('datalist');
+  dl.id = listId;
+  suggestions.forEach(s => { const o = document.createElement('option'); o.value = s; dl.appendChild(o); });
+  input.setAttribute('list', listId);
+  input.addEventListener('input', () => onChange(input.value));
+  f.appendChild(input);
+  f.appendChild(dl);
 }
 
 function addMarkerPicker(parent, label, current, options, svgs, onChange, opts = {}) {
@@ -4679,6 +5157,10 @@ function addMarkerPicker(parent, label, current, options, svgs, onChange, opts =
 }
 
 function addIconPicker(parent, label, currentHref, onChange, iconColorGetter) {
+  // Discrete control: batch onChange so the icon href + any layout attr writes the
+  // caller makes (e.g. updateSimpleNodeLayout / updateDataObjectHeaderLayout) collapse
+  // into ONE undo step — for the Node, Container, and DataObject header icon pickers.
+  onChange = asUndoBatch(onChange);
   const f = field(parent, label);
 
   // Detect current icon name from href (data URI contains data-icon-id attribute)
@@ -4880,7 +5362,10 @@ function preserveParentEmbedding(oldCell, newCell) {
   const parent = graph.getCell(parentId);
   if (!parent) return;
   if (!canEmbed(parent.get('type'), newCell.get('type'))) return;
-  parent.embed(newCell);
+  // Suppress change:parent recording — the conversion's add(newCell) command already
+  // captures the embedded state in its JSON (re-captured on undo with `parent`), so the
+  // embed round-trips via the add/remove pair without a separate command.
+  history.suppressEmbedTracking(() => parent.embed(newCell));
 }
 
 function convertToContainer(cell) {
@@ -4900,11 +5385,14 @@ function convertToContainer(cell) {
       accentFill:     { fill: fillColor },
     },
   });
-  graph.addCell(container);
-  preserveParentEmbedding(cell, container);
-  reconnectLinks(connections, container.id);
-  cell.remove();
-  selection.selectOnly(container.id);
+  history.startBatch();   // add + reconnect + remove = ONE undo step
+  try {
+    graph.addCell(container);
+    preserveParentEmbedding(cell, container);
+    reconnectLinks(connections, container.id);
+    cell.remove();
+    selection.selectOnly(container.id);
+  } finally { history.endBatch(); }
 }
 
 function convertToNode(cell) {
@@ -4924,12 +5412,15 @@ function convertToNode(cell) {
       body:     { fill: fillColor },
     },
   });
-  graph.addCell(node);
-  updateSimpleNodeLayout(node);
-  preserveParentEmbedding(cell, node);
-  reconnectLinks(connections, node.id);
-  cell.remove();
-  selection.selectOnly(node.id);
+  history.startBatch();   // add + layout + reconnect + remove = ONE undo step
+  try {
+    graph.addCell(node);
+    updateSimpleNodeLayout(node);
+    preserveParentEmbedding(cell, node);
+    reconnectLinks(connections, node.id);
+    cell.remove();
+    selection.selectOnly(node.id);
+  } finally { history.endBatch(); }
 }
 
 function convertToIcon(cell) {
@@ -4953,11 +5444,14 @@ function convertToIcon(cell) {
       subtitle: { text: '', visibility: 'hidden' },
     },
   });
-  graph.addCell(node);
-  preserveParentEmbedding(cell, node);
-  reconnectLinks(connections, node.id);
-  cell.remove();
-  selection.selectOnly(node.id);
+  history.startBatch();   // add + reconnect + remove = ONE undo step (depth-safe if a convert-all batch is already open)
+  try {
+    graph.addCell(node);
+    preserveParentEmbedding(cell, node);
+    reconnectLinks(connections, node.id);
+    cell.remove();
+    selection.selectOnly(node.id);
+  } finally { history.endBatch(); }
 }
 
 function convertContainerToIcon(cell) {
@@ -4980,11 +5474,14 @@ function convertContainerToIcon(cell) {
       subtitle: { text: '', visibility: 'hidden' },
     },
   });
-  graph.addCell(node);
-  preserveParentEmbedding(cell, node);
-  reconnectLinks(connections, node.id);
-  cell.remove();
-  selection.selectOnly(node.id);
+  history.startBatch();   // add + reconnect + remove = ONE undo step (depth-safe if a convert-all batch is already open)
+  try {
+    graph.addCell(node);
+    preserveParentEmbedding(cell, node);
+    reconnectLinks(connections, node.id);
+    cell.remove();
+    selection.selectOnly(node.id);
+  } finally { history.endBatch(); }
 }
 
 function convertFromIcon(cell) {
@@ -5007,11 +5504,14 @@ function convertFromIcon(cell) {
       subtitle: { text: savedSubtitle, visibility: 'visible' },
     },
   });
-  graph.addCell(node);
-  preserveParentEmbedding(cell, node);
-  reconnectLinks(connections, node.id);
-  cell.remove();
-  selection.selectOnly(node.id);
+  history.startBatch();   // add + reconnect + remove = ONE undo step (depth-safe if a convert-all batch is already open)
+  try {
+    graph.addCell(node);
+    preserveParentEmbedding(cell, node);
+    reconnectLinks(connections, node.id);
+    cell.remove();
+    selection.selectOnly(node.id);
+  } finally { history.endBatch(); }
 }
 
 // ── Utility ─────────────────────────────────────────────────────────
@@ -5030,12 +5530,21 @@ function toHex(color) {
     const [, r, g, b] = color.match(/^(.)(.)(.)/);
     return `#${r}${r}${g}${g}${b}${b}`;
   }
-  // CSS variable, rgba, named color — parse via canvas
+  // CSS variable, rgb()/rgba(), named color — resolve via canvas. Canvas returns a
+  // #rrggbb for opaque colours but an `rgba(r, g, b, a)` string when alpha < 1 — pull
+  // the channels and drop alpha rather than falling through to #000000 (which made a
+  // translucent fill, e.g. a Zone/Layer tint, read as black in the picker).
   try {
     const ctx = document.createElement('canvas').getContext('2d');
     ctx.fillStyle = color;
-    const hex = ctx.fillStyle;
-    return /^#[0-9a-f]{6}$/i.test(hex) ? hex : '#000000';
+    const resolved = ctx.fillStyle;
+    if (/^#[0-9a-f]{6}$/i.test(resolved)) return resolved;
+    const m = resolved.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (m) {
+      const h = n => Math.max(0, Math.min(255, +n)).toString(16).padStart(2, '0');
+      return `#${h(m[1])}${h(m[2])}${h(m[3])}`;
+    }
+    return '#000000';
   } catch {
     return '#000000';
   }

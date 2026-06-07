@@ -1,7 +1,8 @@
 // Pre-built Salesforce architecture components
 // Each component is a config object describing a diagram element
 
-import { getIconDataUri } from './icons.js?v=1.14.1';
+import { getIconDataUri } from './icons.js?v=1.15.0';
+import { getVisibleDataObjectFields } from './shapes.js?v=1.15.0';
 
 /** Convert inline stencilSvg markup to a data URI for use as a canvas icon.
  *  Each child element must carry its own fill/stroke — the wrapper SVG sets NO
@@ -76,6 +77,7 @@ export const SVG = {
   orgDepartment: '<rect x="2" y="3" width="16" height="14" rx="1" stroke-dasharray="3 2"/><circle cx="7" cy="8" r="1.5" stroke-width="0.8"/><circle cx="13" cy="8" r="1.5" stroke-width="0.8"/><circle cx="10" cy="13" r="1.5" stroke-width="0.8"/>',
   orgTeam:       '<rect x="2" y="3" width="16" height="14" rx="2"/><rect x="2" y="5" width="2" height="10" rx="1" fill="currentColor" stroke="none" opacity="0.6"/><text x="7" y="8" font-size="4" font-weight="bold" fill="currentColor" stroke="none" opacity="0.5">Team</text><circle cx="8" cy="13" r="1.5" stroke-width="0.8"/><circle cx="13" cy="13" r="1.5" stroke-width="0.8"/>',
   orgTask:       '<rect x="2" y="5" width="16" height="10" rx="2"/><line x1="10" y1="5" x2="10" y2="15"/><line x1="3.5" y1="8.5" x2="8.5" y2="8.5" stroke-width="1.2"/><line x1="3.5" y1="11.5" x2="7" y2="11.5" stroke-width="0.9" opacity="0.7"/><circle cx="14" cy="10" r="1.5" stroke-width="0.8"/>',
+  orgTaskGroup:  '<rect x="1.5" y="2.5" width="17" height="15" rx="2" stroke-dasharray="3 2"/><rect x="4" y="6" width="12" height="3.4" rx="1"/><rect x="4" y="11" width="12" height="3.4" rx="1"/>',
   // BPMN Events
   eventStart:        '<circle cx="10" cy="10" r="7" stroke-width="1.5"/>',
   eventEnd:          '<circle cx="10" cy="10" r="7" stroke-width="4"/>',
@@ -485,20 +487,29 @@ export const GANTT_CATEGORIES = [
   },
 ];
 
-// ── Organisation Diagram components ────────────────────────────────
+// ── Org Chart components ───────────────────────────────────────────
 
 export const ORG_CATEGORIES = [
   {
-    id: 'org-components',
-    label: 'Components',
+    id: 'org-organisation',
+    label: 'Organisation',
     components: [
+      { type: 'sf.Zone',      label: 'Department', stencilSvg: SVG.orgDepartment },
+      { type: 'sf.Container', label: 'Team',       stencilSvg: SVG.orgTeam },
       // jobTitle starts empty so the property-panel input's "job title"
       // placeholder is visible — invites repurposing for role / team / etc.
       // personName keeps "Full Name" because it's the primary visible label
       // and an empty caption would render a blank avatar block.
       { type: 'sf.OrgPerson', label: 'Person', personName: 'Full Name', jobTitle: '', stencilSvg: SVG.orgPerson },
-      { type: 'sf.Zone',      label: 'Department', stencilSvg: SVG.orgDepartment },
-      { type: 'sf.Container',  label: 'Team',       stencilSvg: SVG.orgTeam },
+    ],
+  },
+  {
+    id: 'org-raci',
+    label: 'RACI',
+    components: [
+      // Task Group is a dashed section frame that holds Tasks; each Task captures
+      // Person/Team cards into its right column to spell out the R/A/C/I roles.
+      { type: 'sf.TaskGroup', label: 'Task Group', stencilSvg: SVG.orgTaskGroup },
       { type: 'sf.Task',      label: 'Task',       stencilSvg: SVG.orgTask },
     ],
   },
@@ -949,15 +960,66 @@ export const DATAMODEL_CATEGORIES = [
   },
 ];
 
+// Data Mapping reuses the Data Model Object stencil, but drops the Marketing Cloud
+// Data View templates (objects come in by copy/paste from a Data Model diagram) and
+// swaps the generic Zone for a "Mapping Layers" group: labelled Zone presets for the
+// Data Cloud pipeline (Source → DLO → DMO → Activation), each carrying a canonical
+// `layerStage` so a future table view can derive an object's stage from the layer it
+// sits in. A generic "Layer" covers any custom stage.
+export const DATAMAPPING_CATEGORIES = [
+  {
+    id: 'dm-generic',
+    // Generic Shapes lead with a plain Node (the DataObject moves to its own
+    // "Objects" group below Mapping Layers, to nudge users toward layering).
+    label: 'Generic Shapes',
+    components: [
+      { type: 'sf.SimpleNode',  label: 'Node',       iconName: null, stencilSvg: SVG.node, noCanvasIcon: true },
+      { type: 'sf.Note',        label: 'Note',       stencilSvg: SVG.note },
+      { type: 'sf.TextLabel',   label: 'Text',       stencilSvg: SVG.text },
+      { type: 'sf.Annotation',  label: 'Annotation', stencilSvg: SVG.annotation },
+      { type: 'sf.Line',        label: 'Line',       stencilSvg: SVG.line },
+      { type: 'sf.Link',        label: 'Link',       url: 'https://', stencilSvg: SVG.link },
+      { type: 'sf.Image',       label: 'Image',      stencilSvg: SVG.image, customDrop: 'image' },
+    ],
+  },
+  {
+    id: 'dm-layers',
+    label: 'Mapping Layers',
+    components: [
+      { type: 'sf.Zone', label: 'Source',            stencilSvg: SVG.zone, accentColor: '#1D73C9', layerStage: 'source' },
+      { type: 'sf.Zone', label: 'Data Lake Object',  stencilSvg: SVG.zone, accentColor: '#F6B355', layerStage: 'dlo' },
+      { type: 'sf.Zone', label: 'Data Model Object', stencilSvg: SVG.zone, accentColor: '#DA4E55', layerStage: 'dmo' },
+      { type: 'sf.Zone', label: 'Activation',        stencilSvg: SVG.zone, accentColor: '#27AE60', layerStage: 'activation' },
+      { type: 'sf.Zone', label: 'Layer',             stencilSvg: SVG.zone },
+    ],
+  },
+  {
+    id: 'dm-objects',
+    label: 'Objects',
+    components: [
+      {
+        type: 'sf.DataObject', label: 'Object', objectName: 'ObjectName', headerColor: '#1D73C9', stencilSvg: SVG.dataTable,
+        // ID is required by default — a unique key is mandatory for Data Cloud mapping.
+        fields: [
+          { label: 'Id', apiName: 'Id', type: 'ID', keyType: 'pk', required: true },
+          { label: 'Name', apiName: 'Name', type: 'Text', keyType: null },
+        ],
+      },
+    ],
+  },
+];
+
 // Helper: resize a DataObject element to fit its fields. If the element is
 // embedded in a parent, the parent's bottom edge follows automatically via
 // the canvas-level `change:size` hook (`fitParentToChildren` in canvas.js),
 // which both grows and shrinks the parent to keep one grid dot of padding
 // below the lowest embedded child.
 export function resizeDataObjectToFit(cell) {
-  const fields = cell.get('fields') || [];
-  const keyFieldsOnly = cell.get('keyFieldsOnly');
-  const visible = keyFieldsOnly ? fields.filter(f => f.keyType) : fields;
+  // Use the SAME visible-field list the view renders (getVisibleDataObjectFields):
+  // in mapping mode "Show Only Mapped" keeps mapped + key fields, so sizing must
+  // match — a private key-only copy here shrank the object to fit just the PK and
+  // clipped every mapped row (the "Show Only Mapped is broken" bug).
+  const visible = getVisibleDataObjectFields(cell);
   const HEADER_H = 32;
   const ROW_H = 22;
   const height = HEADER_H + Math.max(visible.length, 1) * ROW_H + 4;
@@ -985,7 +1047,7 @@ export function getAllStencilSvgs() {
     flowProcess: 'Process', flowDecision: 'Decision', flowTerminator: 'Terminator',
     flowDatabase: 'Database', flowDocument: 'Document', flowIO: 'Input/Output',
     flowPredefined: 'Predefined Process', orgPerson: 'Person', orgDepartment: 'Department',
-    orgTeam: 'Team', eventStart: 'Start Event', eventEnd: 'End Event',
+    orgTeam: 'Team', orgTaskGroup: 'Task Group', eventStart: 'Start Event', eventEnd: 'End Event',
     eventIntermediate: 'Intermediate Event', task: 'Task', subprocess: 'Subprocess',
     loop: 'Loop', gatewayExcl: 'Exclusive Gateway', gatewayPar: 'Parallel Gateway',
     gatewayIncl: 'Inclusive Gateway', gatewayEvt: 'Event Gateway',
@@ -1017,6 +1079,14 @@ export function getAllStencilSvgs() {
 }
 
 // Create a JointJS element from a component config at the given position
+// hex (#rgb or #rrggbb) → rgba() string at the given alpha.
+function hexToRgba(hex, a) {
+  let h = String(hex).replace('#', '');
+  if (h.length === 3) h = h.split('').map(c => c + c).join('');
+  const n = parseInt(h, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
 export function createElementFromComponent(component, position = { x: 100, y: 100 }) {
   const { type, label, iconName, bg, accentColor, subtitle } = component;
 
@@ -1103,11 +1173,29 @@ export function createElementFromComponent(component, position = { x: 100, y: 10
     }
 
 
-    case 'sf.Zone':
-      return new joint.shapes.sf.Zone({
+    case 'sf.Zone': {
+      const zone = new joint.shapes.sf.Zone({
         position,
         attrs: { label: { text: label || 'Zone' } },
       });
+      // Mapping Layer presets carry an accent + a canonical `layerStage` (source /
+      // dlo / dmo / activation) so a future table view can read an object's stage
+      // from the layer it sits in.
+      if (component.accentColor) {
+        zone.attr('body/stroke', component.accentColor);
+        zone.attr('body/fill', hexToRgba(component.accentColor, 0.05));
+        zone.attr('label/fill', component.accentColor);
+      }
+      if (component.layerStage) zone.set('layerStage', component.layerStage);
+      return zone;
+    }
+
+    case 'sf.TaskGroup': {
+      return new joint.shapes.sf.TaskGroup({
+        position,
+        attrs: { label: { text: label || 'Task Group' } },
+      });
+    }
 
     // ── BPMN shapes ──────────────────────────────────────────
 
@@ -1427,7 +1515,7 @@ export function createElementFromComponent(component, position = { x: 100, y: 10
       return cell;
     }
 
-    // ── Organisation shapes ──────────────────────────────────
+    // ── Org Chart shapes ──────────────────────────────────────
 
     case 'sf.OrgPerson': {
       const jt = component.jobTitle || '';

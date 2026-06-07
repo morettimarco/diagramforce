@@ -1,9 +1,10 @@
 // Tabs — multi-diagram tab management
 // Each tab holds its own graph JSON, viewport, and undo/redo history.
 
-import { APP_VERSION, classifyVersionDiff, normalizeDiagramType, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES } from './persistence.js?v=1.14.1';
-import { escHtml, formatRelativeTime } from './util.js?v=1.14.1';
-import { showError, showToast, buildModal } from './feedback.js?v=1.14.1';
+import { APP_VERSION, classifyVersionDiff, normalizeDiagramType, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES } from './persistence.js?v=1.15.0';
+import { escHtml, formatRelativeTime } from './util.js?v=1.15.0';
+import { showError, showToast, buildModal } from './feedback.js?v=1.15.0';
+import { createElementFromComponent } from './components.js?v=1.15.0';
 
 let graph, paper, canvasModule, selectionModule, historyModule, persistenceModule, stencilModule;
 let tabListEl;
@@ -19,8 +20,9 @@ export const DIAGRAM_TYPES = {
   process:      { label: 'Process Diagram',      short: 'Process' },
   sequence:     { label: 'Sequence Diagram',      short: 'Sequence' },
   datamodel:    { label: 'Data Model Diagram',   short: 'Data Model' },
+  datamapping:  { label: 'Data Mapping Diagram', short: 'Data Mapping' },
   gantt:        { label: 'Gantt Chart',           short: 'Gantt' },
-  org:          { label: 'Organisation Diagram',  short: 'Organisation' },
+  org:          { label: 'Org Chart',             short: 'Org Chart' },
 };
 
 const STORAGE_KEY = 'sf-diagrams-tabs';
@@ -74,10 +76,20 @@ export function init(_graph, _paper, _canvas, _selection, _history, _persistence
   persistenceModule.setTabGraphGetter((id) => getTabGraphJSON(id));
   persistenceModule.setTabViewportGetter((id) => getTabViewport(id));
   persistenceModule.setTabDiagramTypeGetter((id) => getTabDiagramType(id));
-  persistenceModule.setImportHandler((name, type, graphJSON, viewport) => {
+  persistenceModule.setTabMappingModeGetter((id) => getTabMappingMode(id));
+  persistenceModule.setActiveMappingModeGetter(() => getActiveMappingMode());
+  persistenceModule.setImportHandler((name, type, graphJSON, viewport, mappingMode) => {
     // Dismiss the new-diagram modal if it's open (e.g. first visit via share URL)
     document.querySelector('.sf-new-modal')?.remove();
-    const id = newTab(uniqueTabName(name), type);
+    // Back-compat: a pre-v1.15.0 Data Model diagram with mapping mode ON imports as
+    // a first-class "Data Mapping" diagram (mapping is now its own type).
+    let importType = type;
+    if (mappingMode && normalizeDiagramType(type) === 'datamodel') importType = 'datamapping';
+    const id = newTab(uniqueTabName(name), importType);
+    // Carry the legacy flag forward too (harmless — the type already drives mapping).
+    const importedTab = tabs.find(t => t.id === id);
+    if (importedTab) importedTab.mappingMode = !!mappingMode;
+    notifyChange();
     // The new tab is now active — load the graph into it
     canvasModule.setLoadingJSON(true);
     try { graph.fromJSON(graphJSON); canvasModule.migrateLinks(); canvasModule.migrateNodes(); } finally { canvasModule.setLoadingJSON(false); }
@@ -133,6 +145,39 @@ function showNewDiagramModal() {
           <span class="sf-new-modal__card-title">Architecture</span>
           <span class="sf-new-modal__card-desc">Map system architecture, integrations, and infrastructure landscape.</span>
         </button>
+        <button class="sf-new-modal__card" data-type="datamodel">
+          <svg class="sf-new-modal__icon" viewBox="0 0 64 48">
+            <!-- Two objects, vertically offset (the small stagger) like a real schema relationship -->
+            <rect x="3" y="5" width="18" height="22" rx="3" fill="none" stroke="var(--color-primary)" stroke-width="1.5"/>
+            <rect x="3" y="5" width="18" height="8" rx="3" fill="var(--color-primary)" opacity="0.8"/>
+            <rect x="43" y="21" width="18" height="22" rx="3" fill="none" stroke="var(--color-primary)" stroke-width="1.5"/>
+            <rect x="43" y="21" width="18" height="8" rx="3" fill="var(--color-primary)" opacity="0.8"/>
+            <!-- Orthogonal relationship connector, vertical leg centred between the objects so both
+                 end-stubs are visible. Ends: "one" = a T-bar at the left object (stem runs right, no
+                 line on the object side → reads as a T, not a cross); "zero or many" = open circle +
+                 crow's foot at the right object. -->
+            <g stroke="var(--text-secondary, #9AA0A6)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16 H29 V32 H40"/>
+              <line x1="22" y1="12" x2="22" y2="20"/>
+              <circle cx="36" cy="32" r="2.3" fill="var(--bg-app)"/>
+              <path d="M40 32 L43 28 M40 32 L43 32 M40 32 L43 36"/>
+            </g>
+          </svg>
+          <span class="sf-new-modal__card-title">Data Model</span>
+          <span class="sf-new-modal__card-desc">Define objects, fields, and relationships like Schema Builder.</span>
+        </button>
+        <button class="sf-new-modal__card" data-type="datamapping">
+          <svg class="sf-new-modal__icon" viewBox="0 0 64 48">
+            <rect x="3" y="9" width="22" height="30" rx="3" fill="none" stroke="var(--color-primary)" stroke-width="1.5"/>
+            <rect x="3" y="9" width="22" height="8" rx="3" fill="var(--color-primary)" opacity="0.8"/>
+            <rect x="39" y="9" width="22" height="30" rx="3" fill="none" stroke="var(--color-primary)" stroke-width="1.5"/>
+            <rect x="39" y="9" width="22" height="8" rx="3" fill="var(--color-primary)" opacity="0.8"/>
+            <path d="M25 24 L36 24 M32.5 20.5 L36 24 L32.5 27.5" fill="none" stroke="var(--color-accent)" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="M25 32 L36 32 M32.5 28.5 L36 32 L32.5 35.5" fill="none" stroke="var(--color-accent)" stroke-width="1.5" stroke-linejoin="round" opacity="0.55"/>
+          </svg>
+          <span class="sf-new-modal__card-title">Data Mapping</span>
+          <span class="sf-new-modal__card-desc">Map end-to-end data journey from source systems through Data Cloud pipelines to Activations.</span>
+        </button>
         <button class="sf-new-modal__card" data-type="process">
           <svg class="sf-new-modal__icon" viewBox="0 0 64 48">
             <circle cx="10" cy="24" r="6" fill="none" stroke="var(--color-primary)" stroke-width="2"/>
@@ -161,18 +206,7 @@ function showNewDiagramModal() {
             <polygon points="11,38 15,36 15,40" fill="var(--color-accent)"/>
           </svg>
           <span class="sf-new-modal__card-title">Sequence</span>
-          <span class="sf-new-modal__card-desc">Document request / response interactions between systems.</span>
-        </button>
-        <button class="sf-new-modal__card" data-type="datamodel">
-          <svg class="sf-new-modal__icon" viewBox="0 0 64 48">
-            <rect x="2" y="4" width="24" height="28" rx="3" fill="none" stroke="var(--color-primary)" stroke-width="1.5"/>
-            <rect x="2" y="4" width="24" height="9" rx="3" fill="var(--color-primary)" opacity="0.8"/>
-            <rect x="38" y="16" width="24" height="28" rx="3" fill="none" stroke="var(--color-primary)" stroke-width="1.5"/>
-            <rect x="38" y="16" width="24" height="9" rx="3" fill="var(--color-primary)" opacity="0.8"/>
-            <line x1="26" y1="20" x2="38" y2="30" stroke="var(--text-muted)" stroke-width="1.5"/>
-          </svg>
-          <span class="sf-new-modal__card-title">Data Model</span>
-          <span class="sf-new-modal__card-desc">Define objects, fields, and relationships like Schema Builder.</span>
+          <span class="sf-new-modal__card-desc">Document request/response interactions between systems.</span>
         </button>
         <button class="sf-new-modal__card" data-type="gantt">
           <svg class="sf-new-modal__icon" viewBox="0 0 64 48">
@@ -196,7 +230,7 @@ function showNewDiagramModal() {
             <line x1="14" y1="22" x2="14" y2="28" stroke="var(--text-muted)" stroke-width="1.5"/>
             <line x1="50" y1="22" x2="50" y2="28" stroke="var(--text-muted)" stroke-width="1.5"/>
           </svg>
-          <span class="sf-new-modal__card-title">Organisation</span>
+          <span class="sf-new-modal__card-title">Org Chart</span>
           <span class="sf-new-modal__card-desc">Document team hierarchy, roles, and responsibilities.</span>
         </button>
       </div>
@@ -256,9 +290,81 @@ export function newTab(name = 'Draft', diagramType = 'architecture') {
   saveCurrentTabState();
 
   const id = generateId();
-  tabs.push({ id, name, diagramType: normalizeDiagramType(diagramType), graphJSON: null, viewport: null, dirty: false, lastSavedAt: null, lastSaveType: null, lastModifiedAt: null });
+  tabs.push({ id, name, diagramType: normalizeDiagramType(diagramType), graphJSON: null, viewport: null, mappingMode: false, dirty: false, lastSavedAt: null, lastSaveType: null, lastModifiedAt: null });
   activateTab(id, true);
   render();
+  return id;
+}
+
+/**
+ * Map bridge (Data Model → Data Mapping). Deep-clones the current diagram's cells —
+ * ids, field `fid`s, and coordinates all preserved — wraps every object in a default
+ * "Source" layer, and loads the result into a brand-new Data Mapping tab named
+ * "<name> Mapping". The graph stays the single source of truth: the wrapped clone is
+ * assembled in memory and committed in ONE atomic `fromJSON` (guarded by
+ * setLoadingJSON, so it's the new tab's initial content — no partial state, no flicker,
+ * no spurious undo entry), exactly like the import path. Returns the new tab id, or
+ * null when there are no objects to map.
+ */
+export function cloneToMappingTab() {
+  // Snapshot the live canvas so toJSON reflects exactly what the user sees.
+  saveCurrentTabState();
+  const sourceName = getActiveTabName();
+  const cells = Array.isArray(graph.toJSON().cells) ? graph.toJSON().cells : [];
+  // Deep clone keeping ids/fids/positions intact — the new tab is a SEPARATE graph,
+  // so reusing ids is safe and keeps mapping references aligned to the source model.
+  const clones = cells.map(c => JSON.parse(JSON.stringify(c)));
+  const objs = clones.filter(c => c.type === 'sf.DataObject');
+  if (objs.length === 0) return null;   // nothing to wrap → no-op
+
+  // Bounding box of the objects (position + size) for the Source wrapper.
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, minZ = Infinity;
+  for (const o of objs) {
+    const p = o.position || { x: 0, y: 0 };
+    const s = o.size || { width: 200, height: 80 };
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x + s.width); maxY = Math.max(maxY, p.y + s.height);
+    if (typeof o.z === 'number') minZ = Math.min(minZ, o.z);
+  }
+  const PAD = 48, TOP_PAD = 56;   // comfortable padding; extra at top for the zone label
+
+  // Mint a real Source zone (carries the canonical Zone attrs + layerStage), sized to
+  // encapsulate every object with padding, and placed behind them (lower z).
+  const zone = createElementFromComponent(
+    { type: 'sf.Zone', label: 'Source', accentColor: '#1D73C9', layerStage: 'source' },
+    { x: minX - PAD, y: minY - TOP_PAD },
+  );
+  zone.resize((maxX - minX) + PAD * 2, (maxY - minY) + TOP_PAD + PAD);
+  const zoneJSON = zone.toJSON();
+  const zoneId = zoneJSON.id;
+  zoneJSON.z = (minZ === Infinity ? 1 : minZ) - 1;
+  zoneJSON.embeds = objs.map(o => o.id);
+
+  // Re-parent every object into the Source zone; defensively drop any stale embeds on
+  // other cells so an object can't end up double-parented (flat ER models have none).
+  const objIds = new Set(objs.map(o => o.id));
+  for (const c of clones) {
+    if (c.type === 'sf.DataObject') c.parent = zoneId;
+    else if (Array.isArray(c.embeds)) c.embeds = c.embeds.filter(id => !objIds.has(id));
+  }
+
+  // Open a fresh Data Mapping tab and commit the wrapped clone atomically (mirrors the
+  // import handler — setLoadingJSON guards history/dirty; migrate normalizes the cells).
+  const id = newTab(uniqueTabName(`${sourceName} Mapping`), 'datamapping');
+  notifyChange();
+  canvasModule.setLoadingJSON(true);
+  try {
+    graph.fromJSON({ cells: [zoneJSON, ...clones] });
+    canvasModule.migrateLinks();
+    canvasModule.migrateNodes();
+  } finally {
+    canvasModule.setLoadingJSON(false);
+  }
+  const t = tabs.find(x => x.id === id);
+  if (t) { t.mappingMode = true; t.lastModifiedAt = Date.now(); }
+  requestAnimationFrame(() => canvasModule.fitContent());
+  saveTabs();
+  notifyChange();
   return id;
 }
 
@@ -353,6 +459,8 @@ function typeIconSvg(diagramType) {
     inner = '<rect x="1" y="1" width="5" height="3" rx="0.5" fill="currentColor"/><rect x="10" y="1" width="5" height="3" rx="0.5" fill="currentColor"/><line x1="3.5" y1="4" x2="3.5" y2="15" stroke="currentColor" stroke-width="0.8" stroke-dasharray="1.5 1"/><line x1="12.5" y1="4" x2="12.5" y2="15" stroke="currentColor" stroke-width="0.8" stroke-dasharray="1.5 1"/><line x1="3.5" y1="8" x2="12.5" y2="8" stroke="currentColor" stroke-width="1"/><polygon points="12.5,8 10.5,7 10.5,9" fill="currentColor"/><line x1="12.5" y1="12" x2="3.5" y2="12" stroke="currentColor" stroke-width="0.8" stroke-dasharray="1.5 1"/><polygon points="3.5,12 5.5,11 5.5,13" fill="currentColor"/>';
   } else if (diagramType === 'datamodel') {
     inner = '<rect x="1" y="1" width="6" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="1" width="6" height="3" rx="1" fill="currentColor"/><rect x="9" y="7" width="6" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="7" width="6" height="3" rx="1" fill="currentColor"/><path d="M7 5L9 11" stroke="currentColor" stroke-width="1.2" fill="none"/>';
+  } else if (diagramType === 'datamapping') {
+    inner = '<rect x="0.5" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="0.5" y="2" width="5" height="3" rx="1" fill="currentColor"/><rect x="10.5" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="10.5" y="2" width="5" height="3" rx="1" fill="currentColor"/><path d="M5.5 8 L10 8 M8.5 6.5 L10 8 L8.5 9.5" fill="none" stroke="currentColor" stroke-width="1"/><path d="M5.5 11 L10 11" stroke="currentColor" stroke-width="1" opacity="0.55"/>';
   } else if (diagramType === 'gantt') {
     inner = '<rect x="1" y="2" width="8" height="3" rx="1" fill="currentColor"/><rect x="4" y="7" width="9" height="3" rx="1" fill="currentColor" opacity="0.7"/><rect x="7" y="12" width="6" height="3" rx="1" fill="currentColor" opacity="0.5"/>';
   } else if (diagramType === 'org') {
@@ -521,7 +629,7 @@ export function getActiveTabId() {
   return activeTabId;
 }
 
-function getActiveTabName() {
+export function getActiveTabName() {
   return tabs.find(t => t.id === activeTabId)?.name || 'Draft';
 }
 
@@ -608,6 +716,34 @@ export function getTabDiagramType(tabId) {
   return tabs.find(t => t.id === tabId)?.diagramType || 'architecture';
 }
 
+/** Data Cloud mapping mode (per-diagram). Gates the mapping-specific editing
+ *  affordances; mappings/badges still render regardless, so shared diagrams show
+ *  them. Persisted in the session tab state. */
+export function getActiveMappingMode() {
+  const tab = tabs.find(t => t.id === activeTabId);
+  // Mapping mode is driven by the diagram TYPE (its own "Data Mapping" type); the
+  // legacy per-tab `mappingMode` flag is still honoured for back-compat.
+  return tab?.diagramType === 'datamapping' || !!tab?.mappingMode;
+}
+export function getTabMappingMode(tabId) {
+  const tab = tabs.find(t => t.id === tabId);
+  return tab?.diagramType === 'datamapping' || !!tab?.mappingMode;
+}
+export function setActiveMappingMode(on) {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return;
+  tab.mappingMode = !!on;
+  // Re-sync DataObject field ports so mapping ports appear/disappear immediately
+  // (mapping ON = every field connectable; OFF = PK/FK + already-linked only).
+  for (const el of graph.getElements()) {
+    if (el.get('type') !== 'sf.DataObject') continue;
+    const view = el.findView(paper);
+    if (view && typeof view._syncFieldPorts === 'function') view._syncFieldPorts();
+  }
+  saveTabs();
+  notifyChange();
+}
+
 export function onChange(cb) { onChangeCallbacks.push(cb); }
 function notifyChange() { onChangeCallbacks.forEach(cb => cb()); }
 
@@ -652,6 +788,8 @@ function activateTab(id, isFresh) {
   if (stencilModule?.setDiagramType) {
     stencilModule.setDiagramType(tab.diagramType || 'architecture');
   }
+  // Tell the canvas which empty-state ghost wireframe to show (CSS reads this).
+  document.getElementById('canvas-container')?.setAttribute('data-diagram-type', tab.diagramType || 'architecture');
 
   saveTabs();
   notifyChange();
@@ -670,6 +808,7 @@ function saveTabs() {
       id: t.id,
       name: t.name,
       diagramType: t.diagramType || 'architecture',
+      mappingMode: t.mappingMode || false,
       dirty: t.dirty,
       lastSavedAt: t.lastSavedAt || null,
       lastSaveType: t.lastSaveType || null,
@@ -741,12 +880,17 @@ function doRestoreTabData(data) {
 
   if (data.tabs?.length > 0) {
     for (const t of data.tabs) {
+      // Back-compat: a pre-v1.15.0 Data Model diagram with mapping mode ON becomes
+      // a first-class "Data Mapping" diagram (mapping is now its own type).
+      let dt = normalizeDiagramType(t.diagramType);
+      if (t.mappingMode && dt === 'datamodel') dt = 'datamapping';
       tabs.push({
         id: t.id,
         name: t.name || 'Draft',
-        diagramType: normalizeDiagramType(t.diagramType),
+        diagramType: dt,
         graphJSON: t.graphJSON || null,
         viewport: t.viewport || null,
+        mappingMode: t.mappingMode || false,
         dirty: t.dirty || (!t.lastSavedAt && t.graphJSON?.cells?.length > 0) || false,
         lastSavedAt: t.lastSavedAt || null,
         lastSaveType: t.lastSaveType || null,
@@ -775,6 +919,8 @@ function doRestoreTabData(data) {
   if (stencilModule?.setDiagramType) {
     stencilModule.setDiagramType(active?.diagramType || 'architecture');
   }
+  // Seed the empty-state ghost-wireframe type on first paint (restore bypasses activateTab).
+  document.getElementById('canvas-container')?.setAttribute('data-diagram-type', active?.diagramType || 'architecture');
 }
 
 function restoreTabs() {
@@ -896,6 +1042,7 @@ function showSessionVersionWarning(savedVersion, diff) {
             // YYYY-MM-DD (consistent with persistence.dateSuffix() and the
             // Save-modal name suffix) for the per-tab session backup filenames.
             const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            let backedUp = 0;
             for (const tab of sessionTabs) {
               if (!tab.graphJSON) continue;
               const backupData = {
@@ -911,12 +1058,19 @@ function showSessionVersionWarning(savedVersion, diff) {
               const safeName = (tab.name || 'backup').replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'backup';
               const a = document.createElement('a');
               a.href = URL.createObjectURL(blob);
-              a.download = `${safeName}_backup_${stamp}.json`;
+              a.download = `df_backup_${safeName}_${stamp}.json`;
               document.body.appendChild(a);
               a.click();
               document.body.removeChild(a);
               setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+              backedUp++;
             }
+            // A full safety-net backup just ran (one file per saved tab) — reset the
+            // backup-reminder clock so the Export-Manager advisory + the weekly overlay
+            // reflect it. Writes the SAME LAST_BACKUP_KEY the overlay's own Export uses;
+            // without this the user saw "No full backup yet" right after pulling this
+            // session backup. See storage.markFullBackup().
+            if (backedUp > 0) persistenceModule.markFullBackup?.();
           }
         } catch (err) {
           console.warn('SF Diagrams: Session backup export failed:', err);
@@ -982,6 +1136,8 @@ function render() {
       typeIcon.innerHTML = '<rect x="1" y="1" width="5" height="3" rx="0.5" fill="currentColor"/><rect x="10" y="1" width="5" height="3" rx="0.5" fill="currentColor"/><line x1="3.5" y1="4" x2="3.5" y2="15" stroke="currentColor" stroke-width="0.8" stroke-dasharray="1.5 1"/><line x1="12.5" y1="4" x2="12.5" y2="15" stroke="currentColor" stroke-width="0.8" stroke-dasharray="1.5 1"/><line x1="3.5" y1="8" x2="12.5" y2="8" stroke="currentColor" stroke-width="1"/><polygon points="12.5,8 10.5,7 10.5,9" fill="currentColor"/><line x1="12.5" y1="12" x2="3.5" y2="12" stroke="currentColor" stroke-width="0.8" stroke-dasharray="1.5 1"/><polygon points="3.5,12 5.5,11 5.5,13" fill="currentColor"/>';
     } else if (tab.diagramType === 'datamodel') {
       typeIcon.innerHTML = '<rect x="1" y="1" width="6" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="1" width="6" height="3" rx="1" fill="currentColor"/><rect x="9" y="7" width="6" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="7" width="6" height="3" rx="1" fill="currentColor"/><path d="M7 5L9 11" stroke="currentColor" stroke-width="1.2" fill="none"/>';
+    } else if (tab.diagramType === 'datamapping') {
+      typeIcon.innerHTML = '<rect x="0.5" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="0.5" y="2" width="5" height="3" rx="1" fill="currentColor"/><rect x="10.5" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="10.5" y="2" width="5" height="3" rx="1" fill="currentColor"/><path d="M5.5 8 L10 8 M8.5 6.5 L10 8 L8.5 9.5" fill="none" stroke="currentColor" stroke-width="1"/><path d="M5.5 11 L10 11" stroke="currentColor" stroke-width="1" opacity="0.55"/>';
     } else if (tab.diagramType === 'gantt') {
       typeIcon.innerHTML = '<rect x="1" y="2" width="8" height="3" rx="1" fill="currentColor"/><rect x="4" y="7" width="9" height="3" rx="1" fill="currentColor" opacity="0.7"/><rect x="7" y="12" width="6" height="3" rx="1" fill="currentColor" opacity="0.5"/>';
     } else if (tab.diagramType === 'org') {

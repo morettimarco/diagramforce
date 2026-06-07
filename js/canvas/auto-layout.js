@@ -3,7 +3,7 @@
 // (analyzeSequenceLayout / applySequenceAutoLayout). Reads the live graph,
 // paper, and fitContent through the canvas context (cctx); canvas.js is the
 // sole writer and wires cctx.fitContent in init().
-import { cctx } from './context.js?v=1.14.1';
+import { cctx } from './context.js?v=1.15.0';
 
 
 // ── Auto Layout (improved force-directed with tight packing) ─────────
@@ -11,8 +11,17 @@ import { cctx } from './context.js?v=1.14.1';
 // their embedded children move with them and maintain relative positions.
 export function autoLayout(direction) {
   const { graph, paper, fitContent } = cctx;
+  // Always frame the SETTLED layout. Refit group parents first (a BpmnPool reserves
+  // its left header band; containers/zones hug their children) so their bounds are
+  // real, fit once now, then once more on the next frame — embedding refits and
+  // resize events can fire async, which would otherwise leave the fit slightly off.
+  const fitAfterLayout = () => {
+    cctx.refitAllParents?.();
+    fitContent();
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { cctx.fitContent?.(); });
+  };
   const elements = graph.getElements();
-  if (elements.length < 2) return;
+  if (elements.length < 2) { if (elements.length) fitAfterLayout(); return; }
 
 
   const links = graph.getLinks();
@@ -32,7 +41,7 @@ export function autoLayout(direction) {
     if (embeddedIds.has(el.id)) return false;
     return true;
   });
-  if (layoutEls.length < 2) return;
+  if (layoutEls.length < 2) { fitAfterLayout(); return; }
 
   // For each layout element, compute its effective size (including embedded children)
   const sizes = new Map();
@@ -512,6 +521,139 @@ export function autoLayout(direction) {
     el.translate(dx, dy);
   });
 
+
+  fitAfterLayout();
+}
+
+// ── Data Mapping Auto Layout ─────────────────────────────────────────
+// One COLUMN per layer TYPE — every Source zone shares a column, every DLO zone the
+// next, etc. — with the Data Cloud flow running left→right:
+//   Custom → Source → DLO → DMO → Activation, then flow-depth columns of free objects.
+// Same-type zones stack vertically within their column. All columns top-align at TOP.
+// Object + zone order WITHIN a column is chosen by a barycentre sweep that shortens the
+// total connector length (connected objects line up across columns). Unzoned objects each
+// form a singleton unit in a flow-depth column appended at the right.
+export function applyDataMappingLayout() {
+  const { graph, fitContent } = cctx;
+  const objects = graph.getElements().filter(e => e.get('type') === 'sf.DataObject');
+  if (objects.length < 2) return;
+  const zones = graph.getElements().filter(e => e.get('type') === 'sf.Zone');
+
+  const OBJ_GAP = 36;   // vertical gap between objects within a zone
+  const ZONE_GAP = 56;  // vertical gap between stacked zones in one column
+  const LANE_GAP = 200; // horizontal gap between columns
+  const PAD = 16;       // zone inner side/bottom padding
+  const HEAD = 44;      // zone inner top inset (clears the layer label)
+  const TOP = 0;        // shared upper edge for every column
+
+  // Undirected object↔object mapping adjacency (for the barycentre).
+  const objIds = new Set(objects.map(o => o.id));
+  const adj = new Map(objects.map(o => [o.id, []]));
+  // Directed incoming (free objects → flow-depth).
+  const inn = new Map(objects.map(o => [o.id, []]));
+  for (const l of graph.getLinks()) {
+    if (l.prop('linkKind') !== 'mapping') continue;
+    const s = l.get('source')?.id, t = l.get('target')?.id;
+    if (objIds.has(s) && objIds.has(t) && s !== t) { adj.get(s).push(t); adj.get(t).push(s); inn.get(t).push(s); }
+  }
+
+  // Classify zones into type-columns. A unit = one zone + its objects (or, for a free
+  // object, a zone-less singleton). Column order = TYPE_ORDER, free columns appended.
+  const TYPE_ORDER = ['custom', 'source', 'dlo', 'dmo', 'activation'];
+  const typeOf = s => (s === 'source' || s === 'dlo' || s === 'dmo' || s === 'activation') ? s : 'custom';
+  const unitsByType = new Map();
+  const laned = new Set();
+  for (const z of zones) {
+    const kids = (z.get('embeds') || []).map(id => graph.getCell(id)).filter(c => c && c.get('type') === 'sf.DataObject');
+    if (!kids.length) continue;
+    kids.forEach(k => laned.add(k.id));
+    const t = typeOf(z.get('layerStage'));
+    if (!unitsByType.has(t)) unitsByType.set(t, []);
+    unitsByType.get(t).push({ zone: z, objects: kids });
+  }
+  const columns = [];
+  for (const t of TYPE_ORDER) if (unitsByType.has(t)) columns.push({ units: unitsByType.get(t) });
+
+  // Free (unzoned) objects → flow-depth pseudo-columns appended after the typed ones.
+  const free = objects.filter(o => !laned.has(o.id));
+  if (free.length) {
+    const freeSet = new Set(free.map(o => o.id));
+    const depth = new Map();
+    const calc = (id, seen) => {
+      if (depth.has(id)) return depth.get(id);
+      if (seen.has(id)) return 0;          // cycle guard
+      seen.add(id);
+      let d = 0;
+      for (const p of inn.get(id)) if (freeSet.has(p)) d = Math.max(d, calc(p, seen) + 1);
+      seen.delete(id); depth.set(id, d); return d;
+    };
+    free.forEach(o => calc(o.id, new Set()));
+    const byDepth = new Map();
+    free.forEach(o => { const d = depth.get(o.id); if (!byDepth.has(d)) byDepth.set(d, []); byDepth.get(d).push(o); });
+    [...byDepth.keys()].sort((a, b) => a - b).forEach(d =>
+      columns.push({ units: byDepth.get(d).map(o => ({ zone: null, objects: [o] })) }));
+  }
+  if (!columns.length) return;
+
+  // Live centre-y per object, seeded from current positions; restack() rewrites it.
+  const cy = new Map(objects.map(o => [o.id, o.position().y + o.size().height / 2]));
+  // Stack a column top→down in its CURRENT unit/object order, recording each object's y
+  // (in `_objY`) and refreshing `cy`. All columns start at TOP, so they top-align.
+  const restack = (col) => {
+    let y = TOP;
+    for (const u of col.units) {
+      u._objY = new Map();
+      if (u.zone) y += HEAD;
+      for (const o of u.objects) {
+        const h = o.size().height;
+        u._objY.set(o.id, y);
+        cy.set(o.id, y + h / 2);
+        y += h + OBJ_GAP;
+      }
+      y -= OBJ_GAP;
+      if (u.zone) y += PAD;
+      y += ZONE_GAP;
+    }
+  };
+  columns.forEach(restack);
+
+  // Barycentre sweeps: order objects within a unit, and units within a column, by the
+  // mean centre-y of their connected neighbours — pulling connected objects level and
+  // shortening connectors. Alternating L→R / R→L passes propagate both ways.
+  const bary = (id) => { const ns = adj.get(id); if (!ns.length) return cy.get(id); let s = 0; for (const n of ns) s += cy.get(n); return s / ns.length; };
+  for (let pass = 0; pass < 4; pass++) {
+    const order = (pass % 2 === 0) ? columns : [...columns].reverse();
+    for (const col of order) {
+      for (const u of col.units) u.objects.sort((a, b) => bary(a.id) - bary(b.id));
+      col.units.sort((a, b) =>
+        (a.objects.reduce((s, o) => s + bary(o.id), 0) / a.objects.length) -
+        (b.objects.reduce((s, o) => s + bary(o.id), 0) / b.objects.length));
+      restack(col);
+    }
+  }
+
+  // Final placement: assign x per column, then position/resize zones + objects.
+  let cursorX = 0;
+  for (const col of columns) {
+    const allObjs = col.units.flatMap(u => u.objects);
+    const maxW = Math.max(...allObjs.map(o => o.size().width));
+    const hasZone = col.units.some(u => u.zone);
+    const colW = maxW + (hasZone ? PAD * 2 : 0);
+    const contentX = cursorX + (hasZone ? PAD : 0);
+    for (const u of col.units) {
+      if (u.zone) {
+        const firstO = u.objects[0], lastO = u.objects[u.objects.length - 1];
+        const top = u._objY.get(firstO.id) - HEAD;
+        const bottom = u._objY.get(lastO.id) + lastO.size().height + PAD;
+        u.zone.position(Math.round(cursorX), Math.round(top));
+        u.zone.resize(Math.round(colW), Math.round(bottom - top));
+      }
+      for (const o of u.objects) {
+        o.position(Math.round(contentX + (maxW - o.size().width) / 2), Math.round(u._objY.get(o.id)));
+      }
+    }
+    cursorX += colW + LANE_GAP;
+  }
 
   fitContent();
 }

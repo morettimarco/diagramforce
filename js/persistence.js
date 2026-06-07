@@ -1,33 +1,33 @@
 // Persistence — named saves, JSON import/export, PNG/GIF export
 // (Auto-save is handled by the tabs module now.)
 
-import { showToast, showError, confirmModal, trapFocus, buildModal } from './feedback.js?v=1.14.1';
-import { escHtml, compareSemver, normalizeDateSuffix } from './util.js?v=1.14.1';
-import { pctx } from './persistence/context.js?v=1.14.1';
+import { showToast, showError, confirmModal, trapFocus, buildModal } from './feedback.js?v=1.15.0';
+import { escHtml, compareSemver, normalizeDateSuffix } from './util.js?v=1.15.0';
+import { pctx } from './persistence/context.js?v=1.15.0';
 
 // ── Facade (Phase 3, Slice 1): image export + share orchestration now live in
 // sub-modules; re-exported here so the public surface is unchanged. ──
-export { exportWEBP, exportPNG, isGifEncodingInProgress, setGifEncodingListener, exportGIF } from './persistence/image-export.js?v=1.14.1';
-export { shareAsURL, loadFromURL } from './persistence/share-orchestration.js?v=1.14.1';
+export { exportWEBP, exportPNG, isGifEncodingInProgress, setGifEncodingListener, exportGIF } from './persistence/image-export.js?v=1.15.0';
+export { shareAsURL, loadFromURL } from './persistence/share-orchestration.js?v=1.15.0';
 // versioning: contentSignature + classifyVersionDiff are public (tests/templates use them);
 // checkVersionWarning is imported for internal use (loadNamedSave/loadJSONText) + pctx wiring.
-import { contentSignature, classifyVersionDiff, checkVersionWarning } from './persistence/versioning.js?v=1.14.1';
+import { contentSignature, classifyVersionDiff, checkVersionWarning } from './persistence/versioning.js?v=1.15.0';
 export { contentSignature, classifyVersionDiff };
 // json-pipeline: sanitizeGraphJSON is public AND used internally (loadNamedSave);
 // importJSON / pasteJSON are public entry points.
-import { sanitizeGraphJSON, importJSON, pasteJSON } from './persistence/json-pipeline.js?v=1.14.1';
+import { sanitizeGraphJSON, importJSON, pasteJSON } from './persistence/json-pipeline.js?v=1.15.0';
 export { sanitizeGraphJSON, importJSON, pasteJSON };
 // storage: getNamedSaves/readNamedSave/NAMED_SAVE_PREFIX feed pctx (read by
 // json-pipeline); the rest are the public storage surface.
-import { getNamedSaves, readNamedSave, NAMED_SAVE_PREFIX } from './persistence/storage.js?v=1.14.1';
+import { getNamedSaves, readNamedSave, NAMED_SAVE_PREFIX } from './persistence/storage.js?v=1.15.0';
 export {
   namedSave, saveMultipleTabs, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES,
   requestPersistentStorage, getNamedSaves, loadNamedSave, deleteNamedSave, getLastBackupAt,
-  exportSelection, exportEverything, maybeShowBackupReminder,
-} from './persistence/storage.js?v=1.14.1';
+  exportSelection, exportEverything, maybeShowBackupReminder, markFullBackup,
+} from './persistence/storage.js?v=1.15.0';
 
 let graph, paper, canvasModule;
-const APP_VERSION = '1.14.1';
+const APP_VERSION = '1.15.0';
 export { APP_VERSION };
 // Wire the version into pctx at module-eval (it's a constant) so the extracted
 // version helpers work even before init() runs — e.g. unit tests calling
@@ -42,6 +42,8 @@ export function normalizeDiagramType(type) {
     organization: 'org',
     data: 'datamodel',
     datamodel: 'datamodel',
+    datamapping: 'datamapping',
+    mapping: 'datamapping',
     architecture: 'architecture',
     process: 'process',
     sequence: 'sequence',
@@ -86,6 +88,14 @@ export function setTabViewportGetter(cb) { getTabViewportCallback = cb; pctx.get
 // Callback to get a specific tab's diagram type
 let getTabDiagramTypeCallback = null;
 export function setTabDiagramTypeGetter(cb) { getTabDiagramTypeCallback = cb; pctx.getTabDiagramType = cb; }
+
+// Callback to get a specific tab's Data Cloud mapping mode (v1.15.0)
+let getTabMappingModeCallback = null;
+export function setTabMappingModeGetter(cb) { getTabMappingModeCallback = cb; pctx.getTabMappingMode = cb; }
+
+// Callback to get the ACTIVE tab's mapping mode (used by the share + single-save builders)
+let getActiveMappingModeCallback = null;
+export function setActiveMappingModeGetter(cb) { getActiveMappingModeCallback = cb; pctx.mappingModeCb = cb; }
 
 // Templates module API (injected to avoid a circular import — templates.js
 // imports persistence.js, not vice versa). { getTemplates, exportFn }.

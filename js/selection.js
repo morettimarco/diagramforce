@@ -1,9 +1,10 @@
 // Selection manager — tracks selected elements
 // Provides single-click, shift-click, rubber-band selection, and alignment ops
 
-import * as clipboard from './clipboard.js?v=1.14.1';
-import * as history from './history.js?v=1.14.1';
-import { isFocusDimmingEnabled } from './canvas.js?v=1.14.1';
+import * as clipboard from './clipboard.js?v=1.15.0';
+import * as history from './history.js?v=1.15.0';
+import { isFocusDimmingEnabled, canEmbed, setDragSelectionBBox } from './canvas.js?v=1.15.0';
+import { fieldFocus } from './canvas/focus-state.js?v=1.15.0';
 
 let graph, paper;
 const selectedIds = new Set();
@@ -227,6 +228,40 @@ export function init(_graph, _paper) {
   let pointerDownId = null;
   let didDrag = false;
 
+  // The directed field-lineage graph is cached; any structural change to links
+  // (add/remove/re-endpoint) or a bulk reset invalidates it.
+  graph.on('add remove reset change:source change:target', invalidateFieldGraph);
+  graph.on('change:linkKind', invalidateFieldGraph);
+
+  // ── Field-hover flow trace (Data Mapping) ──────────────────────────────────
+  // Hovering a field row lights that field's lineage across layers (same engine as
+  // selecting a connector), transiently — moving off restores the selection's state.
+  // No-op for fields that don't participate in a mapping link (so it's inert in
+  // non-mapping diagrams). Suppressed while dragging.
+  let _hoverFieldKey = null;
+  const fieldRowAt = (target) => {
+    const row = target?.closest?.('.do-field-row');
+    if (!row) return null;
+    const objEl = row.closest('[model-id]');
+    const objId = objEl?.getAttribute('model-id');
+    const fid = row.getAttribute('data-fid');
+    if (!objId || !fid) return null;
+    const cell = graph.getCell(objId);
+    if (!cell || cell.get('type') !== 'sf.DataObject') return null;
+    return { objId, fid, key: `${objId}::${fid}` };
+  };
+  const endHover = () => { if (_hoverFieldKey) { _hoverFieldKey = null; updateLinkDimming(); } };
+  paper.el.addEventListener('mouseover', (e) => {
+    if (pointerDownId !== null || !isFocusDimmingEnabled()) return;
+    const hit = fieldRowAt(e.target);
+    if (!hit) { endHover(); return; }
+    if (hit.key === _hoverFieldKey) return;
+    const fg = fieldGraph();
+    if (!fg.fwd.has(hit.key) && !fg.bwd.has(hit.key)) { endHover(); return; } // unmapped field
+    if (applyFieldFlowFocus({ hoverField: { objId: hit.objId, fid: hit.fid } })) _hoverFieldKey = hit.key;
+  });
+  paper.el.addEventListener('mouseleave', endHover);
+
   // Use pointerdown (not pointerclick) so selection and properties panel
   // respond immediately on the first press — no double-click needed.
   // Multi-select bindings: Cmd/Ctrl+click (legacy) and Shift+click
@@ -449,14 +484,23 @@ export function selectAll() {
 
 export function deleteSelected() {
   const cells = getSelectedElements();
-  if (cells.length && navigator.vibrate && window.matchMedia?.('(pointer: coarse)').matches) {
+  if (!cells.length) return;
+  if (navigator.vibrate && window.matchMedia?.('(pointer: coarse)').matches) {
     navigator.vibrate(25);
   }
   clearVisual();
   selectedIds.clear();
   notifyChange();
-  // Remove after clearing selection to avoid visual glitches
-  cells.forEach(cell => cell.remove());
+  // ONE undo step for the whole deletion. Each cell.remove() (plus the links JointJS
+  // cascades) fires its own `remove` event → a command each; the batch composites them
+  // so a single Cmd+Z restores the entire selection at once instead of one cell per tap.
+  history.startBatch();
+  try {
+    // Remove after clearing selection to avoid visual glitches
+    cells.forEach(cell => cell.remove());
+  } finally {
+    history.endBatch();
+  }
 }
 
 export function onChange(cb) { onChangeCallbacks.push(cb); }
@@ -512,6 +556,139 @@ function suspendDimmingForDrag() {
   document.dispatchEvent(new CustomEvent('sf:selection-dim-change'));
 }
 
+// ── Directed field-lineage engine (Data Mapping flow focus) ────────────────────
+// Model: a directed graph of FIELDS. node = "objId::fid"; edge = a mapping link from
+// source field (right port) → target field (left port). Data flows along edges
+// left→right across layers (Source → DLO → DMO → …). Tracing one direction only (never
+// reversing) is what keeps focus tight: from a field you follow its data forward and
+// back, but you don't fan sideways into siblings that merely share a downstream target.
+const _fidOfPort = port => (typeof port === 'string' && port.startsWith('field-'))
+  ? port.replace(/^field-(left|right)-/, '') : null;
+const _fieldKeyOfEp = ep => (ep && ep.id && _fidOfPort(ep.port)) ? `${ep.id}::${_fidOfPort(ep.port)}` : null;
+
+let _fieldGraphCache = null;             // { fwd:Map<key,Set>, bwd:Map<key,Set>, links:[{id,sk,tk}] }
+function invalidateFieldGraph() { _fieldGraphCache = null; }
+function fieldGraph() {
+  if (_fieldGraphCache) return _fieldGraphCache;
+  const fwd = new Map(), bwd = new Map(), links = [];
+  const add = (m, k, v) => { let s = m.get(k); if (!s) m.set(k, s = new Set()); s.add(v); };
+  for (const l of graph.getLinks()) {
+    if (l.prop('linkKind') !== 'mapping') continue;
+    const sk = _fieldKeyOfEp(l.get('source')), tk = _fieldKeyOfEp(l.get('target'));
+    if (!sk || !tk) continue;
+    add(fwd, sk, tk); add(bwd, tk, sk);
+    links.push({ id: l.id, sk, tk });
+  }
+  _fieldGraphCache = { fwd, bwd, links };
+  return _fieldGraphCache;
+}
+// Walk ONE direction (no reversal) from the seed field-keys; returns reachable set incl. seeds.
+function traceDir(seedKeys, dir) {
+  const g = fieldGraph();
+  const adj = dir === 'up' ? g.bwd : g.fwd;
+  const seen = new Set(seedKeys);
+  const queue = [...seedKeys];
+  while (queue.length) {
+    const next = adj.get(queue.pop());
+    if (next) for (const n of next) if (!seen.has(n)) { seen.add(n); queue.push(n); }
+  }
+  return seen;
+}
+// Compute the lineage field-set (+ which objects stay fully lit) for a flow selection/hover.
+// linkSeeds: connector(s) → upstream(source) + downstream(target). objectSeeds: both
+// directions from every field of the object (the object itself stays fully lit). hoverField:
+// both directions from a single hovered field. Returns null when nothing traced.
+function computeFieldLineage({ linkSeeds = [], objectSeeds = [], hoverField = null }) {
+  if (!fieldGraph().links.length && !objectSeeds.length) return null;
+  const fields = new Set();
+  const fullyLit = new Set();
+  const bothWays = (seedKeys) => { for (const k of traceDir(seedKeys, 'up')) fields.add(k); for (const k of traceDir(seedKeys, 'down')) fields.add(k); };
+  for (const l of linkSeeds) {
+    const sk = _fieldKeyOfEp(l.get('source')), tk = _fieldKeyOfEp(l.get('target'));
+    if (!sk || !tk) continue;
+    for (const k of traceDir([sk], 'up')) fields.add(k);
+    for (const k of traceDir([tk], 'down')) fields.add(k);
+    fields.add(sk); fields.add(tk);
+  }
+  for (const objId of objectSeeds) {
+    const cell = graph.getCell(objId);
+    if (!cell || cell.get('type') !== 'sf.DataObject') continue;
+    fullyLit.add(objId);
+    const seedKeys = (cell.get('fields') || []).filter(f => f && f.fid).map(f => `${objId}::${f.fid}`);
+    if (seedKeys.length) bothWays(seedKeys);
+  }
+  if (hoverField?.objId && hoverField?.fid) bothWays([`${hoverField.objId}::${hoverField.fid}`]);
+  return fields.size ? { fields, fullyLit } : null;
+}
+// Apply field-level flow focus: light lineage fields, dim the rest. Returns true if applied.
+function applyFieldFlowFocus(opts) {
+  if (!graph || !paper) return false;
+  const lin = computeFieldLineage(opts);
+  if (!lin) return false;
+  const { fields, fullyLit } = lin;
+  // On-thread mapping links = both endpoints on the lineage.
+  const onThread = new Set();
+  for (const e of fieldGraph().links) if (fields.has(e.sk) && fields.has(e.tk)) onThread.add(e.id);
+  for (const link of graph.getLinks()) {
+    const view = paper.findViewByModel(link);
+    if (view?.el) view.el.classList.toggle('sf-link-dimmed', !onThread.has(link.id));
+  }
+  // Object dimming (root-el class, survives row rebuilds) + collect the field-row keys
+  // to fade. A whole object dims only when NONE of its fields are on the flow.
+  const dimmedKeys = new Set();
+  for (const el of graph.getElements()) {
+    const view = paper.findViewByModel(el);
+    if (el.get('type') !== 'sf.DataObject') { if (view?.el) view.el.classList.remove('sf-element-dimmed'); continue; }
+    const objId = el.id;
+    const objFields = el.get('fields') || [];
+    const hasLineageField = objFields.some(f => f && f.fid && fields.has(`${objId}::${f.fid}`));
+    if (view?.el) view.el.classList.toggle('sf-element-dimmed', !hasLineageField);
+    // The selected object stays fully lit; on every other lineage object the rows that
+    // aren't on the flow fade.
+    if (hasLineageField && !fullyLit.has(objId)) {
+      for (const f of objFields) if (f && f.fid && !fields.has(`${objId}::${f.fid}`)) dimmedKeys.add(`${objId}::${f.fid}`);
+    }
+  }
+  // Record in shared focus-state so DataObjectView._renderFieldRows re-asserts it after
+  // any later rebuild, then apply over the LIVE DOM rows (a mid-churn findViewByModel can
+  // return a stale/detached view, so the document is the source of truth here).
+  fieldFocus.dimmed = dimmedKeys;
+  paper.svg.querySelectorAll('.do-field-row').forEach(r => {
+    const fid = r.getAttribute('data-fid');
+    const objId = r.closest('[model-id]')?.getAttribute('model-id');
+    r.classList.toggle('sf-field-dimmed', !!fid && !!objId && dimmedKeys.has(`${objId}::${fid}`));
+  });
+  document.dispatchEvent(new CustomEvent('sf:selection-dim-change'));
+  return true;
+}
+function clearFieldRowDims() {
+  fieldFocus.dimmed = null;
+  document.querySelectorAll('.do-field-row.sf-field-dimmed').forEach(el => el.classList.remove('sf-field-dimmed'));
+}
+
+// Mapping-flow focus (Data Mapping): a selected mapping CONNECTOR traces its specific
+// field thread; a selected DataObject traces its whole bidirectional lineage. Both are
+// field-level (non-lineage rows dim). Returns true if it took over (selection touched a
+// mapping link); false lets the generic element-focus path handle non-mapping selections.
+function applyMappingFlowDimming(selectedLinkIds, selectedElementIds = new Set()) {
+  if (!graph || !paper) return false;
+  const linkSeeds = [];
+  for (const id of selectedLinkIds) {
+    const l = graph.getCell(id);
+    if (l && l.isLink && l.isLink() && l.prop('linkKind') === 'mapping') linkSeeds.push(l);
+  }
+  // Only objects that actually participate in a mapping link trigger flow focus — an
+  // isolated object has no flow and falls through to generic element focus.
+  const mappingLinks = graph.getLinks().filter(l => l.prop('linkKind') === 'mapping');
+  const objTouchesMapping = id => mappingLinks.some(l => l.get('source')?.id === id || l.get('target')?.id === id);
+  const objectSeeds = [...selectedElementIds].filter(id => {
+    const c = graph.getCell(id);
+    return c && c.get && c.get('type') === 'sf.DataObject' && objTouchesMapping(id);
+  });
+  if (!linkSeeds.length && !objectSeeds.length) return false;
+  return applyFieldFlowFocus({ linkSeeds, objectSeeds });
+}
+
 function updateLinkDimming() {
   if (!graph || !paper) return;
 
@@ -525,6 +702,7 @@ function updateLinkDimming() {
     document.querySelectorAll('.joint-element.sf-element-dimmed').forEach(el => {
       el.classList.remove('sf-element-dimmed');
     });
+    clearFieldRowDims();
     document.dispatchEvent(new CustomEvent('sf:selection-dim-change'));
     return;
   }
@@ -538,8 +716,18 @@ function updateLinkDimming() {
     else if (cell.isLink()) selectedLinkIds.add(id);
   }
 
+  // Mapping-flow focus takes priority for ANY selection that touches a mapping link —
+  // a selected mapping connector OR a selected DataObject that participates in one. It
+  // lights the whole Source→DLO→DMO chain and dims the rest (including disconnected
+  // objects). Returns false for non-mapping selections, which fall through to the
+  // generic element/link focus below.
+  if (applyMappingFlowDimming(selectedLinkIds, selectedElementIds)) return;
+  // Not a mapping flow — any field-row dimming from a prior flow focus must be cleared
+  // (the generic element/link focus below works at object level only).
+  clearFieldRowDims();
+
   if (selectedElementIds.size === 0) {
-    // Pure-link or empty selection — clear every dim class so prior
+    // Pure non-mapping link or empty selection — clear every dim class so prior
     // element-focused state doesn't linger.
     document.querySelectorAll('.joint-link.sf-link-dimmed').forEach(el => {
       el.classList.remove('sf-link-dimmed');
@@ -583,26 +771,57 @@ function updateLinkDimming() {
     addParentChain(id);
   }
 
-  // One pass over the link set to compute two sets at once: which links
-  // are dim-candidates (no selected endpoint) and which elements are
-  // "connected" (= directly linked to anything in the expanded set).
+  // Which elements count as "connected" to the selection. For most diagram types this is
+  // the DIRECT (one-hop) neighbour set. For flow / hierarchy types (process, org) it's the
+  // FULL directed path through the selection — every ancestor (walking incoming links) AND
+  // descendant (walking outgoing links) — mirroring the Data Mapping lineage trace, so a
+  // selection lights its whole thread rather than just the closest steps.
+  const activeType = document.getElementById('canvas-container')?.dataset.diagramType;
+  const flowTrace = activeType === 'process' || activeType === 'org';
   const connectedElementIds = new Set(expandedSelection);
   const elementsWithLinks = new Set();
-  for (const link of graph.getLinks()) {
-    const srcId = link.get('source')?.id;
-    const tgtId = link.get('target')?.id;
-    if (srcId) elementsWithLinks.add(srcId);
-    if (tgtId) elementsWithLinks.add(tgtId);
-    if (srcId && expandedSelection.has(srcId) && tgtId) connectedElementIds.add(tgtId);
-    if (tgtId && expandedSelection.has(tgtId) && srcId) connectedElementIds.add(srcId);
+  if (flowTrace) {
+    // Directed adjacency, then BFS down (descendants) + up (ancestors) from the seeds.
+    const fwd = new Map(), bwd = new Map();
+    const push = (m, k, v) => { let a = m.get(k); if (!a) { a = []; m.set(k, a); } a.push(v); };
+    for (const link of graph.getLinks()) {
+      const s = link.get('source')?.id;
+      const t = link.get('target')?.id;
+      if (s) elementsWithLinks.add(s);
+      if (t) elementsWithLinks.add(t);
+      if (s && t) { push(fwd, s, t); push(bwd, t, s); }
+    }
+    const walk = (adj) => {
+      const queue = [...expandedSelection];
+      while (queue.length) {
+        for (const n of (adj.get(queue.pop()) || [])) {
+          if (!connectedElementIds.has(n)) { connectedElementIds.add(n); queue.push(n); }
+        }
+      }
+    };
+    walk(fwd);   // descendants
+    walk(bwd);   // ancestors
+  } else {
+    // One-hop: an element is connected if a link directly joins it to the selection.
+    for (const link of graph.getLinks()) {
+      const srcId = link.get('source')?.id;
+      const tgtId = link.get('target')?.id;
+      if (srcId) elementsWithLinks.add(srcId);
+      if (tgtId) elementsWithLinks.add(tgtId);
+      if (srcId && expandedSelection.has(srcId) && tgtId) connectedElementIds.add(tgtId);
+      if (tgtId && expandedSelection.has(tgtId) && srcId) connectedElementIds.add(srcId);
+    }
   }
 
-  // Apply link dimming.
+  // Apply link dimming. On a flow trace a connector lights only when BOTH ends are on the
+  // traced path (so the whole thread's links light, and a branch leaving the path dims);
+  // otherwise (one-hop) when EITHER end is in the selection.
   for (const link of graph.getLinks()) {
     const srcId = link.get('source')?.id;
     const tgtId = link.get('target')?.id;
-    const connected = (srcId && expandedSelection.has(srcId))
-                   || (tgtId && expandedSelection.has(tgtId));
+    const connected = flowTrace
+      ? (srcId && connectedElementIds.has(srcId) && tgtId && connectedElementIds.has(tgtId))
+      : ((srcId && expandedSelection.has(srcId)) || (tgtId && expandedSelection.has(tgtId)));
     const isLinkSelected = selectedLinkIds.has(link.id);
     const view = paper.findViewByModel(link);
     if (!view?.el) continue;
@@ -666,6 +885,18 @@ function clearVisual() {
 function setupMultiDrag() {
   let draggedId = null;
   let lastPos = null;
+  // Pre-drag top-left of each container the selection currently sits in, so a container the
+  // group is dragged fully OUT of can be restored to its original position (a mid-drop fit may
+  // otherwise nudge it toward the departing children before they're un-embedded).
+  const containerPosSnap = new Map();
+
+  // Feed embedding.js the union bbox of the whole selection so the drop-ghost previews the
+  // container growing to hold the ENTIRE group during a multi-drag (not just the element under
+  // the pointer). embedding.js clears it on pointerup; null ⇒ single-drag ghost.
+  const refreshDragGhostBBox = () => {
+    const cells = [...selectedIds].map(s => graph.getCell(s)).filter(c => c && c.isElement && c.isElement());
+    setDragSelectionBBox(cells.length ? graph.getCellsBBox(cells) : null);
+  };
 
   paper.on('element:pointerdown', (cellView) => {
     const id = cellView.model.id;
@@ -673,6 +904,16 @@ function setupMultiDrag() {
       draggedId = id;
       const pos = cellView.model.position();
       lastPos = { x: pos.x, y: pos.y };
+      refreshDragGhostBBox();
+      containerPosSnap.clear();
+      for (const sid of selectedIds) {
+        const el = graph.getCell(sid);
+        const pid = el && el.get('parent');
+        if (pid && !containerPosSnap.has(pid)) {
+          const p = graph.getCell(pid);
+          if (p) { const pp = p.position(); containerPosSnap.set(pid, { x: pp.x, y: pp.y }); }
+        }
+      }
     }
   });
 
@@ -708,9 +949,69 @@ function setupMultiDrag() {
       cell.position(p.x + dx, p.y + dy);
       // JointJS will move embedded children automatically via the parent's position change
     });
+
+    // Keep the drop-ghost sized to the whole (now-moved) selection.
+    refreshDragGhostBBox();
   });
 
   paper.on('element:pointerup', () => {
+    // Multi-select group drop: JointJS's embeddingMode only embeds the element actually
+    // under the pointer. If that element landed inside a container/zone/pool, pull the REST
+    // of the selection into the SAME container too — so a group is captured in a single drag
+    // instead of having to drop each element one by one.
+    if (draggedId && selectedIds.size > 1) {
+      const dragged = graph.getCell(draggedId);
+      // The container the dragged element ended up in (JointJS embeds/un-embeds the
+      // directly-dragged element via embeddingMode), or null if it landed on empty canvas.
+      const cParentId = dragged && dragged.get('parent');
+      const C = cParentId ? graph.getCell(cParentId) : null;
+      const cType = C && C.get('type');
+      const toEmbed = [];
+      const toRelease = [];
+      for (const id of selectedIds) {
+        if (id === draggedId) continue;
+        const el = graph.getCell(id);
+        if (!el || !el.isElement || !el.isElement()) continue;
+        if (C && id === C.id) continue;                  // never embed the container into itself
+        const cur = el.get('parent');
+        if (C && canEmbed(cType, el.get('type'))) {
+          // CAPTURE — the group was dropped ON a container; pull every qualifying peer in.
+          // No overlap needed: the container auto-fits to GROW around the whole selection,
+          // so a flow far larger than the container still lands inside. Positions preserved.
+          if (cur !== C.id) toEmbed.push(el);
+        } else if (!C && cur) {
+          // RELEASE — the group was dropped OUTSIDE any container (dragged element is free).
+          // A peer still parented somewhere left with the group, so un-embed it; otherwise
+          // its container keeps chasing the selection across the canvas (auto-fit follows it).
+          const p = graph.getCell(cur);
+          if (p) toRelease.push({ el, parent: p });
+        }
+      }
+      // A snapshotted container can already be empty here — JointJS un-embeds the dragged
+      // element on its own pointerup, which runs before this handler.
+      const snapEmptyNow = [...containerPosSnap.keys()].some(pid => {
+        const p = graph.getCell(pid);
+        return p && (p.getEmbeddedCells() || []).length === 0;
+      });
+      if (toEmbed.length || toRelease.length || snapEmptyNow) {
+        // One undo entry. The change:parent listener (embedding.js) refits each affected
+        // container around its new / remaining children (and reverts an emptied one to its
+        // default footprint).
+        history.startBatch();
+        try {
+          for (const el of toEmbed) C.embed(el);
+          for (const r of toRelease) r.parent.unembed(r.el);
+          // Restore the pre-drag top-left of every container the group fully vacated — its size
+          // was already reset to the default empty footprint by fitParentToChildren; this undoes
+          // any nudge a mid-drop fit applied while it still held the departing children.
+          for (const [pid, pos] of containerPosSnap) {
+            const p = graph.getCell(pid);
+            if (p && (p.getEmbeddedCells() || []).length === 0) p.position(pos.x, pos.y);
+          }
+        } finally { history.endBatch(); }
+      }
+    }
+    containerPosSnap.clear();
     draggedId = null;
     lastPos = null;
   });

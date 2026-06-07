@@ -6,11 +6,11 @@
 // runtime-only and reads live state/callbacks from the persistence context (pctx);
 // version checks + dedup signatures come from the leaf versioning module.
 
-import { contentSignature, checkVersionWarning } from './versioning.js?v=1.14.1';
-import { normalizeDateSuffix } from '../util.js?v=1.14.1';
-import { escHtml } from '../util.js?v=1.14.1';
-import { showToast, showError, buildModal } from '../feedback.js?v=1.14.1';
-import { pctx } from './context.js?v=1.14.1';
+import { contentSignature, checkVersionWarning } from './versioning.js?v=1.15.0';
+import { normalizeDateSuffix } from '../util.js?v=1.15.0';
+import { escHtml } from '../util.js?v=1.15.0';
+import { showToast, showError, buildModal } from '../feedback.js?v=1.15.0';
+import { pctx } from './context.js?v=1.15.0';
 
 // Maximum number of cells to accept from external sources (share URLs, JSON import)
 const MAX_CELL_COUNT = 2000;
@@ -35,7 +35,7 @@ const ALLOWED_CELL_TYPES = new Set([
   'sf.FlowDocument', 'sf.FlowIO', 'sf.FlowPredefined', 'sf.FlowOffPage',
   // Data Model
   'sf.DataObject',
-  // Organisation
+  // Org Chart
   'sf.OrgPerson',
   // Gantt
   'sf.GanttTask', 'sf.GanttMilestone', 'sf.GanttMarker', 'sf.GanttTimeline',
@@ -107,7 +107,7 @@ export function importJSON() {
 /** Restore a bundled diagram as a named browser save (collision-safe name).
  *  Non-destructive: doesn't touch open tabs — the diagram lands in
  *  Load → Load from Browser. Sanitises the (untrusted) graph first. */
-function restoreDiagramAsSave(name, diagramType, graphJSON, viewport, appVersion) {
+function restoreDiagramAsSave(name, diagramType, graphJSON, viewport, appVersion, mappingMode) {
   const { normalizeDiagramType, namedSavePrefix: NAMED_SAVE_PREFIX, appVersion: APP_VERSION } = pctx;
   if (!graphJSON) return false;
   sanitizeGraphJSON(graphJSON);
@@ -121,6 +121,7 @@ function restoreDiagramAsSave(name, diagramType, graphJSON, viewport, appVersion
       name: finalName,
       timestamp: Date.now(),
       diagramType: normalizeDiagramType(diagramType),
+      mappingMode: !!mappingMode,
       graph: graphJSON,
       viewport: viewport || null,
       // Preserve the diagram's original version so re-imports stay honest;
@@ -170,7 +171,7 @@ function prepareImportedDiagrams(rawDiagrams) {
     let name = String(d.name || 'Imported').slice(0, 80) || 'Imported';
     if (names.has(name)) name = `${name} (Restored)`;
     names.add(name);
-    out.push({ name, diagramType: normalizeDiagramType(d.diagramType), graph: d.graph, viewport: d.viewport || null, appVersion: d.appVersion || null });
+    out.push({ name, diagramType: normalizeDiagramType(d.diagramType), mappingMode: d.mappingMode || false, graph: d.graph, viewport: d.viewport || null, appVersion: d.appVersion || null });
   }
   return out;
 }
@@ -211,7 +212,7 @@ async function loadJSONText(jsonText, fallbackName) {
     let saved = 0;
     for (const d of diagrams) {
       // Preserve each diagram's own version, else the bundle's, else current.
-      if (restoreDiagramAsSave(d.name, d.diagramType, d.graph, d.viewport, d.appVersion || data.appVersion)) saved++;
+      if (restoreDiagramAsSave(d.name, d.diagramType, d.graph, d.viewport, d.appVersion || data.appVersion, d.mappingMode)) saved++;
     }
     const tc = (rawTemplates.length && templatesBackupApi?.importMerge)
       ? (templatesBackupApi.importMerge(rawTemplates) || 0) : 0;
@@ -264,7 +265,7 @@ async function loadJSONText(jsonText, fallbackName) {
     const name = data.title || fallbackName || 'Imported';
     if (data?.graph) sanitizeGraphJSON(data.graph);
     if (onImportCallback && data?.graph) {
-      onImportCallback(name, normalizeDiagramType(data.diagramType), data.graph, data.viewport);
+      onImportCallback(name, normalizeDiagramType(data.diagramType), data.graph, data.viewport, data.mappingMode);
     } else if (data?.graph) {
       canvasModule.setLoadingJSON(true);
       try { graph.fromJSON(data.graph); } finally { canvasModule.setLoadingJSON(false); }

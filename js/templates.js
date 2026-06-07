@@ -21,8 +21,8 @@
 // cell gets a fresh ID and all parent / embeds / source / target references
 // are rewritten to match before the cells are added to the live graph.
 
-import { showToast, promptModal } from './feedback.js?v=1.14.1';
-import { APP_VERSION, sanitizeGraphJSON, triggerDownload, dateSuffix, requestPersistentStorage, contentSignature } from './persistence.js?v=1.14.1';
+import { showToast, promptModal } from './feedback.js?v=1.15.0';
+import { APP_VERSION, sanitizeGraphJSON, triggerDownload, dateSuffix, requestPersistentStorage, contentSignature } from './persistence.js?v=1.15.0';
 
 const STORAGE_KEY = 'sfdiag::customTemplates';
 // Self-describing format tag for the Save/Load-Templates-as-JSON backup file.
@@ -389,7 +389,7 @@ export function exportTemplatesJSON() {
       templates,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    triggerDownload(URL.createObjectURL(blob), `diagramforce_templates_${dateSuffix()}.json`);
+    triggerDownload(URL.createObjectURL(blob), `df_templates_${dateSuffix()}.json`);
     showToast(`Exported ${templates.length} template${templates.length === 1 ? '' : 's'} ✓`, 'success');
     return true;
   } catch (err) {

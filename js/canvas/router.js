@@ -7,8 +7,8 @@
 // orthoRoute) are hoisted to module level + exported so they can be
 // characterised in tests/canvas-router.test.js.
 
-import { cctx } from './context.js?v=1.14.1';
-import { right, bottom, centerX, centerY } from '../util/geometry.js?v=1.14.1';
+import { cctx } from './context.js?v=1.15.0';
+import { right, bottom, centerX, centerY } from '../util/geometry.js?v=1.15.0';
 
 // ── Routing geometry constants ──
 const STUB = 32;  // distance from port to first turn — must exceed defaultConnectionPoint offset (16px) + arrow length (14px)
@@ -166,8 +166,14 @@ export function registerSfRouter() {
       case 'left':       return { dir: 'left',   stub: { x: bbox.x - STUB, y: cy } };
       case 'bottom':     return { dir: 'bottom', stub: { x: cx, y: bottom(bbox) + STUB } };
       case 'top':        return { dir: 'top',    stub: { x: cx, y: bbox.y - STUB } };
-      case 'fieldRight': return { dir: 'right',  stub: { x: right(bbox) + STUB, y: bbox.y + (port.args?.y || cy) } };
-      case 'fieldLeft':  return { dir: 'left',   stub: { x: bbox.x - STUB, y: bbox.y + (port.args?.y || cy) } };
+      // Field-row ports AND the header-side ER ports (er-left/er-right) all sit on a side
+      // edge with an absolute y from `args.y`, so they stub out horizontally the same way.
+      // Without the er-* cases this fell through to `default: null` and sfManhattan degraded
+      // to a straight line for any relationship touching a header-side port.
+      case 'fieldRight':
+      case 'erRight':    return { dir: 'right',  stub: { x: right(bbox) + STUB, y: bbox.y + (port.args?.y || cy) } };
+      case 'fieldLeft':
+      case 'erLeft':     return { dir: 'left',   stub: { x: bbox.x - STUB, y: bbox.y + (port.args?.y || cy) } };
       case 'seq-left': {
         // Anchor the stub to the port's actual x (not the cell edge) so
         // participant/actor lifeline ports (which sit at 0.5*w - offset, not

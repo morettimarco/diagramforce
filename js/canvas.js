@@ -1,47 +1,286 @@
 // Canvas module — manages the JointJS graph and paper
 // Provides pan (drag blank area), zoom (mouse wheel + ctrl), grid
 
-import { cctx } from './canvas/context.js?v=1.14.1';
-import { registerSfRouter } from './canvas/router.js?v=1.14.1';
+import { cctx } from './canvas/context.js?v=1.15.0';
+import { registerSfRouter } from './canvas/router.js?v=1.15.0';
 // The router reads the connector-grouping flag via cctx; wire it at module-eval
 // (isConnectorGroupingEnabled is a hoisted function declaration below).
 cctx.isConnectorGroupingEnabled = isConnectorGroupingEnabled;
 // Phase 4 Slice 3: auto-layout domain extracted to ./canvas/auto-layout.js
-export { autoLayout, analyzeSequenceLayout, applySequenceAutoLayout } from './canvas/auto-layout.js?v=1.14.1';
+export { autoLayout, applyDataMappingLayout, analyzeSequenceLayout, applySequenceAutoLayout } from './canvas/auto-layout.js?v=1.15.0';
 // Phase 4 Slice 4: migration fixups extracted to ./canvas/migration.js
-export { migrateLinks, updateSimpleNodeLayout, migrateNodes } from './canvas/migration.js?v=1.14.1';
+export { migrateLinks, updateSimpleNodeLayout, updateDataObjectHeaderLayout, migrateNodes } from './canvas/migration.js?v=1.15.0';
 // Phase 4 Slice 5: crossing-bump calculation extracted to ./canvas/crossing-bumps.js
-import { initCrossingBumps, getBumpLayer } from './canvas/crossing-bumps.js?v=1.14.1';
-export { isCrossingBumpsEnabled, setCrossingBumpsEnabled } from './canvas/crossing-bumps.js?v=1.14.1';
+import { initCrossingBumps, getBumpLayer } from './canvas/crossing-bumps.js?v=1.15.0';
+export { isCrossingBumpsEnabled, setCrossingBumpsEnabled } from './canvas/crossing-bumps.js?v=1.15.0';
 // Phase 4 Slice 6: viewport domain (zoom / pan / grid / get-set) extracted to ./canvas/viewport.js.
 // getGridColor is used by the initial paper setup below; registerViewportControls
 // is the bridge called in init(); the rest are re-exported unchanged for backward
 // compat (toolbar/keyboard/tabs/persistence call them via the canvas facade).
-import { registerViewportControls, getGridColor } from './canvas/viewport.js?v=1.14.1';
-export { zoomIn, zoomOut, fitContent, toggleGrid, refreshGrid, getViewport, setViewport } from './canvas/viewport.js?v=1.14.1';
+import { registerViewportControls, getGridColor } from './canvas/viewport.js?v=1.15.0';
+export { zoomIn, zoomOut, fitContent, toggleGrid, refreshGrid, getViewport, setViewport } from './canvas/viewport.js?v=1.15.0';
 // Phase 4 Slices 7-9 — the "Leaf Purge": non-interactive side-effect leaves.
 // line-style + external-labels init functions are imported (called in init());
 // startLineStyleOverlays + the mobile pair were public exports, so re-export them
 // to keep canvas.js's export boundary stable (app.js / properties.js import them).
-import { startLineStyleOverlays } from './canvas/line-style.js?v=1.14.1';
-import { initExternalLabelAutoplace } from './canvas/external-labels.js?v=1.14.1';
+import { startLineStyleOverlays } from './canvas/line-style.js?v=1.15.0';
+import { initExternalLabelAutoplace } from './canvas/external-labels.js?v=1.15.0';
 export { startLineStyleOverlays };
-export { initMobileDragHandles, syncMobilePanelHeight } from './canvas/mobile.js?v=1.14.1';
+export { initMobileDragHandles, syncMobilePanelHeight } from './canvas/mobile.js?v=1.15.0';
 // Phase 4 Slice 10: link hover/focus tinting extracted to ./canvas/selection-viz.js.
 // Export-neutral (all internal) — registerSelectionViz(cctx) is called in init()
 // after the cctx block; the tinting bridges to crossing-bumps via getBumpLayer().
-import { registerSelectionViz } from './canvas/selection-viz.js?v=1.14.1';
+import { registerSelectionViz } from './canvas/selection-viz.js?v=1.15.0';
 // Phase 4 Slice 11: spacing/alignment guides extracted to ./canvas/spacing-guides.js.
 // Export-neutral; registerSpacingGuides(cctx) is called in init() after the cctx
 // block. The element:pointerup activation-lifeline snap stays here (its own listener).
-import { registerSpacingGuides } from './canvas/spacing-guides.js?v=1.14.1';
+import { registerSpacingGuides } from './canvas/spacing-guides.js?v=1.15.0';
 // Phase 4 Slice 12 (finale): embedding mechanics extracted to ./canvas/embedding.js.
 // canEmbed + findEmbeddingParent feed the paper's embeddingMode config below;
 // registerEmbedding(cctx) mounts the 4 auto-fit graph triggers post-hydration.
 // The 4 public entry points are re-exported (stencil.js/properties.js/toolbar.js).
-import { canEmbed, findEmbeddingParent, registerEmbedding } from './canvas/embedding.js?v=1.14.1';
+import { canEmbed, findEmbeddingParent, registerEmbedding } from './canvas/embedding.js?v=1.15.0';
 export { canEmbed };
-export { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, findHaloParent, tuckChildInside, showDropGhost, hideDropGhost } from './canvas/embedding.js?v=1.14.1';
+export { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, findHaloParent, tuckChildInside, showDropGhost, hideDropGhost, setDragSelectionBBox } from './canvas/embedding.js?v=1.15.0';
+
+// ── Data Cloud mapping links ─────────────────────────────────────────
+// A field→field link drawn while mapping mode is on is a source→DMO mapping
+// (distinct from a PK→FK ER relationship): tagged linkKind:'mapping' with a
+// distinct colour + a single direction arrow. mappingModeGetter is wired from
+// app.js (reads the active tab's mapping mode). applyMappingLinkStyle is shared
+// with properties.js (panel reclassify).
+let mappingModeGetter = null;
+export function setMappingModeGetter(fn) { mappingModeGetter = fn; }
+
+const MAPPING_LINK_COLOR = '#F6B355'; // brand amber/accent — distinguishes mappings from grey ER links
+
+// Router for Data Cloud mapping links: a short horizontal stub off each field port
+// (left ports exit left, right ports exit right) so the line leaves and arrives
+// perpendicular to the object edge and never runs parallel to (or hugs) it. The
+// smooth connector then rounds the diagonal between the two stubs. Registered
+// globally so the name resolves for both freshly-drawn and loaded (migrated) links.
+joint.routers.sfMappingRouter = function (vertices, opt, linkView) {
+  const STUB = 48;   // longer perpendicular stub — leaves room for the mapping-type badge
+  const sa = linkView.sourceAnchor;
+  const ta = linkView.targetAnchor;
+  if (!sa || !ta) return vertices || [];
+  const sPort = String(linkView.model.get('source')?.port || '');
+  const tPort = String(linkView.model.get('target')?.port || '');
+  const sDir = sPort.startsWith('field-left-') ? -1 : 1;
+  // Target side: a real field port uses its own side. A FLOATING target (mid-drag, no
+  // port yet) mirrors the source so the preview arrow points the way the line EXITS the
+  // source — source on a left port → arrow points left; right port → arrow points right
+  // (instead of always forcing it left).
+  const tHasFieldPort = tPort.startsWith('field-');
+  const tDir = tHasFieldPort ? (tPort.startsWith('field-left-') ? -1 : 1) : -sDir;
+  const route = [{ x: sa.x + sDir * STUB, y: sa.y }];
+  if (vertices && vertices.length) route.push(...vertices);
+  route.push({ x: ta.x + tDir * STUB, y: ta.y });
+  return route;
+};
+
+// Connector for mapping links: a STRAIGHT horizontal stub off each port (which
+// guarantees a true perpendicular entry/exit that never runs parallel to the edge —
+// a plain smooth connector rounds the stub away and lets the line approach at an
+// angle), then a cubic bézier with horizontal control handles smoothing the diagonal
+// between the two stub ends. Reads the stub points sfMappingRouter produced.
+joint.connectors.sfMappingConnector = function (sourcePoint, targetPoint, route) {
+  const s = sourcePoint, t = targetPoint;
+  if (!route || route.length < 2) return `M ${s.x} ${s.y} L ${t.x} ${t.y}`;
+  const s2 = route[0];                    // source stub end
+  const t2 = route[route.length - 1];     // target stub end
+  const sDir = Math.sign(s2.x - s.x) || 1;
+  const tDir = Math.sign(t2.x - t.x) || -1;
+  const h = Math.max(30, Math.abs(t2.x - s2.x) * 0.5);
+  const c1x = s2.x + sDir * h, c2x = t2.x + tDir * h;
+  return `M ${s.x} ${s.y} L ${s2.x} ${s2.y} C ${c1x} ${s2.y} ${c2x} ${t2.y} ${t2.x} ${t2.y} L ${t.x} ${t.y}`;
+};
+
+export function applyMappingLinkStyle(link) {
+  // Clear any existing markers FIRST. `cell.attr(path, obj)` MERGES, so without this a
+  // marker left over from the relationship style (fill:'none', stroke:#888) would bleed
+  // into the new arrow — producing a hollow, grey-bordered arrowhead that ignores the
+  // line colour when a link is switched relationship → mapping.
+  link.removeAttr('line/sourceMarker');
+  link.removeAttr('line/targetMarker');
+  link.attr('line/stroke', MAPPING_LINK_COLOR);
+  // Thin (1px) — mapping links read as light reference lines (like the Data Cloud
+  // canvas), not heavy ER relationships. The default standard.Link stroke is 2px.
+  link.attr('line/strokeWidth', 1);
+  // Directional: target arrow (no explicit fill/stroke → auto-inherits the line
+  // colour, per the marker convention); plain source stub.
+  link.attr('line/targetMarker', { type: 'path', d: 'M 0 -6 L -14 0 L 0 6 z' });
+  link.attr('line/sourceMarker', { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: MAPPING_LINK_COLOR, 'stroke-width': 1 });
+  // sfMappingRouter adds a short horizontal stub off each field port so the line
+  // exits/enters perpendicular and never runs parallel to (or hugs) the object
+  // edge; the smooth connector rounds the diagonal between the two stubs.
+  link.router({ name: 'sfMappingRouter' });
+  link.connector('sfMappingConnector');
+  // Pin to the field-port anchor with a small outward offset (12px): the line reads
+  // as landing on its specific port, the entry is a clean 90°, and the arrow tip
+  // sits right at the object edge (~2px in) instead of diving over the field text.
+  link.prop('source/connectionPoint', { name: 'anchor', args: { offset: 12 } });
+  link.prop('target/connectionPoint', { name: 'anchor', args: { offset: 12 } });
+  // Data Cloud transform classification — default a fresh mapping to 'Standard'
+  // (direct copy) without clobbering an existing Formula/Calculated choice. The
+  // table view's MAPPING TYPE column and the link inspector picker both read it.
+  if (!link.prop('mappingType')) link.prop('mappingType', 'Standard');
+  syncMappingTypeBadge(link);
+}
+
+// Short codes shown as a small badge on the connector's TARGET stub when a mapping
+// uses anything other than a direct (Standard) copy — surfaces non-trivial transforms
+// on the canvas where they'd otherwise hide behind overlapping parallel lines.
+// Standard (direct copy) gets NO token — only non-direct transforms are flagged, so a
+// mix of Standard + transform mappings into one field reads cleanly.
+export const MAPPING_TYPE_CODE = {
+  'Formula': 'F',
+  'Streaming Transform': 'ST',
+  'Batch Transform': 'BT',
+  'Calculated Insight': 'CI',
+};
+// A type-code badge label is distinguished from a user label by its `badgeBox` selector.
+const isMappingTypeBadge = l => !!(l && l.attrs && l.attrs.badgeBox);
+
+// `color` is the connector's own line stroke, so the badge reads as part of the line:
+// a canvas-coloured (effectively transparent) fill that masks the line behind the
+// letters, a 1px border in the connector colour, and the code in the same colour.
+function mappingTypeBadgeLabel(code, color) {
+  return {
+    markup: [
+      { tagName: 'rect', selector: 'badgeBox' },
+      { tagName: 'text', selector: 'badgeText' },
+    ],
+    attrs: {
+      badgeText: { text: code, fill: color, fontSize: 9, fontWeight: 700, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', textAnchor: 'middle', textVerticalAnchor: 'middle' },
+      badgeBox: { ref: 'badgeText', refWidth: 10, refHeight: 6, refX: -5, refY: -3, fill: 'var(--bg-canvas, #FFFFFF)', stroke: color, 'stroke-width': 1, rx: 3, ry: 3 },
+    },
+    // Negative distance measures back from the TARGET end; -20 px lands on the straight
+    // target stub (48 px router stub − 12 px connectionPoint offset = 36 px of stub),
+    // close to the target object and clear of the bézier bend.
+    position: { distance: -20, offset: 0 },
+  };
+}
+
+// Ensure a mapping link's labels reflect its `mappingType`: keep any user label, and
+// add (non-Standard) or remove (Standard) the type-code badge on the target stub, tinted
+// to the connector's own colour. Idempotent — safe to call on every change / (re)styling.
+export function syncMappingTypeBadge(link) {
+  // Default an unset type to 'Standard' so every mapping link shows a token ('S' by
+  // default), matching the table view's mappingType fallback.
+  const code = MAPPING_TYPE_CODE[link.prop('mappingType') || 'Standard'];
+  const userLabel = (link.labels() || []).find(l => !isMappingTypeBadge(l));
+  const arr = [];
+  if (userLabel) arr.push(userLabel);
+  if (code) arr.push(mappingTypeBadgeLabel(code, link.attr('line/stroke') || MAPPING_LINK_COLOR));
+  // Idempotent: skip the set when nothing changes — avoids spurious change:labels
+  // (history churn on load, redundant re-renders).
+  if (JSON.stringify(link.labels() || []) === JSON.stringify(arr)) return;
+  link.labels(arr);
+}
+
+// ── Architecture connection-frequency overlay ──────────────────────────────
+// A secondary link label (small clock icon + muted text, e.g. "Nightly") rendered
+// clear of the connector line. The `connectionFrequency` cell prop is the single
+// source of truth; this label is a derived view, identified by its `freqText`
+// selector. Colour is a fixed neutral grey (#888) — legible on both light and dark
+// canvases, so it needs no per-theme regeneration (unlike a baked theme token).
+const FREQ_LABEL_COLOR = '#888888';
+const isFrequencyLabel = l => !!(l && l.attrs && l.attrs.freqText);
+function frequencyLabelSpec(text) {
+  return {
+    markup: [
+      { tagName: 'rect', selector: 'freqBg' },
+      { tagName: 'image', selector: 'clockIcon' },
+      { tagName: 'text', selector: 'freqText' },
+    ],
+    attrs: {
+      // Canvas-coloured mask behind the combo so the connector line BREAKS behind the overlay
+      // (same trick as the user label's body rect) — crucial on a vertical segment where the
+      // line would otherwise run straight through the text. Wraps the whole icon+text combo
+      // with a small symmetric pad. Rendered first in markup → sits behind icon + text.
+      freqBg: {
+        ref: 'freqText', refWidth: 24, refHeight: 4, refX: -20, refY: -2,
+        fill: 'var(--bg-canvas, #FFFFFF)', stroke: 'none', rx: 2, ry: 2,
+        'pointer-events': 'none',
+      },
+      // Text is middle-anchored and nudged right by half the icon footprint (8px), and the
+      // icon is pinned to the text's LEFT edge via `ref` — so the icon+text combo is exactly
+      // CENTERED on the link midpoint for any text length. Rendered at 24px for crispness,
+      // shown at 12px. Empty href (icon fn not wired yet) degrades to text-only.
+      // pointer-events:none so the label never blocks the link's own drag/select hit area.
+      freqText: {
+        text, fill: FREQ_LABEL_COLOR, fontSize: 11, fontWeight: 500,
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+        textAnchor: 'middle', textVerticalAnchor: 'middle', x: 8, y: 0,
+        'pointer-events': 'none',
+      },
+      clockIcon: {
+        href: _iconDataUriFn ? _iconDataUriFn('clock', FREQ_LABEL_COLOR, 24) : '',
+        width: 12, height: 12, ref: 'freqText', refX: 0, x: -16, refY: 0.5, y: -6,
+        'pointer-events': 'none',
+      },
+    },
+    // ABSOLUTE downward offset (an {x,y}, NOT a perpendicular number) so the label sits a
+    // fixed distance BELOW the connector regardless of segment orientation — it never flips
+    // sides or collides with the on-line user label. 26px leaves a short visible run of line
+    // between the user label and the frequency overlay (both mask the line behind them).
+    position: { distance: 0.5, offset: { x: 0, y: 26 } },
+  };
+}
+// Ensure a link's labels reflect its `connectionFrequency`: keep every non-frequency
+// label (the user label + any mapping badge), then append the clock+text label when
+// the prop is non-empty (remove it when blank). Idempotent — safe on every change/load.
+export function syncFrequencyLabel(link) {
+  const freq = (link.prop('connectionFrequency') || '').trim();
+  const kept = (link.labels() || []).filter(l => !isFrequencyLabel(l));
+  const arr = freq ? [...kept, frequencyLabelSpec(freq)] : kept;
+  if (JSON.stringify(link.labels() || []) === JSON.stringify(arr)) return;
+  link.labels(arr);
+}
+
+// Revert a link to plain ER-relationship styling (used when the panel reclassifies
+// a mapping back to a relationship): grey, orthogonal sfManhattan routing, plain
+// stub ends (the user re-picks cardinality markers as needed).
+export function applyRelationshipLinkStyle(link) {
+  // Relationship connectors default to 2px — heavier than Data Mapping's thin 1px
+  // reference lines — so the type switch reads as a real change. The "None" stub ends
+  // track that width so neither end is thicker/thinner than the line. Clear markers first
+  // (attr merges) so a mapping arrow's path can't survive underneath the new stub.
+  const sw = 2;
+  link.removeAttr('line/sourceMarker');
+  link.removeAttr('line/targetMarker');
+  link.attr('line/stroke', '#888888');
+  link.attr('line/strokeWidth', sw);
+  link.attr('line/targetMarker', { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: '#888888', 'stroke-width': sw });
+  link.attr('line/sourceMarker', { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: '#888888', 'stroke-width': sw });
+  link.router({ name: 'sfManhattan' });
+  link.connector('rounded', { radius: 8 });
+  // Restore the default connection-point offset (only mapping links pin to the port anchor).
+  link.removeProp('source/connectionPoint');
+  link.removeProp('target/connectionPoint');
+}
+
+
+// ── Object-relationship (ER) link visibility — the Data Mapping "Object Relationships"
+// Display toggle. A pure VIEW filter (never persisted, never mutates the model): hides
+// every ER relationship link (linkKind !== 'mapping') so architects can audit field-level
+// mapping curves without the header-level relationship lines. Default ON (visible). Reset
+// to visible on tab change by the toolbar; a fresh tab load renders all links visible.
+let objectRelsVisible = true;
+export function isObjectRelationshipsVisible() { return objectRelsVisible; }
+export function setObjectRelationshipsVisible(v) {
+  objectRelsVisible = v !== false;
+  applyObjectRelsVisibility();
+}
+function applyObjectRelsVisibility() {
+  if (!graph || !paper) return;
+  for (const link of graph.getLinks()) {
+    if (link.prop('linkKind') === 'mapping') continue;   // mapping curves always show
+    const view = paper.findViewByModel(link);
+    if (view?.el) view.el.style.display = objectRelsVisible ? '' : 'none';
+  }
+}
 
 // ── Z-order tiers ────────────────────────────────────────────────────
 // Rendering layer — higher z = closer to the viewer.
@@ -61,10 +300,12 @@ export { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, findHaloPar
 // graph.fromJSON() never clobbers saved z values on reload.
 export const Z_BASE = {
   'sf.Zone':           0,
+  'sf.TaskGroup':      0,   // RACI section grouper — Zone tier, behind its embedded Tasks (500)
   'sf.BpmnPool':       0,
   'sf.Container':      1000,
   'sf.BpmnSubprocess': 500,
   'sf.BpmnLoop':       500,
+  'sf.Task':           500,   // RACI card — embeds Person(2000)/Team(1000), so it MUST stay below them. Without a tier entry the change:z listener let JointJS's drag toFront() strand it on top, "eating" its cards.
   'sf.SimpleNode':     2000,
   'sf.TextLabel':      2000,
   'sf.Line':           2000,
@@ -318,33 +559,57 @@ export function init() {
     background: { color: 'transparent' },
     async: true,
     sorting: joint.dia.Paper.sorting.APPROX,  // z-based insertion order
+    // Render ALL link labels in the dedicated labels layer (above the cells layer) so
+    // they're never occluded by an overlapping connector drawn later — notably the
+    // Data Cloud mapping-type code badges, which sit on busy, overlapping stubs.
+    labelsLayer: true,
     cellViewNamespace: joint.shapes,
 
-    // Default link when dragging from a port
-    defaultLink: () => new joint.shapes.standard.Link({
-      z: 0,  // 0 triggers the 'add' listener to place it in the link tier (30 000+)
-      attrs: {
-        line: {
-          stroke: '#888888',
-          strokeWidth: 2,
-          sourceMarker: {
-            type: 'path',
-            d: 'M 0 0 L -12 0',
-            fill: 'none',
+    // Default link when dragging from a port. The PREVIEW style is chosen from the
+    // SOURCE port's role so the live drag matches the link it will become:
+    //   • a square FIELD (mapping) port, in mapping mode → amber bézier (sfMappingRouter/
+    //     Connector) — the mapping look from the first pointermove (not relationship-then-
+    //     flip-on-drop).
+    //   • any round RELATIONSHIP port (top/bottom/er-*, or a field port in Data Model) →
+    //     grey orthogonal sfManhattan — the custom router used everywhere else.
+    defaultLink: (cellView, magnet) => {
+      let sourceIsMappingPort = false, sourcePortGroup = '';
+      try {
+        const portId = magnet && cellView?.findAttribute?.('port', magnet);
+        sourcePortGroup = (portId && cellView.model.getPort?.(portId)?.group) || '';
+        const isField = sourcePortGroup === 'fieldLeft' || sourcePortGroup === 'fieldRight';
+        sourceIsMappingPort = isField && !!(mappingModeGetter && mappingModeGetter());
+      } catch { /* fall through to the relationship preview */ }
+
+      if (sourceIsMappingPort) {
+        // Mapping bézier preview (amber). The arrow direction follows the SOURCE side
+        // via sfMappingRouter's floating-target handling (see router note there).
+        const link = new joint.shapes.standard.Link({ z: 0 });
+        link.attr('line/stroke', MAPPING_LINK_COLOR);
+        link.attr('line/strokeWidth', 1);
+        link.attr('line/targetMarker', { type: 'path', d: 'M 0 -6 L -14 0 L 0 6 z' });
+        link.attr('line/sourceMarker', { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: MAPPING_LINK_COLOR, 'stroke-width': 1 });
+        link.router({ name: 'sfMappingRouter' });
+        link.connector('sfMappingConnector');
+        link.prop('source/connectionPoint', { name: 'anchor', args: { offset: 12 } });
+        return link;
+      }
+
+      // Relationship preview (grey, orthogonal sfManhattan — the custom router).
+      return new joint.shapes.standard.Link({
+        z: 0,  // 0 triggers the 'add' listener to place it in the link tier (30 000+)
+        attrs: {
+          line: {
             stroke: '#888888',
-            'stroke-width': 2,
-            'stroke-dasharray': 'none',
-          },
-          targetMarker: {
-            type: 'path',
-            d: 'M 0 -6 L -14 0 L 0 6 z',
-            'stroke-dasharray': 'none',
+            strokeWidth: 2,
+            sourceMarker: { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: '#888888', 'stroke-width': 2, 'stroke-dasharray': 'none' },
+            targetMarker: { type: 'path', d: 'M 0 -6 L -14 0 L 0 6 z', 'stroke-dasharray': 'none' },
           },
         },
-      },
-      router: { name: 'sfManhattan' },
-      connector: { name: 'rounded', args: { radius: 8 } },
-    }),
+        router: { name: 'sfManhattan' },
+        connector: { name: 'rounded', args: { radius: 8 } },
+      });
+    },
 
     defaultConnectionPoint: { name: 'sfConnectionPoint', args: { offset: 16 } },
 
@@ -415,6 +680,31 @@ export function init() {
     const srcCell = graph.getCell(src.id);
     const tgtCell = graph.getCell(tgt.id);
     if (!srcCell || !tgtCell) return;
+    // Data Cloud mapping link: a field→field link drawn while mapping mode is on
+    // becomes a source→DMO mapping (distinct from a PK→FK ER relationship). The
+    // properties panel can reclassify it afterwards.
+    if (mappingModeGetter && mappingModeGetter()
+        && srcCell.get('type') === 'sf.DataObject' && tgtCell.get('type') === 'sf.DataObject'
+        && String(src.port).startsWith('field-') && String(tgt.port).startsWith('field-')) {
+      if (link.prop('linkKind') !== 'mapping') {
+        link.prop('linkKind', 'mapping');
+        applyMappingLinkStyle(link);
+      }
+      return;
+    }
+    // Data Model relationship: a link between two DataObjects when NOT in mapping mode
+    // is an ER relationship — give it the relationship style (grey, orthogonal
+    // sfManhattan, plain ends) so Data Model links read distinctly from Data Mapping's
+    // amber mapping connectors. The panel can re-pick cardinality markers afterwards.
+    if (srcCell.get('type') === 'sf.DataObject' && tgtCell.get('type') === 'sf.DataObject') {
+      // Any DataObject↔DataObject link that isn't a mapping is an ER relationship —
+      // grey, orthogonal sfManhattan, plain (none) ends — whether it lands on the
+      // top/bottom ports OR the header-side er-* ports. No forced cardinality default;
+      // the user picks crow's-foot ends in the link panel. (Header-side ports route
+      // orthogonally too now that getPortInfo recognises erLeft/erRight.)
+      if (link.prop('linkKind') !== 'mapping') applyRelationshipLinkStyle(link);
+      return;
+    }
     const SEQ_TYPES = new Set([
       'sf.SequenceParticipant', 'sf.SequenceActor', 'sf.SequenceActivation',
     ]);
@@ -428,6 +718,17 @@ export function init() {
     const currentStyle = link.prop('lineStyle');
     if (currentStyle && currentStyle !== 'none') return;
     link.prop('lineStyle', '6 4');
+  });
+
+  // Keep the "Object Relationships" filter consistent: a relationship link added while
+  // the filter is OFF must come in hidden too. (View-only — no model mutation.)
+  graph.on('add', (cell) => {
+    if (objectRelsVisible) return;
+    if (!cell.isLink?.() || cell.prop('linkKind') === 'mapping') return;
+    requestAnimationFrame(() => {
+      const view = paper.findViewByModel(cell);
+      if (view?.el) view.el.style.display = 'none';
+    });
   });
 
   // Pan / zoom (wheel · trackpad pinch · touch) / grid input handlers moved to
@@ -464,6 +765,8 @@ export function init() {
   cctx.graph = graph;
   cctx.paper = paper;
   cctx.refreshAllIconHrefs = refreshAllIconHrefs;
+  cctx.syncMappingTypeBadge = syncMappingTypeBadge;   // migration.js re-tokenizes mapping links on load
+  cctx.syncFrequencyLabel = syncFrequencyLabel;       // migration.js rebuilds the frequency overlay on load
 
   // Slice 6: attach the viewport input handlers (pan / zoom / grid) and expose
   // cctx.getZoom + cctx.fitContent. Must run AFTER cctx.graph/paper are set
@@ -526,6 +829,39 @@ export function init() {
   graph.on('change:source change:target change:attrs change:lineStyle', (cell) => {
     if (cell.isLink?.()) scheduleReroute();
   });
+
+  // A mapping link connecting/disconnecting changes its DataObjects' mapped-field count
+  // (the X/Y header pill) and which fields are visible under "Show Only Mapped" — but a
+  // link add/remove/re-endpoint doesn't fire any change event on the element, so refresh
+  // the touched DataObject views explicitly.
+  const refreshDataObjectById = (id) => {
+    const cell = id && graph.getCell(id);
+    if (cell && cell.get('type') === 'sf.DataObject') {
+      const view = paper.findViewByModel(cell);
+      view?._renderFieldRows?.();
+      view?._syncFieldPorts?.();
+      view?._renderBadges?.();
+    }
+  };
+  const refreshLinkedDataObjects = (link) => {
+    refreshDataObjectById(link.get('source')?.id);
+    refreshDataObjectById(link.get('target')?.id);
+  };
+  graph.on('add', (cell) => { if (cell.isLink?.()) refreshLinkedDataObjects(cell); });
+  graph.on('remove', (cell) => { if (cell.isLink?.()) refreshLinkedDataObjects(cell); });
+  // On re-endpoint, refresh BOTH the new AND the PREVIOUS endpoint object — otherwise an
+  // object a link is DRAGGED AWAY FROM never updates (its mapped X/Y pill stays stale).
+  // `remove` works because the link still names both ends; a drag only names the new one.
+  graph.on('change:source', (cell) => {
+    if (!cell.isLink?.()) return;
+    refreshDataObjectById(cell.get('source')?.id);
+    refreshDataObjectById(cell.previous('source')?.id);
+  });
+  graph.on('change:target', (cell) => {
+    if (!cell.isLink?.()) return;
+    refreshDataObjectById(cell.get('target')?.id);
+    refreshDataObjectById(cell.previous('target')?.id);
+  });
   // Cell move/resize affects edge length (size) and far-end ordering
   // (position). Element-only — link `change:position` would be the same as
   // changes above and already handled.
@@ -533,48 +869,19 @@ export function init() {
     if (cell.isElement?.()) scheduleReroute();
   });
 
-  // ── Gap 3 (v1.12.0) — empty-canvas onboarding hint ─────────────────
-  // Render a faded SVG text inside the joint-layers group reading
-  // "Drag a shape from the sidebar to start →" whenever the active
-  // graph has zero cells. Visibility toggles automatically on every
-  // add/remove. Per-tab — each tab's empty state shows the hint until
-  // its first drop. CSS `pointer-events: none` so it never blocks pan.
-  const SVG_NS = 'http://www.w3.org/2000/svg';
-  let hintEl = null;
-  const ensureHint = () => {
-    if (hintEl && hintEl.parentNode) return hintEl;
-    const layers = paper.svg.querySelector('.joint-layers') || paper.svg;
-    hintEl = document.createElementNS(SVG_NS, 'text');
-    hintEl.setAttribute('class', 'sf-canvas-hint');
-    hintEl.setAttribute('text-anchor', 'middle');
-    hintEl.setAttribute('pointer-events', 'none');
-    hintEl.textContent = 'Drag a shape from the sidebar to start →';
-    layers.appendChild(hintEl);
-    return hintEl;
+  // ── Empty-canvas ghost wireframe ────────────────────────────────────
+  // Toggle `.is-empty` on #canvas-container whenever the active graph has zero cells.
+  // CSS then reveals the faint, type-specific best-practice blueprint (markup in
+  // index.html #canvas-empty; the diagram type is set on the container by tabs.js, and
+  // the blueprint is chosen by [data-diagram-type]). Per-tab — each tab's empty state
+  // shows its blueprint until the first drop. Pure view state: never touches the graph
+  // or undo history. `reset` covers tab switches (fromJSON); add/remove cover edits.
+  const canvasContainer = paper.el.closest('#canvas-container') || document.getElementById('canvas-container');
+  const refreshEmptyState = () => {
+    canvasContainer?.classList.toggle('is-empty', graph.getCells().length === 0);
   };
-  const refreshHint = () => {
-    const empty = graph.getCells().length === 0;
-    if (!empty) {
-      if (hintEl?.parentNode) hintEl.style.display = 'none';
-      return;
-    }
-    const el = ensureHint();
-    // Position at the visible viewport centre in model coordinates so the
-    // hint stays put regardless of zoom / pan when the canvas is empty.
-    const rect = paper.el.getBoundingClientRect();
-    const scale = paper.scale().sx;
-    const t = paper.translate();
-    const mx = (rect.width / 2 - t.tx) / scale;
-    const my = (rect.height / 2 - t.ty) / scale;
-    el.setAttribute('x', String(mx));
-    el.setAttribute('y', String(my));
-    el.style.display = '';
-  };
-  graph.on('add remove', refreshHint);
-  // Re-position on pan/zoom/resize so the hint follows the viewport centre.
-  paper.on('translate scale', refreshHint);
-  new ResizeObserver(refreshHint).observe(paper.el);
-  refreshHint();
+  graph.on('add remove reset', refreshEmptyState);
+  refreshEmptyState();
 
   cctx.scheduleCrossingBumpRecompute = initCrossingBumps();
   initExternalLabelAutoplace();
@@ -647,6 +954,10 @@ function refreshAllIconHrefs() {
     if (type === 'sf.SimpleNode') {
       _refreshElementIcon(el, 'icon/href', 'label/fill');
     } else if (type === 'sf.Container') {
+      _refreshElementIcon(el, 'headerIcon/href', null, '#FFFFFF');
+    } else if (type === 'sf.DataObject') {
+      // Optional header icon (Account/Contact/Snowflake…) — white, like the Container's,
+      // matching the white header label on the coloured header bar.
       _refreshElementIcon(el, 'headerIcon/href', null, '#FFFFFF');
     }
   }

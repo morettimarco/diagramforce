@@ -1,5 +1,7 @@
 // Clipboard — copy, paste, and duplicate selected elements
 
+import * as history from './history.js?v=1.15.0';
+
 // Length (in px) of the "stub" used when a cloned connector dangles —
 // keeps the free endpoint a comfortable, predictable distance from the
 // cloned component instead of trailing off toward the original peer.
@@ -50,6 +52,9 @@ export function paste() {
   const onAdd = (cell) => { lastAdded = cell; };
   graph.on('add', onAdd);
 
+  // One undo step for the whole paste — every cloned element + link is one `add`
+  // command; the batch composites them so a single Cmd+Z removes the entire paste.
+  history.startBatch();
   try {
     clipboardCells.forEach(json => {
       const clone = JSON.parse(JSON.stringify(json));
@@ -92,6 +97,7 @@ export function paste() {
     });
   } finally {
     graph.off('add', onAdd);
+    history.endBatch();
   }
 }
 
@@ -107,6 +113,9 @@ export function duplicate() {
   // Map old IDs to new cloned elements
   const idMap = new Map();
 
+  // One undo step for the whole duplicate (all cloned elements + links).
+  history.startBatch();
+  try {
   elements.forEach(el => {
     const clone = el.clone();
     const pos = el.position();
@@ -189,6 +198,9 @@ export function duplicate() {
     graph.addCell(clone);
     selection.addToSelection(clone.id);
   });
+  } finally {
+    history.endBatch();
+  }
 }
 
 /**

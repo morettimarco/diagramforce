@@ -7,8 +7,8 @@
 // dateSuffix, triggerDownload) all come from the persistence runtime context —
 // so it imports no other sub-module (acyclic).
 
-import { showToast, showError, confirmModal, buildModal } from '../feedback.js?v=1.14.1';
-import { pctx } from './context.js?v=1.14.1';
+import { showToast, showError, confirmModal, buildModal } from '../feedback.js?v=1.15.0';
+import { pctx } from './context.js?v=1.15.0';
 
 // localStorage key scheme + retention (formerly top-of-persistence consts).
 export const NAMED_SAVE_PREFIX = 'sfdiag::save::';
@@ -33,18 +33,19 @@ export function namedSave() {
 
 /** Save a single tab (active) — used as fallback and internally. */
 function namedSaveSingle() {
-  const { tabNameCb: getTabNameCallback, graph, canvas: canvasModule, diagramTypeCb: getDiagramTypeCallback } = pctx;
+  const { tabNameCb: getTabNameCallback, graph, canvas: canvasModule, diagramTypeCb: getDiagramTypeCallback, mappingModeCb: getMappingModeCallback } = pctx;
   const defaultName = getTabNameCallback ? getTabNameCallback() : 'My Diagram';
   const existing = prompt('Save diagram as:', defaultName);
   if (!existing?.trim()) return;
   const name = existing.trim();
   saveSingleTab(name, graph.toJSON(), canvasModule.getViewport(),
-    getDiagramTypeCallback ? getDiagramTypeCallback() : 'architecture');
+    getDiagramTypeCallback ? getDiagramTypeCallback() : 'architecture',
+    getMappingModeCallback ? getMappingModeCallback() : false);
 }
 
 /** Save multiple tabs by id with a name prefix. */
 export async function saveMultipleTabs(tabIds, namePrefix) {
-  const { getAllTabs: getAllTabsCallback, getTabGraph: getTabGraphCallback, getTabViewport: getTabViewportCallback, getTabDiagramType: getTabDiagramTypeCallback, onSaveComplete: onSaveCompleteCallback } = pctx;
+  const { getAllTabs: getAllTabsCallback, getTabGraph: getTabGraphCallback, getTabViewport: getTabViewportCallback, getTabDiagramType: getTabDiagramTypeCallback, getTabMappingMode: getTabMappingModeCallback, onSaveComplete: onSaveCompleteCallback } = pctx;
   if (!getAllTabsCallback || !getTabGraphCallback) return;
   const allTabs = getAllTabsCallback();
   let savedCount = 0;
@@ -55,12 +56,13 @@ export async function saveMultipleTabs(tabIds, namePrefix) {
     const graphJSON = getTabGraphCallback(tabId);
     const viewport = getTabViewportCallback ? getTabViewportCallback(tabId) : null;
     const diagramType = getTabDiagramTypeCallback ? getTabDiagramTypeCallback(tabId) : 'architecture';
+    const mappingMode = getTabMappingModeCallback ? getTabMappingModeCallback(tabId) : false;
     if (!graphJSON) continue;
     // Use the tab name as save name (with date suffix)
     const saveName = namePrefix
       ? `${namePrefix} — ${tab.name}`
       : tab.name;
-    const ok = await saveSingleTab(saveName, graphJSON, viewport, diagramType, silent);
+    const ok = await saveSingleTab(saveName, graphJSON, viewport, diagramType, mappingMode, silent);
     if (ok) savedCount++;
   }
   if (savedCount > 0 && onSaveCompleteCallback) {
@@ -73,7 +75,7 @@ export async function saveMultipleTabs(tabIds, namePrefix) {
   }
 }
 
-async function saveSingleTab(name, graphJSON, viewport, diagramType, silent = false) {
+async function saveSingleTab(name, graphJSON, viewport, diagramType, mappingMode = false, silent = false) {
   const { appVersion: APP_VERSION, onNamedSave: onNamedSaveCallback } = pctx;
   const key = NAMED_SAVE_PREFIX + name;
   const alreadyExists = localStorage.getItem(key) !== null;
@@ -94,6 +96,7 @@ async function saveSingleTab(name, graphJSON, viewport, diagramType, silent = fa
     version: 1,
     appVersion: APP_VERSION,
     diagramType,
+    mappingMode,
     graph: graphJSON,
     viewport,
   };
@@ -244,7 +247,7 @@ export async function loadNamedSave(key) {
     if (data?.graph) sanitizeGraphJSON(data.graph);
     if (onImportCallback && data?.graph) {
       const type = normalizeDiagramType(data.diagramType);
-      onImportCallback(name, type, data.graph, data.viewport);
+      onImportCallback(name, type, data.graph, data.viewport, data.mappingMode);
     } else if (data?.graph) {
       canvasModule.setLoadingJSON(true);
       try { graph.fromJSON(data.graph); } finally { canvasModule.setLoadingJSON(false); }
@@ -265,7 +268,7 @@ export function deleteNamedSave(key) {
 // --- Import / Export ---
 
 /** Build the canonical single-diagram file object (drop-in export shape). */
-function buildSingleDiagram(name, diagramType, graphJSON, viewport) {
+function buildSingleDiagram(name, diagramType, graphJSON, viewport, mappingMode = false) {
   const { appVersion: APP_VERSION } = pctx;
   return {
     version: 1,
@@ -273,17 +276,18 @@ function buildSingleDiagram(name, diagramType, graphJSON, viewport) {
     timestamp: Date.now(),
     title: name,
     diagramType,
+    mappingMode,
     graph: graphJSON,
     viewport: viewport || null,
   };
 }
 
-function downloadSingleDiagram(name, diagramType, graphJSON, viewport) {
+function downloadSingleDiagram(name, diagramType, graphJSON, viewport, mappingMode = false) {
   const { triggerDownload, dateSuffix } = pctx;
-  const data = buildSingleDiagram(name, diagramType, graphJSON, viewport);
+  const data = buildSingleDiagram(name, diagramType, graphJSON, viewport, mappingMode);
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const safeName = (name || 'diagram').replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'diagram';
-  triggerDownload(URL.createObjectURL(blob), `${safeName}_${dateSuffix()}.json`);
+  triggerDownload(URL.createObjectURL(blob), `df_${safeName}_${dateSuffix()}.json`);
 }
 
 /** Record a FULL backup (Select-All export, or the reminder overlay's Export) —
@@ -299,6 +303,13 @@ export function getLastBackupAt() {
   return +localStorage.getItem(LAST_BACKUP_KEY) || 0;
 }
 
+/** Public: mark a full backup as just completed (resets the reminder clock + the
+ *  Export-Manager "Last full backup" advisory). For full-backup paths OUTSIDE
+ *  exportSelection — notably the session version-mismatch backup in tabs.js, which
+ *  downloads every saved session tab as a safety net before a reset. Without this,
+ *  that backup wrote files but the advisory still read "No full backup yet". */
+export function markFullBackup() { markBackedUp(); }
+
 /** Read a named save's diagram payload by key, or null if missing/corrupt. */
 export function readNamedSave(key) {
   try {
@@ -307,6 +318,7 @@ export function readNamedSave(key) {
     return {
       name: data.name || key.replace(NAMED_SAVE_PREFIX, ''),
       diagramType: data.diagramType || 'architecture',
+      mappingMode: data.mappingMode || false,
       graph: data.graph,
       viewport: data.viewport || null,
     };
@@ -316,16 +328,17 @@ export function readNamedSave(key) {
 /**
  * Export a user-chosen selection (Export Manager). Format adapts to the count so
  * common cases stay drop-in compatible:
- *   - 1 diagram, no templates → single-diagram file (`<name>_<date>.json`)
- *   - templates only          → templates file (`diagramforce_templates_<date>.json`)
- *   - 2+ elements             → `diagramforce-export` bundle (`diagramforce_export_<date>.json`)
+ *   - 1 diagram, no templates → single-diagram file (`df_<name>_<date>.json`)
+ *   - templates only          → templates file (`df_templates_<date>.json`)
+ *   - 2+ elements             → `diagramforce-export` bundle (`df_backup_<date>.json` when
+ *                               markBackup, else `df_export_<date>.json`)
  * A "Templates" selection counts as ONE element (the whole library). Named saves
  * whose name matches an included open tab are deduped (the tab is the live copy).
  * `markBackup` (Select-All export, or the reminder overlay) resets the reminder
  * clock. Returns true on a successful download.
  */
 export function exportSelection({ tabIds = [], saveKeys = [], includeTemplates = false } = {}, { markBackup = false } = {}) {
-  const { getAllTabs: getAllTabsCallback, getTabGraph: getTabGraphCallback, getTabDiagramType: getTabDiagramTypeCallback, getTabViewport: getTabViewportCallback, appVersion: APP_VERSION, templatesBackupApi, triggerDownload, dateSuffix } = pctx;
+  const { getAllTabs: getAllTabsCallback, getTabGraph: getTabGraphCallback, getTabDiagramType: getTabDiagramTypeCallback, getTabViewport: getTabViewportCallback, getTabMappingMode: getTabMappingModeCallback, appVersion: APP_VERSION, templatesBackupApi, triggerDownload, dateSuffix } = pctx;
   try {
     const diagrams = [];
     const tabs = getAllTabsCallback ? getAllTabsCallback() : [];
@@ -337,6 +350,7 @@ export function exportSelection({ tabIds = [], saveKeys = [], includeTemplates =
       diagrams.push({
         name: t.name,
         diagramType: getTabDiagramTypeCallback ? getTabDiagramTypeCallback(id) : 'architecture',
+        mappingMode: getTabMappingModeCallback ? getTabMappingModeCallback(id) : false,
         graph: g,
         viewport: getTabViewportCallback ? getTabViewportCallback(id) : null,
         appVersion: APP_VERSION,   // stamp so the diagram's version round-trips on re-import
@@ -358,7 +372,7 @@ export function exportSelection({ tabIds = [], saveKeys = [], includeTemplates =
     let ok = true;
     if (diagrams.length === 1 && templates.length === 0) {
       const d = diagrams[0];
-      downloadSingleDiagram(d.name, d.diagramType, d.graph, d.viewport);
+      downloadSingleDiagram(d.name, d.diagramType, d.graph, d.viewport, d.mappingMode);
       showToast(`Exported "${d.name}" ✓`, 'success');
     } else if (diagrams.length === 0 && templates.length > 0) {
       ok = !!(templatesBackupApi?.exportFn?.());   // templates-only → templates file
@@ -367,7 +381,9 @@ export function exportSelection({ tabIds = [], saveKeys = [], includeTemplates =
       if (diagrams.length) payload.diagrams = diagrams;
       if (templates.length) payload.templates = templates;
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-      triggerDownload(URL.createObjectURL(blob), `diagramforce_export_${dateSuffix()}.json`);
+      // Full backup (Select-All / reminder overlay) → df_backup_<date>; a partial
+      // multi-select export → df_export_<date>. markBackup distinguishes the two.
+      triggerDownload(URL.createObjectURL(blob), `df_${markBackup ? 'backup' : 'export'}_${dateSuffix()}.json`);
       const parts = [];
       if (diagrams.length) parts.push(`${diagrams.length} diagram${diagrams.length === 1 ? '' : 's'}`);
       if (templates.length) parts.push(`${templates.length} template${templates.length === 1 ? '' : 's'}`);

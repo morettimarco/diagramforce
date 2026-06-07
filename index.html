@@ -42,15 +42,15 @@
 
   <!-- App CSS (order matters) -->
   <!-- Note: JointJS v4 ships no separate stylesheet; vendored JS is loaded below. -->
-  <link rel="stylesheet" href="css/variables.css?v=1.14.1">
-  <link rel="stylesheet" href="css/theme.css?v=1.14.1">
-  <link rel="stylesheet" href="css/layout.css?v=1.14.1">
-  <link rel="stylesheet" href="css/toolbar.css?v=1.14.1">
-  <link rel="stylesheet" href="css/stencil.css?v=1.14.1">
-  <link rel="stylesheet" href="css/properties.css?v=1.14.1">
-  <link rel="stylesheet" href="css/tabs.css?v=1.14.1">
-  <link rel="stylesheet" href="css/canvas.css?v=1.14.1">
-  <link rel="stylesheet" href="css/modals.css?v=1.14.1">
+  <link rel="stylesheet" href="css/variables.css?v=1.15.0">
+  <link rel="stylesheet" href="css/theme.css?v=1.15.0">
+  <link rel="stylesheet" href="css/layout.css?v=1.15.0">
+  <link rel="stylesheet" href="css/toolbar.css?v=1.15.0">
+  <link rel="stylesheet" href="css/stencil.css?v=1.15.0">
+  <link rel="stylesheet" href="css/properties.css?v=1.15.0">
+  <link rel="stylesheet" href="css/tabs.css?v=1.15.0">
+  <link rel="stylesheet" href="css/canvas.css?v=1.15.0">
+  <link rel="stylesheet" href="css/modals.css?v=1.15.0">
 </head>
 <body>
   <!-- A8 (v1.12.0) — top-level page heading. Visually hidden but announced by
@@ -174,6 +174,10 @@
                 <svg class="sf-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="sf-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 Focus Dimming
               </button>
+              <button id="btn-display-object-rels" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon sf-toolbar__menu-item--toggle" title="Show the header-level ER relationship links (hide to isolate field mappings)">
+                <svg class="sf-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="sf-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Object Relationships
+              </button>
               <div id="display-auto-size-separator" style="border-top:1px solid var(--border-color);margin:4px 0"></div>
               <button id="btn-display-api" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon sf-toolbar__menu-item--toggle">
                 <svg class="sf-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="sf-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -185,12 +189,16 @@
               </button>
               <button id="btn-display-keys-only" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon sf-toolbar__menu-item--toggle">
                 <svg class="sf-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="sf-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                Key Fields Only
+                <span id="keys-only-label">Key Fields Only</span>
+              </button>
+              <button id="btn-animate-flow" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon sf-toolbar__menu-item--toggle" title="Animate a flowing direction along every connector (the PNG export then becomes an animated GIF)">
+                <svg class="sf-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="sf-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Animate Connectors
               </button>
               <div id="display-dm-separator" style="border-top:1px solid var(--border-color);margin:4px 0"></div>
               <button id="btn-auto-layout-h" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1" y="5" width="3" height="6" rx="0.5" fill="currentColor" stroke="none"/><rect x="6.5" y="5" width="3" height="6" rx="0.5" fill="currentColor" stroke="none"/><rect x="12" y="5" width="3" height="6" rx="0.5" fill="currentColor" stroke="none"/><path d="M4 8h2.5M9.5 8h2.5"/></svg>
-                Horizontal Auto Layout
+                <span id="auto-layout-h-label">Horizontal Auto Layout</span>
               </button>
               <button id="btn-auto-layout-v" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="5" y="1" width="6" height="3" rx="0.5" fill="currentColor" stroke="none"/><rect x="5" y="6.5" width="6" height="3" rx="0.5" fill="currentColor" stroke="none"/><rect x="5" y="12" width="6" height="3" rx="0.5" fill="currentColor" stroke="none"/><path d="M8 4v2.5M8 9.5v2.5"/></svg>
@@ -206,13 +214,19 @@
                 Auto Layout
               </button>
 
-              <div id="display-flow-separator" style="border-top:1px solid var(--border-color);margin:4px 0"></div>
-              <button id="btn-animate-flow" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="3" cy="8" r="2" fill="currentColor" stroke="none"/><circle cx="13" cy="8" r="2" fill="currentColor" stroke="none"/><path d="M5 8h6" stroke-dasharray="2 2"/><path d="M9.5 5.5L12 8l-2.5 2.5" stroke-linejoin="round"/></svg>
-                Animate Connectors
-              </button>
-
               <div id="display-gantt-separator" style="border-top:1px solid var(--border-color);margin:4px 0"></div>
+              <button id="btn-gantt-week-start" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon" title="First day of the week (Week timeline grid split) — click to cycle Monday / Sunday / Saturday">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="3.5" width="12" height="10.5" rx="1.5"/><path d="M2 6.5h12M5.5 1.8v2.4M10.5 1.8v2.4" stroke-linecap="round"/></svg>
+                <span id="gantt-week-start-label">Week Starts: Monday</span>
+              </button>
+              <button id="btn-gantt-weekend-start" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon" title="First day of the weekend — shades the non-working columns in the Day timeline (Saturday → Sat–Sun, Friday → Fri–Sat)">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="3.5" width="12" height="10.5" rx="1.5"/><path d="M2 6.5h12" stroke-linecap="round"/><rect x="9.5" y="7" width="4.5" height="6.5" fill="currentColor" stroke="none" opacity="0.35"/></svg>
+                <span id="gantt-weekend-start-label">Weekend Starts: Saturday</span>
+              </button>
+              <button id="btn-gantt-week-number" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon sf-toolbar__menu-item--toggle" title="Label week columns with the week number (W23) instead of the week's start date">
+                <svg class="sf-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="sf-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Week Numbers
+              </button>
               <button id="btn-gantt-assignee" class="sf-toolbar__menu-item sf-toolbar__menu-item--icon sf-toolbar__menu-item--toggle">
                 <svg class="sf-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="sf-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 Task Assignees
@@ -223,6 +237,25 @@
               </button>
             </div>
           </div>
+        <!-- Diagram | Table view switch — Data Mapping only (toolbar.js toggles display;
+             inline display:none because `.sf-toolbar__group{display:flex}` outranks [hidden]) -->
+        <div class="sf-toolbar__separator" id="view-switch-sep" style="display:none"></div>
+        <div class="sf-toolbar__group" id="view-switch-group" style="display:none">
+          <div class="sf-toolbar__segmented" role="radiogroup" aria-label="View mode">
+            <button id="btn-view-diagram" type="button" class="sf-toolbar__segmented-option sf-toolbar__segmented-option--active" role="radio" aria-checked="true" title="Diagram view">Diagram</button>
+            <button id="btn-view-table" type="button" class="sf-toolbar__segmented-option" role="radio" aria-checked="false" title="Table view">Table</button>
+          </div>
+        </div>
+        <!-- Map — clone this Data Model into a new Data Mapping diagram. Data Model only;
+             sits in the same toolbar slot as the Diagram/Table switch (toolbar.js toggles
+             display + wires the click). Inline display:none for the same reason as above. -->
+        <div class="sf-toolbar__separator" id="map-bridge-sep" style="display:none"></div>
+        <div class="sf-toolbar__group" id="map-bridge-group" style="display:none">
+          <button id="btn-map-bridge" type="button" class="sf-toolbar__button" title="Clone this Data Model into a new Data Mapping diagram">
+            <svg class="sf-toolbar__icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h5M2 8h4M2 12h5"/><path d="M9.5 8H14M12 6l2 2-2 2"/></svg>
+            <span>Map</span>
+          </button>
+        </div>
         <div class="sf-toolbar__separator"></div>
         <div class="sf-toolbar__group">
           <button id="btn-undo" class="sf-toolbar__button sf-toolbar__button--icon-only" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>
@@ -262,6 +295,12 @@
       <div class="sf-toolbar__right">
         <button id="btn-share-url" class="sf-toolbar__button sf-toolbar__button--icon-only" title="Share as URL" aria-label="Share as URL">
           <svg class="sf-toolbar__icon" aria-hidden="true"><use href="#share_link"></use></svg>
+        </button>
+        <button id="btn-help" class="sf-toolbar__button sf-toolbar__button--icon-only" title="Help" aria-label="Help — start the walkthrough">
+          <svg class="sf-toolbar__icon" aria-hidden="true" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/>
+            <text x="8" y="11.7" text-anchor="middle" font-size="10" font-weight="700" font-family="system-ui, -apple-system, sans-serif">?</text>
+          </svg>
         </button>
         <button id="btn-about" class="sf-toolbar__button sf-toolbar__button--icon-only" title="About Diagramforce" aria-label="About Diagramforce">
           <svg class="sf-toolbar__icon" aria-hidden="true" viewBox="0 0 16 16" fill="currentColor">
@@ -383,6 +422,99 @@
       <!-- Canvas -->
       <main id="canvas-container" class="sf-canvas" role="main" aria-label="Diagram canvas — visual editing area. Use the property panel to inspect or edit selected shapes.">
         <div id="paper"></div>
+        <!-- Empty-canvas ghost wireframe — a faint, type-specific best-practice blueprint
+             shown only while the active tab has zero cells (canvas.js toggles `is-empty` on
+             #canvas-container; CSS reveals the blueprint matching its data-diagram-type).
+             Pointer-events:none + view-only — never part of the graph/history. -->
+        <div id="canvas-empty" class="sf-canvas-empty" aria-hidden="true">
+          <svg class="sf-canvas-empty__wf" data-wf="architecture" viewBox="0 0 320 180" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="16" y="38" width="60" height="32" rx="6"/>
+            <rect x="16" y="110" width="60" height="32" rx="6"/>
+            <rect x="125" y="56" width="80" height="68" rx="9" stroke-dasharray="5 6"/>
+            <rect x="138" y="70" width="54" height="18" rx="3"/>
+            <rect x="138" y="94" width="54" height="16" rx="3"/>
+            <rect x="248" y="74" width="56" height="32" rx="6"/>
+            <path d="M76 54 H100 V88 H123"/>
+            <path d="M76 126 H100 V96 H123"/>
+            <path d="M205 90 H246"/>
+            <path d="M239 84 l8 6 -8 6"/>
+          </svg>
+          <svg class="sf-canvas-empty__wf" data-wf="process" viewBox="0 0 320 180" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="28" cy="90" r="13"/>
+            <rect x="58" y="74" width="54" height="32" rx="5"/>
+            <path d="M158 90 l18 -18 18 18 -18 18 z"/>
+            <rect x="216" y="74" width="54" height="32" rx="5"/>
+            <circle cx="300" cy="90" r="13"/>
+            <circle cx="300" cy="90" r="8"/>
+            <path d="M41 90 H58"/>
+            <path d="M112 90 H156"/>
+            <path d="M194 90 H216"/>
+            <path d="M270 90 H287"/>
+            <path d="M281 85 l6 5 -6 5"/>
+          </svg>
+          <svg class="sf-canvas-empty__wf" data-wf="sequence" viewBox="0 0 320 180" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="26" y="20" width="58" height="26" rx="4"/>
+            <rect x="131" y="20" width="58" height="26" rx="4"/>
+            <rect x="236" y="20" width="58" height="26" rx="4"/>
+            <path d="M55 46 V162" stroke-dasharray="4 6"/>
+            <path d="M160 46 V162" stroke-dasharray="4 6"/>
+            <path d="M265 46 V162" stroke-dasharray="4 6"/>
+            <path d="M55 80 H160"/><path d="M152 74 l8 6 -8 6"/>
+            <path d="M160 118 H265"/><path d="M257 112 l8 6 -8 6"/>
+            <path d="M160 150 H55" stroke-dasharray="5 5"/><path d="M63 144 l-8 6 8 6"/>
+          </svg>
+          <svg class="sf-canvas-empty__wf" data-wf="datamodel" viewBox="0 0 320 180" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="22" y="20" width="96" height="52" rx="6"/>
+            <path d="M22 38 H118"/>
+            <rect x="202" y="20" width="96" height="52" rx="6"/>
+            <path d="M202 38 H298"/>
+            <rect x="112" y="120" width="96" height="50" rx="6"/>
+            <path d="M112 138 H208"/>
+            <!-- trunks: both parents drop (from the "one" bar), merge, then run into the child -->
+            <path d="M70 74 V94 H160"/>
+            <path d="M250 74 V94 H160"/>
+            <path d="M160 94 V98"/>
+            <!-- "one" ends: a ⊤ nearly touching each parent — the bar caps the leg, the stem
+                 hangs down from it (a T, not a + cross through the middle of the line) -->
+            <path d="M62 74 H78"/>
+            <path d="M242 74 H258"/>
+            <!-- "zero-or-many" at the child: circle (zero) on the link side, crow's foot
+                 converging toward the link and fanning onto the entity edge -->
+            <circle cx="160" cy="103" r="5"/>
+            <path d="M152 120 L160 108 L168 120 M160 108 L160 120"/>
+          </svg>
+          <svg class="sf-canvas-empty__wf" data-wf="datamapping" viewBox="0 0 320 180" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="14" y="28" width="116" height="124" rx="8" stroke-dasharray="5 6"/>
+            <rect x="28" y="48" width="88" height="30" rx="4"/>
+            <rect x="28" y="100" width="88" height="30" rx="4"/>
+            <rect x="190" y="28" width="116" height="124" rx="8" stroke-dasharray="5 6"/>
+            <rect x="204" y="56" width="88" height="30" rx="4"/>
+            <rect x="204" y="108" width="88" height="30" rx="4"/>
+            <path d="M116 63 C158 63 162 71 204 71"/>
+            <path d="M116 115 C158 115 162 123 204 123"/>
+            <path d="M196 67 L204 71 L196 75"/>
+            <path d="M196 119 L204 123 L196 127"/>
+          </svg>
+          <svg class="sf-canvas-empty__wf" data-wf="gantt" viewBox="0 0 320 180" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 40 H304"/>
+            <path d="M70 36 V44 M130 36 V44 M190 36 V44 M250 36 V44"/>
+            <rect x="40" y="62" width="96" height="18" rx="4"/>
+            <rect x="92" y="92" width="120" height="18" rx="4"/>
+            <rect x="150" y="122" width="104" height="18" rx="4"/>
+            <path d="M272 131 l9 -8 9 8 -9 8 z"/>
+          </svg>
+          <svg class="sf-canvas-empty__wf" data-wf="org" viewBox="0 0 320 180" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="125" y="24" width="70" height="32" rx="5"/>
+            <path d="M160 56 V74"/>
+            <path d="M70 74 H250"/>
+            <path d="M70 74 V92 M160 74 V92 M250 74 V92"/>
+            <rect x="40" y="92" width="60" height="30" rx="5"/>
+            <rect x="130" y="92" width="60" height="30" rx="5"/>
+            <rect x="220" y="92" width="60" height="30" rx="5"/>
+          </svg>
+          <p class="sf-canvas-empty__caption">Drag a shape from the sidebar to start →</p>
+        </div>
+        <div id="mapping-table-view" class="sf-table-view" hidden aria-label="Field mapping table"></div>
       </main>
 
       <!-- Stencil Panel (right sidebar) -->
@@ -462,8 +594,8 @@
   <!-- Scripts: JointJS as global, then app as ES module.
        Libraries are vendored in assets/vendor/ and served same-origin so the
        app works fully offline once the service worker has cached them. -->
-  <script defer src="assets/vendor/joint.min.js?v=1.14.1"></script>
-  <script defer src="assets/vendor/pako.min.js?v=1.14.1"></script>
-  <script type="module" src="js/app.js?v=1.14.1"></script>
+  <script defer src="assets/vendor/joint.min.js?v=1.15.0"></script>
+  <script defer src="assets/vendor/pako.min.js?v=1.15.0"></script>
+  <script type="module" src="js/app.js?v=1.15.0"></script>
 </body>
 </html>

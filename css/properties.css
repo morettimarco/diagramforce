@@ -877,6 +877,7 @@
 }
 .sf-field-key--pk { color: #F6B355; border-color: #F6B355; }
 .sf-field-key--fk { color: #1D73C9; border-color: #1D73C9; }
+.sf-field-key--fqk { color: #DA4E55; border-color: #DA4E55; }   /* Fully Qualified Key — brand red */
 
 .sf-field-input {
   height: 22px;

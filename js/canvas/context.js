@@ -17,6 +17,7 @@ export const cctx = {
   scheduleCrossingBumpRecompute: null,  // () => void        — debounced bump redraw
   isConnectorGroupingEnabled: null,     // () => bool        — read by the router (display-flag, wired at module-eval)
   refreshAllIconHrefs: null,            // () => void        — re-resolve every icon href after a theme/viewBox change (wired in init(); read by migration.js)
+  syncMappingTypeBadge: null,           // (link) => void    — rebuild a mapping link's type-code token label (wired in init(); read by migration.js on load)
 
   // ── Viewport (Slice 6) — wired by registerViewportControls(cctx) ──
   getZoom: null,              // () => number    — live zoom scale (screen-space math)

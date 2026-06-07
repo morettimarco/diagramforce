@@ -5,9 +5,9 @@
 // download/date helpers come from the persistence runtime context, wired in
 // persistence.init().
 
-import { GIFEncoder, quantize, applyPalette } from '../../assets/vendor/gifenc.esm.js?v=1.14.1';
-import { showToast, showError } from '../feedback.js?v=1.14.1';
-import { pctx } from './context.js?v=1.14.1';
+import { GIFEncoder, quantize, applyPalette } from '../../assets/vendor/gifenc.esm.js?v=1.15.0';
+import { showToast, showError } from '../feedback.js?v=1.15.0';
+import { pctx } from './context.js?v=1.15.0';
 
 export function exportWEBP(transparent = false) {
   return exportRaster(transparent, 'webp');
@@ -94,7 +94,7 @@ function exportRaster(transparent, format) {
       canvas.toBlob(blob => {
         const baseName = (getTabNameCallback ? getTabNameCallback() : 'sf-diagram').replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'sf-diagram';
         if (blob) {
-          triggerDownload(URL.createObjectURL(blob), `${baseName}_${dateSuffix()}.${ext}`);
+          triggerDownload(URL.createObjectURL(blob), `df_${baseName}_${dateSuffix()}.${ext}`);
           showToast(`${fmtLabel} downloaded ✓`, 'success');
         }
         URL.revokeObjectURL(svgUrl);
@@ -292,7 +292,7 @@ export async function exportGIF(transparent = false) {
     const bytes = gif.bytes();
     const blob = new Blob([bytes], { type: 'image/gif' });
     const gifName = (getTabNameCallback ? getTabNameCallback() : 'sf-diagram').replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'sf-diagram';
-    triggerDownload(URL.createObjectURL(blob), `${gifName}_${dateSuffix()}.gif`);
+    triggerDownload(URL.createObjectURL(blob), `df_${gifName}_${dateSuffix()}.gif`);
     progressToastDismiss?.();
     showToast('GIF downloaded ✓', 'success');
 

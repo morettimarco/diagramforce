@@ -80,6 +80,10 @@ function handleKeydown(evt) {
   const tag = evt.target.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || evt.target.isContentEditable) return;
 
+  // While the guided walkthrough is open it owns the keyboard (Tab/Escape via trapFocus,
+  // arrows via its own handler) — don't fire canvas shortcuts behind the overlay.
+  if (modules.walkthrough?.isActive?.()) return;
+
   // Ctrl/Cmd+Z — Undo
   if (mod && !shiftKey && key === 'z') {
     evt.preventDefault();

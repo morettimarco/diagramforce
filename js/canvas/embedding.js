@@ -12,7 +12,7 @@
 // canvas.js re-exports canEmbed / isAutoSizingEnabled / setAutoSizingEnabled /
 // refitAllParents for stencil.js (canEmbed) + properties.js (canEmbed) +
 // toolbar.js (the toggle + refit). Reads graph/paper via cctx; export-stable.
-import { cctx } from './context.js?v=1.14.1';
+import { cctx } from './context.js?v=1.15.0';
 
 // ── Auto-sizing toggle (v1.11.6) ────────────────────────────────────
 // Controls whether fitParentToChildren may grow/shrink a parent to its embedded
@@ -35,10 +35,19 @@ export function setAutoSizingEnabled(v) {
 // embedding when the old parent is a Zone, but not another Container).
 export function canEmbed(parentType, childType) {
   if (parentType === 'sf.Container') {
-    return childType !== 'sf.Container' && childType !== 'sf.Zone';
+    // Team: people + most nodes, but never another grouper — and never a bare Task
+    // or Task Group (z 500 / 0 sit below the Team's 1000, so they'd hide behind it).
+    return childType !== 'sf.Container' && childType !== 'sf.Zone'
+      && childType !== 'sf.TaskGroup' && childType !== 'sf.Task';
   }
   if (parentType === 'sf.Zone') {
-    return childType !== 'sf.Zone';
+    // Department: any node / Team / loose Task, but not another section grouper.
+    return childType !== 'sf.Zone' && childType !== 'sf.TaskGroup';
+  }
+  if (parentType === 'sf.TaskGroup') {
+    // RACI section: groups Task cards (each Task carries its own Person/Team
+    // assignees). Zone-tier (z 0), so only Tasks (z 500) stay above it.
+    return childType === 'sf.Task';
   }
   if (parentType === 'sf.BpmnPool') {
     return childType !== 'sf.BpmnPool';
@@ -68,26 +77,44 @@ export function canEmbed(parentType, childType) {
 // embedded. Generous below and to BOTH sides — the fit grows the bottom + left +
 // right edges to wrap the child, so "drop just outside" works on three sides.
 // Top is smaller: the header can't grow up, so a top drop just tucks below it.
-const CAPTURE_HALO_BOTTOM = 64;
-const CAPTURE_HALO_SIDE = 64;
-const CAPTURE_HALO_TOP = 48;
-// Only the free-form grouping parents opt into the halo. Structured parents
-// (Gantt timeline, sequence participant/actor, Task RACI column) keep exact
-// overlap — placement there is positional, not "anywhere inside".
+// Gap-based catch margins: how close (in px) the dragged element's bbox must come
+// to a container edge to be captured. Measured edge-to-edge, so the feel is the
+// same regardless of how wide the child is. Sides + bottom are forgiving; the top
+// is tiny because a container never grows upward (its header sits at the top).
+const CAPTURE_HALO_BOTTOM = 80;
+const CAPTURE_HALO_SIDE = 80;
+const CAPTURE_HALO_TOP = 12;
+// The grouping parents that opt into the halo + drop-ghost. Free-form groupers
+// (Container, Zone, BPMN Pool/Subprocess/Loop) wrap a child wherever it lands.
+// The RACI Task ALSO opts in (v1.15.0) — users need the capture highlight — but
+// it is NOT free-form: a captured Person/Team card is tucked into the RIGHT
+// column and the card grows right + down (never collapsing the fixed left
+// label/description column), via the Task branches in tuckChildInside /
+// previewCapturedParentBounds / fitParentToChildren below. Other structured
+// parents (Gantt timeline, sequence participant/actor) stay exact-overlap.
 const HALO_PARENT_TYPES = new Set([
-  'sf.Container', 'sf.Zone', 'sf.BpmnPool', 'sf.BpmnSubprocess', 'sf.BpmnLoop',
+  'sf.Container', 'sf.Zone', 'sf.TaskGroup', 'sf.BpmnPool', 'sf.BpmnSubprocess', 'sf.BpmnLoop', 'sf.Task',
 ]);
 
-// Find a container-like parent whose capture region (visible bbox inflated by
-// the halo) contains the child's centre, honouring canEmbed. Topmost (highest z)
-// wins. Single definition shared by both capture paths — canvas drag (via
+// A BpmnPool carries its label band down the LEFT edge (see shapes.js — header
+// rect width 30). Children must clear it both when tucked on drop AND when the
+// parent re-hugs its content, or the first step overlaps the rotated pool title.
+const POOL_HEADER_W = 30;
+
+// Find a container-like parent whose capture region (visible bbox inflated by the
+// halo) the child's BBOX reaches, honouring canEmbed. Topmost (highest z) wins.
+// Gap-based: capture fires when the child bbox comes within the halo margin of the
+// container edge — i.e. the inflated container box intersects the child box. (The
+// old centre-in-inflated-box test forced wide children to nearly touch, since the
+// centre stayed far from the edge — that was why "the sides still need a touch".)
+// Single definition shared by both capture paths — canvas drag (via
 // findEmbeddingParent) and stencil drop (via stencil.js tryEmbed). Returns the
 // parent element, or null.
 export function findHaloParent(childBBox, childType, excludeId) {
   const { graph } = cctx;
   if (!graph) return null;
-  const cx = childBBox.x + childBBox.width / 2;
-  const cy = childBBox.y + childBBox.height / 2;
+  const cl = childBBox.x, cr = childBBox.x + childBBox.width;
+  const ct = childBBox.y, cb = childBBox.y + childBBox.height;
   let best = null;
   let bestZ = -Infinity;
   for (const el of graph.getElements()) {
@@ -96,13 +123,64 @@ export function findHaloParent(childBBox, childType, excludeId) {
     if (!HALO_PARENT_TYPES.has(type)) continue;
     if (!canEmbed(type, childType)) continue;
     const b = el.getBBox();
-    if (cx >= b.x - CAPTURE_HALO_SIDE && cx <= b.x + b.width + CAPTURE_HALO_SIDE
-      && cy >= b.y - CAPTURE_HALO_TOP && cy <= b.y + b.height + CAPTURE_HALO_BOTTOM) {
+    // AABB intersection of the child bbox with the container bbox inflated per side.
+    if (cr >= b.x - CAPTURE_HALO_SIDE && cl <= b.x + b.width + CAPTURE_HALO_SIDE
+      && cb >= b.y - CAPTURE_HALO_TOP && ct <= b.y + b.height + CAPTURE_HALO_BOTTOM) {
       const z = el.get('z') || 0;
       if (z > bestZ) { bestZ = z; best = el; }
     }
   }
   return best;
+}
+
+// ── RACI Task geometry (v1.15.0) ────────────────────────────────────
+// The Task is a two-column card: a fixed LEFT column (name + description) and a
+// RIGHT column that holds embedded Person/Team RACI cards. The left column width
+// is `descriptionWidth`, clamped so the right column never drops below 100 px —
+// this MUST mirror TaskView._effectiveDescWidth in shapes.js, or the tuck and the
+// visible divider drift apart.
+function taskRightColumnLeft(task) {
+  const sz = task.size();
+  const raw = task.get('descriptionWidth') ?? 260;
+  return Math.max(120, Math.min(sz.width - 100, raw));
+}
+
+// Would-be {x,y,width,height} of a Task after wrapping its right-column cards +
+// any `extraBBoxes` (an incoming drop, pre-embed). The TOP-LEFT and the left
+// column never move; the card grows RIGHT + DOWN to hug the cards, floored at the
+// stencil default (540×160) so an empty/sparse roster keeps a sensible footprint.
+// Every considered bbox is clamped into the right column first, so a card dropped
+// over the left label still sizes (and later tucks) as a right-column card.
+function taskWrapBounds(task, extraBBoxes, excludeId) {
+  const { graph, paper } = cctx;
+  const pp = task.position();
+  const pad = (paper?.options.gridSize || 4) * (paper?.options.drawGrid?.args?.scaleFactor || 4);
+  const def = task.constructor?.prototype?.defaults?.size || { width: 540, height: 160 };
+  const colLeft = pp.x + taskRightColumnLeft(task) + pad;
+  const colTop = pp.y + pad;
+  let maxRight = colLeft;     // at least the right-column start
+  let maxBottom = colTop;
+  const consider = (bx, by, bw, bh) => {
+    const left = Math.max(bx, colLeft);
+    const top = Math.max(by, colTop);
+    if (left + bw > maxRight) maxRight = left + bw;
+    if (top + bh > maxBottom) maxBottom = top + bh;
+  };
+  if (graph) {
+    for (const c of graph.getElements()) {
+      if (c.get('parent') !== task.id) continue;
+      if (excludeId && c.id === excludeId) continue;
+      const cp = c.position(), cs = c.size();
+      consider(cp.x, cp.y, cs.width, cs.height);
+    }
+  }
+  for (const b of (extraBBoxes || [])) consider(b.x, b.y, b.width, b.height);
+  return {
+    x: pp.x,
+    y: pp.y,
+    width: Math.max(def.width, (maxRight + pad) - pp.x),    // hug right, floor at default
+    height: Math.max(def.height, (maxBottom + pad) - pp.y), // hug bottom, floor at default
+  };
 }
 
 // After a capture, tuck the child below the parent's TOP edge only — the one
@@ -116,11 +194,25 @@ export function tuckChildInside(child, parent) {
   const cp = child.position();
   const pp = parent.position();
   const pad = (paper?.options.gridSize || 4) * (paper?.options.drawGrid?.args?.scaleFactor || 4);
-  // Container carries a ~32px header bar; keep children clear of it. Zone / BPMN
-  // groupers have no header.
-  const headerPad = parent.get('type') === 'sf.Container' ? 32 : 0;
+  const ptype = parent.get('type');
+  // RACI Task: keep cards in the RIGHT column so the left stays for label/desc.
+  // Clamp x past the divider and y below a small top margin (no top header bar).
+  if (ptype === 'sf.Task') {
+    const nx = Math.max(cp.x, pp.x + taskRightColumnLeft(parent) + pad);
+    const ny = Math.max(cp.y, pp.y + pad);
+    if (nx !== cp.x || ny !== cp.y) child.position(nx, ny);
+    return;
+  }
+  // Container carries a ~32px TOP header bar; keep children clear of it. A TaskGroup
+  // has a top-left section label, so reserve a slimmer band so its Tasks tuck below
+  // it. Zone / BPMN groupers have no top header.
+  const headerPad = ptype === 'sf.Container' ? 32 : (ptype === 'sf.TaskGroup' ? 28 : 0);
   const ny = Math.max(cp.y, pp.y + headerPad + pad);
-  if (ny !== cp.y) child.position(cp.x, ny);
+  // A BpmnPool's header runs down the LEFT — tuck the child right past it so the
+  // first step never lands on the rotated pool title. Other parents keep their
+  // left overflow (a left drop wraps the parent leftward — see fitParentToChildren).
+  const nx = ptype === 'sf.BpmnPool' ? Math.max(cp.x, pp.x + POOL_HEADER_W + pad) : cp.x;
+  if (ny !== cp.y || nx !== cp.x) child.position(nx, ny);
 }
 
 // ── Parent candidate lookup (paper findParentBy) ────────────────────
@@ -180,11 +272,55 @@ function fitParentToChildren(parent) {
   const { graph, paper } = cctx;
   if (!isAutoSizingEnabled()) return;
   if (!parent || !parent.isElement || !parent.isElement()) return;
+  // A GanttTimeline sizes ITSELF — its width is period-driven and its view auto-grows
+  // the height to fit task rows (see GanttTimelineView._renderColumns). Content-hugging
+  // it here fights that and visibly breaks the chart, so never auto-fit a timeline.
+  if (parent.get('type') === 'sf.GanttTimeline') return;
+  // A SequenceParticipant / SequenceActor OWNS its geometry: width is label-driven,
+  // height IS the lifeline length (set on load + by the sequence auto-layout). Its
+  // embedded Activations are narrow markers placed ALONG the lifeline at message
+  // timings — they don't define the lane's extent. Hugging the frame to them would
+  // yank the lifeline off its column and crush its height, so never auto-fit a lane.
+  // (This was the "click a participant → it jumps right and shrinks" bug: a click is
+  // almost always a sub-pixel micro-drag, which cascade-moves the embedded activations;
+  // their change:position then triggered this generic content-hug on the lane.)
+  const _seqType = parent.get('type');
+  if (_seqType === 'sf.SequenceParticipant' || _seqType === 'sf.SequenceActor') return;
   // Filter by `parent` attribute directly — `parent.getEmbeddedCells()` reads
   // the parent's own `embeds` array, which JointJS may not have updated yet
   // during a synchronous remove/un-embed event.
   const children = graph.getElements().filter(c => c.get('parent') === parent.id);
-  if (children.length === 0) return; // empty parent: leave it alone
+  if (children.length === 0) {
+    // Last child removed (e.g. a multi-select group dragged back out): revert the container
+    // to its default EMPTY footprint instead of leaving it stretched around where its content
+    // used to be. resize() keeps the top-left; the group-drag handler (selection.js) restores
+    // the pre-drag position if a mid-drop fit had nudged it toward the departing children.
+    let def = null;
+    if (parent.get('type') === 'sf.BpmnPool') {
+      def = parent.prop('poolDirection') === 'vertical' ? { width: 250, height: 600 } : { width: 600, height: 250 };
+    } else {
+      const d = parent.constructor?.prototype?.defaults?.size;
+      if (d) def = { width: d.width, height: d.height };
+    }
+    if (def) {
+      const s = parent.size();
+      if (s.width !== def.width || s.height !== def.height) parent.resize(def.width, def.height);
+    }
+    return;
+  }
+  // RACI Task: a fixed two-column card, NOT a free-form container. Keep the
+  // top-left + left label column anchored; grow only RIGHT + DOWN to wrap the
+  // right-column cards (floored at the 540×160 stencil default). The generic
+  // left-hugging fit below would slide the frame onto the first card and destroy
+  // the label column, so the Task gets its own content-hug here.
+  if (parent.get('type') === 'sf.Task') {
+    const b = taskWrapBounds(parent, [], null);
+    const s = parent.size();
+    if (Math.abs(s.width - b.width) >= 1 || Math.abs(s.height - b.height) >= 1) {
+      parent.resize(b.width, b.height);
+    }
+    return;
+  }
   let maxBottom = -Infinity;
   let maxRight = -Infinity;
   let minLeft = Infinity;
@@ -210,7 +346,11 @@ function fitParentToChildren(parent) {
   //              accent bar from being clipped.
   // Children keep their absolute positions: a programmatic position()/resize()
   // does NOT cascade to embeds (only an interactive paper drag translates them).
-  const newLeft = minLeft - PARENT_FIT_PADDING;        // hug left (grow AND shrink)
+  // A BpmnPool reserves its left header band; everything else hugs flush. Using a
+  // wider left inset for pools means re-hugging never slides the title back over
+  // the leftmost child — it grows the pool left until the header clears it.
+  const leftInset = parent.get('type') === 'sf.BpmnPool' ? POOL_HEADER_W + PARENT_FIT_PADDING : PARENT_FIT_PADDING;
+  const newLeft = minLeft - leftInset;                 // hug left (grow AND shrink)
   const rightEdge = maxRight + PARENT_FIT_PADDING;      // hug right (grow AND shrink)
   const targetWidth = Math.max(PARENT_FIT_MIN_WIDTH, rightEdge - newLeft);
   const targetHeight = Math.max(PARENT_FIT_MIN_HEIGHT, (maxBottom + PARENT_FIT_PADDING) - parentPos.y);
@@ -281,10 +421,14 @@ function findCaptureParent(childBBox, childType, excludeId) {
 function previewCapturedParentBounds(childBBox, parent, excludeId) {
   const { graph, paper } = cctx;
   if (!parent || !graph) return null;
+  // RACI Task: preview the card growing right + down to wrap the would-be card in
+  // its right column (top-left + left column fixed) — mirrors the Task fit branch.
+  if (parent.get('type') === 'sf.Task') return taskWrapBounds(parent, [childBBox], excludeId);
   const pp = parent.position();
   const ps = parent.size();
   const pad = (paper?.options.gridSize || 4) * (paper?.options.drawGrid?.args?.scaleFactor || 4);
-  const headerPad = parent.get('type') === 'sf.Container' ? 32 : 0;
+  const ptype = parent.get('type');
+  const headerPad = ptype === 'sf.Container' ? 32 : (ptype === 'sf.TaskGroup' ? 28 : 0);
   // Mirror fitParentToChildren: TOP clamps the child below the header (can't grow
   // up); LEFT/RIGHT/BOTTOM take the child where it lands and the frame wraps it.
   const tuckedTop = Math.max(childBBox.y, pp.y + headerPad + pad);
@@ -310,13 +454,20 @@ function previewCapturedParentBounds(childBBox, parent, excludeId) {
   };
 }
 
-// Show/refresh the dashed ghost for childBBox; hides it when nothing would
-// capture. childType drives canEmbed; excludeId is the dragged element's own id
-// (null for a not-yet-created stencil drop). Returns the would-be parent or null.
-export function showDropGhost(childBBox, childType, excludeId) {
+// Union bbox of the current MULTI-select drag, set by selection.js so the ghost can preview
+// the container growing to hold the WHOLE selection (not just the element under the pointer).
+// Null during single-element drags → the ghost falls back to the dragged element's own bbox.
+let _dragSelectionBBox = null;
+export function setDragSelectionBBox(bbox) { _dragSelectionBBox = bbox || null; }
+
+// Show/refresh the dashed ghost; hides it when nothing would capture. `childBBox` (the element
+// under the pointer) finds the would-be parent; `growBBox` (defaults to childBBox) is what the
+// container is previewed wrapping — the whole multi-selection during a group drag. childType
+// drives canEmbed; excludeId is the dragged element's own id (null for a stencil drop).
+export function showDropGhost(childBBox, childType, excludeId, growBBox) {
   const parent = findCaptureParent(childBBox, childType, excludeId);
   if (!parent) { hideDropGhost(); return null; }
-  const b = previewCapturedParentBounds(childBBox, parent, excludeId);
+  const b = previewCapturedParentBounds(growBBox || childBBox, parent, excludeId);
   const layer = ensureGhostLayer();
   if (!b || !layer) { hideDropGhost(); return null; }
   if (!_ghostRect) {
@@ -351,6 +502,7 @@ export function hideDropGhost() {
 export function registerEmbedding(cctx) {
   const { graph, paper } = cctx;
   cctx.fitParentToChildren = fitParentToChildren;
+  cctx.refitAllParents = refitAllParents;
 
   // Drag state: _dragActive spans element:pointerdown→up; _dragMoved guards a
   // pure click (no move). _pendingParents collects parents to settle on drop.
@@ -362,12 +514,15 @@ export function registerEmbedding(cctx) {
   paper.on('element:pointerdown', () => { _dragActive = true; _dragMoved = false; hideDropGhost(); });
   paper.on('element:pointermove', (cellView) => {
     _dragMoved = true;
-    // Live preview: dashed ghost of the container this element would land in.
+    // Live preview: dashed ghost of the container this element would land in. During a
+    // multi-select group drag the preview grows to the whole selection (_dragSelectionBBox,
+    // set by selection.js) so it shows everything will be captured, not just this element.
     const m = cellView?.model;
-    if (m?.isElement?.()) showDropGhost(m.getBBox(), m.get('type'), m.id);
+    if (m?.isElement?.()) showDropGhost(m.getBBox(), m.get('type'), m.id, _dragSelectionBBox);
   });
   paper.on('element:pointerup', (cellView) => {
     hideDropGhost();
+    _dragSelectionBBox = null;   // always reset so the next (single) drag isn't sized to a stale union
     const moved = _dragActive && _dragMoved;
     _dragActive = false;
     _dragMoved = false;
@@ -383,6 +538,17 @@ export function registerEmbedding(cctx) {
         _pendingParents.add(pid);
       }
     }
+    // RACI Task right-column discipline: tuck EVERY card of any settling Task —
+    // covers a multi-select group drop where only the under-pointer card went
+    // through the single tuck above. Idempotent for already-tucked cards.
+    _pendingParents.forEach(pid => {
+      const p = graph.getCell(pid);
+      if (p && p.get('type') === 'sf.Task') {
+        graph.getElements()
+          .filter(c => c.get('parent') === pid)
+          .forEach(c => tuckChildInside(c, p));
+      }
+    });
     _pendingParents.forEach(fitNow);
     _pendingParents.clear();
   });
@@ -398,7 +564,18 @@ export function registerEmbedding(cctx) {
       if (prevParentId && prevParentId !== newParentId) _pendingParents.add(prevParentId);
       return;
     }
-    if (newParentId) fitNow(newParentId);
+    if (newParentId) {
+      // Programmatic embed into a RACI Task / Task Group (e.g. selection.js
+      // multi-select group capture, whose pointerup runs AFTER this module's — so
+      // the peers arrive here in the immediate branch, not the deferred drag one).
+      // Tuck each before the fit: a Task clamps cards into its right column, a Task
+      // Group clamps its Tasks below the section label. A live single drag takes the
+      // deferred branch above and tucks on element:pointerup instead.
+      const np = graph.getCell(newParentId);
+      const npType = np && np.get('type');
+      if (npType === 'sf.Task' || npType === 'sf.TaskGroup') tuckChildInside(cell, np);
+      fitNow(newParentId);
+    }
     if (prevParentId && prevParentId !== newParentId) fitNow(prevParentId);
   });
 

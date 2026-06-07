@@ -2,7 +2,7 @@
 // from canvas.js (Phase 4, Slice 4). migrateLinks/migrateNodes normalise legacy
 // marker + shape formats; updateSimpleNodeLayout re-centres SimpleNode content.
 // Reads the live graph/paper + refreshAllIconHrefs via the canvas context (cctx).
-import { cctx } from './context.js?v=1.14.1';
+import { cctx } from './context.js?v=1.15.0';
 
 // Legacy line-style dash strings → corrected standards. The line-style picklist
 // previews advertise round dots and long-dashes, but pre-fix saves stored
@@ -17,7 +17,54 @@ const LEGACY_DASH_REMAP = { '3 4': '0 6', '16 8 2 8': '16 8' };
 export function migrateLinks() {
   const { graph, paper } = cctx;
   for (const link of graph.getLinks()) {
-    // Ensure links have a sourceMarker (older diagrams may lack one)
+    // ── Re-key legacy positional field ports → stable fid ports ──
+    // Pre-1.15.0 saves bound a DataObject link to the field's ARRAY INDEX
+    // (`field-left-2`); reordering/deleting a field then drifted the link.
+    // Fields now carry an immutable `fid` (assigned in sf.DataObject.initialize,
+    // so it exists by the time this runs) and `fields[i].fid` is the id of the
+    // field saved at index i. fid ports don't match the numeric form, so this
+    // is idempotent on already-migrated diagrams.
+    for (const end of ['source', 'target']) {
+      const ep = link.get(end);
+      const m = typeof ep?.port === 'string' ? /^field-(left|right)-(\d+)$/.exec(ep.port) : null;
+      if (!m) continue;
+      const cell = graph.getCell(ep.id);
+      if (cell?.get('type') !== 'sf.DataObject') continue;
+      const field = (cell.get('fields') || [])[Number(m[2])];
+      if (field?.fid) link.set(end, { ...ep, port: `field-${m[1]}-${field.fid}` });
+    }
+
+    // Smooth left→right flow for Data Cloud mapping links — bypass the orthogonal
+    // sfManhattan router and use a horizontal-tangent bezier (matches the SF
+    // mapping canvas). Idempotent.
+    if (link.prop('linkKind') === 'mapping') {
+      if (link.router()?.name !== 'sfMappingRouter') link.router({ name: 'sfMappingRouter' });
+      if (link.connector()?.name !== 'sfMappingConnector') link.connector('sfMappingConnector');
+      // Pin to the field-port anchor with a small outward offset (port-hit + 90°
+      // entry + arrow tip at the edge) — see applyMappingLinkStyle.
+      if (link.prop('source/connectionPoint')?.args?.offset !== 12) link.prop('source/connectionPoint', { name: 'anchor', args: { offset: 12 } });
+      if (link.prop('target/connectionPoint')?.args?.offset !== 12) link.prop('target/connectionPoint', { name: 'anchor', args: { offset: 12 } });
+      // Heal a mapping arrow that leaked the relationship style's explicit fill/stroke
+      // (the old Connection-type switch merged markers, baking a hollow grey arrow).
+      // A mapping arrow must auto-inherit the line colour → strip fill/stroke back to
+      // the canonical solid arrowhead.
+      const tm = link.attr('line/targetMarker');
+      if (tm && (tm.fill != null || tm.stroke != null)) {
+        link.removeAttr('line/targetMarker');
+        link.attr('line/targetMarker', { type: 'path', d: 'M 0 -6 L -14 0 L 0 6 z' });
+      }
+      // Ensure the mapping-type token label exists (older saves predate it; the badge
+      // defaults to 'S' for an unset/Standard type). Idempotent — rebuilds in place.
+      cctx.syncMappingTypeBadge?.(link);
+    }
+
+    // Rebuild the Architecture connection-frequency overlay from its prop. A JSON/LLM
+    // spec may set `connectionFrequency` without the derived clock label, so derive it
+    // here. Idempotent + a no-op when the prop is unset (keeps non-freq labels intact).
+    cctx.syncFrequencyLabel?.(link);
+
+    // Ensure links have a sourceMarker (older diagrams may lack one). The plain
+    // stub tracks the line width so a "None" end never reads thicker than the line.
     if (!link.attr('line/sourceMarker')) {
       const stroke = link.attr('line/stroke') || '#888888';
       link.attr('line/sourceMarker', {
@@ -25,7 +72,7 @@ export function migrateLinks() {
         d: 'M 0 0 L -12 0',
         fill: 'none',
         stroke,
-        'stroke-width': 2,
+        'stroke-width': link.attr('line/strokeWidth') ?? 2,
       });
     }
 
@@ -209,11 +256,48 @@ export function updateSimpleNodeLayout(cell) {
   }
 }
 
+// Optional header icon for a DataObject (Data Model / Data Mapping). Empty by
+// default; when an icon is picked, show it on the LEFT of the header bar and shift
+// the object-name label right to clear it. Mirrors updateSimpleNodeLayout — a
+// standalone pass called on icon-pick (properties.js) + on load (migrateNodes),
+// never from the view's update loop, so it sets attrs non-silently without churn.
+export function updateDataObjectHeaderLayout(cell) {
+  if (cell.get('type') !== 'sf.DataObject') return;
+  const hasIcon = !!cell.attr('headerIcon/href');
+  if (hasIcon) {
+    cell.attr({
+      headerIcon: { x: 10, y: 8, width: 16, height: 16 },
+      headerLabel: { x: 32 },
+    });
+  } else {
+    cell.attr({
+      headerIcon: { width: 0, height: 0 },
+      headerLabel: { x: 12 },
+    });
+  }
+}
+
 export function migrateNodes() {
   const { graph, refreshAllIconHrefs } = cctx;
   for (const el of graph.getElements()) {
     if (el.get('type') === 'sf.SimpleNode' && !el.get('iconMode')) {
       updateSimpleNodeLayout(el);
+    }
+    // The field "Decommissioned" flag was renamed to "Deprecated" — carry the old
+    // `decommissioned` property forward to `deprecated` so pre-rename diagrams keep
+    // their marked fields. Silent (pure normalization, no history entry). Idempotent.
+    if (el.get('type') === 'sf.DataObject') {
+      const fields = el.get('fields');
+      if (Array.isArray(fields) && fields.some(f => f && 'decommissioned' in f)) {
+        el.set('fields', fields.map(f => {
+          if (!f || !('decommissioned' in f)) return f;
+          const { decommissioned, ...rest } = f;
+          return { ...rest, deprecated: rest.deprecated ?? decommissioned };
+        }), { silent: true });
+      }
+      // Re-apply the optional header-icon layout so a loaded object with an icon keeps
+      // its right-shifted label (and one without stays left-aligned). Idempotent.
+      updateDataObjectHeaderLayout(el);
     }
     // sf.Line stores its dash string directly on line/strokeDasharray; older
     // saves carry the pre-fix '3 4'/'16 8 2 8' values that no longer match the

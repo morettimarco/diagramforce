@@ -13,8 +13,8 @@
 // Reads the live graph/paper via cctx; the guide <g> lives under .joint-layers so
 // it inherits the paper transform. registerSpacingGuides(cctx) mounts the three
 // listeners after cctx.graph/paper are wired. Export-neutral (all internal).
-import { cctx } from './context.js?v=1.14.1';
-import { right, bottom, centerX, centerY } from '../util/geometry.js?v=1.14.1';
+import { cctx } from './context.js?v=1.15.0';
+import { right, bottom, centerX, centerY } from '../util/geometry.js?v=1.15.0';
 
 // ── Tolerances ──────────────────────────────────────────────────────
 const SNAP_THRESHOLD = 8;   // px in model space (edge alignment)
@@ -31,24 +31,46 @@ const SPACING_SNAP_TOL = 4;
 let _spacingDragContext = null;
 let guideLayer = null;       // the <g class="sf-alignment-guides"> overlay
 
-function buildSpacingDragContext(moved) {
+// Background / group shapes that don't share rhythm with ordinary nodes. When an
+// ORDINARY element is dragged these are skipped as peers (an object shouldn't space
+// itself against a backdrop Zone). But when one of THESE is dragged it measures rhythm
+// against its OWN type — so Layer zones / Pools / Notes can be spaced evenly against
+// each other (the "keep layouts equidistant" case).
+const NON_RHYTHM_TYPES = new Set([
+  'sf.Zone', 'sf.TextLabel', 'sf.Note', 'sf.BpmnPool',
+  'sf.GanttTimeline', 'sf.GanttGroup',
+]);
+
+function buildSpacingDragContext(moved, originParent) {
   const { graph } = cctx;
   if (!moved) return null;
-  const movedParent = moved.get('parent') || null;
-  const NON_RHYTHM_TYPES = new Set([
-    'sf.Zone', 'sf.TextLabel', 'sf.Note', 'sf.BpmnPool',
-    'sf.GanttTimeline', 'sf.GanttGroup',
-  ]);
+  // A real drag of an embedded child detaches it (JointJS embeddingMode sets the
+  // child's parent → null for the duration of the drag, re-embedding on drop). If
+  // we read the *live* parent here it's null, so the still-embedded siblings (which
+  // keep parent === zone) never match and the rhythm helper goes dark inside a
+  // Zone/Container/Layer. Match against the parent captured at pointerdown instead.
+  const homeParent = originParent !== undefined ? originParent : (moved.get('parent') || null);
+  const movedType = moved.get('type');
+  const movedIsGroup = NON_RHYTHM_TYPES.has(movedType);
   const peers = graph.getElements()
     .filter(el => {
       if (el.id === moved.id) return false;
+      if (el.id === homeParent) return false;          // never the container itself
       if (el.isEmbeddedIn(moved)) return false;
       if (moved.isEmbeddedIn(el)) return false;
-      if (NON_RHYTHM_TYPES.has(el.get('type'))) return false;
-      return (el.get('parent') || null) === movedParent;
+      if (movedIsGroup) {
+        // Dragging a Zone/Pool/Note/etc → rhythm against the SAME type only, so e.g.
+        // Layer zones can be spaced evenly against each other.
+        if (el.get('type') !== movedType) return false;
+      } else if (NON_RHYTHM_TYPES.has(el.get('type'))) {
+        return false;                                  // ordinary node ignores backdrops
+      }
+      return (el.get('parent') || null) === homeParent;
     })
     .map(el => ({ id: el.id, bb: el.getBBox() }));
-  return peers.length >= 2 ? { peers } : null;
+  // Always return the context (peers may be empty) so the home parent stays
+  // available to the edge-alignment pass; the spacing pass gates on peers.length.
+  return { peers, originParent: homeParent };
 }
 
 // Look for a sequential rhythm where the dragged element extends or sits inside
@@ -262,7 +284,9 @@ export function registerSpacingGuides(cctx) {
   paper.on('element:pointerdown', (cellView) => {
     const moved = cellView?.model;
     if (!moved) { _spacingDragContext = null; return; }
-    _spacingDragContext = { pendingForId: moved.id };
+    // Capture the home parent NOW — by the first pointermove an embedded child has
+    // already been detached by embeddingMode, so this is our only chance to read it.
+    _spacingDragContext = { pendingForId: moved.id, originParent: moved.get('parent') || null };
   });
   // Clear the drag cache AND the guide overlay on drop (the activation-lifeline
   // snap keeps its own element:pointerup in canvas.js).
@@ -274,17 +298,33 @@ export function registerSpacingGuides(cctx) {
   paper.on('element:pointermove', (cellView) => {
     clearGuides();
     const movedEl = cellView.model;
-    // Skip snap-to-grid for embedded children — they move with their parent
-    // Also skip for elements with embedded children to prevent drift
-    if (movedEl.get('parent') || movedEl.getEmbeddedCells().length) return;
-    // Lazy-build the spacing context on the first frame of the drag.
+    // Guides are computed/drawn for everyone (so distance helpers show inside a Layer and
+    // between Layer zones). The position SNAP is suppressed for ordinary containers whose
+    // children shouldn't be tugged — but NOT for Layer/group shapes (Zones, Pools…): for
+    // those, snapping the container to an even rhythm and carrying its children along is
+    // exactly the "space layouts equidistantly" intent.
+    const movedIsGroup = NON_RHYTHM_TYPES.has(movedEl.get('type'));
+    const skipSnap = movedEl.getEmbeddedCells().length > 0 && !movedIsGroup;
+    // Lazy-build the spacing context on the first frame of the drag, passing the
+    // parent captured at pointerdown (the live parent is already null by now).
     if (_spacingDragContext?.pendingForId === movedEl.id) {
-      _spacingDragContext = buildSpacingDragContext(movedEl);
+      _spacingDragContext = buildSpacingDragContext(movedEl, _spacingDragContext.originParent);
     }
+    // The home container (if any) is detached from movedEl during the drag, so
+    // isEmbeddedIn() no longer excludes it — drop it explicitly so the child never
+    // edge-aligns to the very Zone/Container it sits inside.
+    const homeParent = _spacingDragContext?.originParent || null;
     const movedBBox = movedEl.getBBox();
-    const allElements = graph.getElements().filter(el =>
-      el.id !== movedEl.id && !el.isEmbeddedIn(movedEl) && !movedEl.isEmbeddedIn(el)
-    );
+    const movedType = movedEl.get('type');
+    const allElements = graph.getElements().filter(el => {
+      if (el.id === movedEl.id || el.id === homeParent) return false;
+      if (el.isEmbeddedIn(movedEl) || movedEl.isEmbeddedIn(el)) return false;
+      // When dragging a Zone/Pool/group, align only against the SAME type — otherwise the
+      // children sitting inside OTHER zones pollute edge-alignment, and a stray child-edge
+      // match suppresses the equal-distance (spacing) dimension between the zones.
+      if (movedIsGroup && el.get('type') !== movedType) return false;
+      return true;
+    });
 
     // Find best snap for X and Y independently, tracking which edges matched
     let bestX = null; // { dx, snapX, bb } — closest edge/centre match on X
@@ -338,9 +378,10 @@ export function registerSpacingGuides(cctx) {
     const dx = bestX ? bestX.dx : 0;
     const dy = bestY ? bestY.dx : 0;
 
-    if (dx !== 0 || dy !== 0) {
-      const pos = movedEl.position();
-      movedEl.position(pos.x + dx, pos.y + dy, { skipHistory: true });
+    if (!skipSnap && (dx !== 0 || dy !== 0)) {
+      // translate (not position) so a snapped group carries its embedded children —
+      // position() would move only the parent and leave the children behind.
+      movedEl.translate(dx, dy, { skipHistory: true });
     }
 
     // Draw guides only for the snapped axis, plus any secondary edge matches on the same element
@@ -382,7 +423,7 @@ export function registerSpacingGuides(cctx) {
     // don't draw both kinds of guide on the same axis. Magnetic pull (within
     // SPACING_SNAP_TOL) lands the labels on an exact rhythm; same skipHistory
     // contract as the edge-alignment snap (part of the active drag, not an undo).
-    if (_spacingDragContext?.peers) {
+    if (_spacingDragContext?.peers?.length >= 2) {
       const peers = _spacingDragContext.peers;
       // X-axis spacing
       if (!bestX) {
@@ -390,9 +431,8 @@ export function registerSpacingGuides(cctx) {
         if (matchX) {
           const movedCx = centerX(finalBBox);
           const dxSnap = matchX.expectedCenter - movedCx;
-          if (Math.abs(dxSnap) > 0.5 && Math.abs(dxSnap) < SPACING_SNAP_TOL) {
-            const pos = movedEl.position();
-            movedEl.position(pos.x + dxSnap, pos.y, { skipHistory: true });
+          if (!skipSnap && Math.abs(dxSnap) > 0.5 && Math.abs(dxSnap) < SPACING_SNAP_TOL) {
+            movedEl.translate(dxSnap, 0, { skipHistory: true });   // carry children
           }
           drawSpacingDimensions(matchX, 'x', movedEl.getBBox());
         }
@@ -404,9 +444,8 @@ export function registerSpacingGuides(cctx) {
         if (matchY) {
           const movedCy = centerY(fresh);
           const dySnap = matchY.expectedCenter - movedCy;
-          if (Math.abs(dySnap) > 0.5 && Math.abs(dySnap) < SPACING_SNAP_TOL) {
-            const pos = movedEl.position();
-            movedEl.position(pos.x, pos.y + dySnap, { skipHistory: true });
+          if (!skipSnap && Math.abs(dySnap) > 0.5 && Math.abs(dySnap) < SPACING_SNAP_TOL) {
+            movedEl.translate(0, dySnap, { skipHistory: true });   // carry children
           }
           drawSpacingDimensions(matchY, 'y', movedEl.getBBox());
         }

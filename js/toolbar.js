@@ -1,13 +1,14 @@
 // Toolbar — wires all button clicks to module actions
 // Also keeps undo/redo button states in sync
 
-import { diagramHasImage } from './image-component.js?v=1.14.1';
-import { showToast, showError, confirmModal, trapFocus, buildModal } from './feedback.js?v=1.14.1';
-import { resizeDataObjectToFit } from './components.js?v=1.14.1';
-import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, isConnectorGroupingEnabled, setConnectorGroupingEnabled, rerouteAllLinks, isCrossingBumpsEnabled, setCrossingBumpsEnabled, isFocusDimmingEnabled, setFocusDimmingEnabled } from './canvas.js?v=1.14.1';
-import { escHtml, formatRelativeTime } from './util.js?v=1.14.1';
+import { diagramHasImage } from './image-component.js?v=1.15.0';
+import { showToast, showError, confirmModal, trapFocus, buildModal } from './feedback.js?v=1.15.0';
+import { resizeDataObjectToFit } from './components.js?v=1.15.0';
+import { isAutoSizingEnabled, setAutoSizingEnabled, refitAllParents, isConnectorGroupingEnabled, setConnectorGroupingEnabled, rerouteAllLinks, isCrossingBumpsEnabled, setCrossingBumpsEnabled, isFocusDimmingEnabled, setFocusDimmingEnabled } from './canvas.js?v=1.15.0';
+import { escHtml, formatRelativeTime } from './util.js?v=1.15.0';
 
 let modules = {};
+let _stencilWasOpenBeforeTable = false;   // restore stencil state when leaving Table mode
 
 export function init(_modules) {
   modules = _modules;
@@ -126,6 +127,17 @@ export function init(_modules) {
     applyDisplayFlagToAll('showFieldLengths', !current);
     updateDisplayToggleLabels();
   });
+  // Object Relationships (Data Mapping) — view-only filter that hides/shows the
+  // header-level ER relationship links so field-level mapping curves can be audited
+  // in isolation. Drives canvas.setObjectRelationshipsVisible (no model mutation).
+  const btnObjectRels = document.getElementById('btn-display-object-rels');
+  btnObjectRels?.addEventListener('click', () => {
+    const next = !modules.canvas.isObjectRelationshipsVisible();
+    modules.canvas.setObjectRelationshipsVisible(next);
+    btnObjectRels.classList.toggle('is-checked', next);
+  });
+  // (Data Cloud mapping is now its own diagram TYPE — "Data Mapping" — so the old
+  // per-diagram mapping-mode toggle was removed from the Display menu.)
   // Auto Sizing toggle (v1.11.6) — applies to all diagram types that support
   // embedding. Flipping the flag immediately re-fits every parent against its
   // current children (so re-enabling tightens everything that drifted while
@@ -226,6 +238,26 @@ export function init(_modules) {
     updateGanttToggleLabels();
   });
 
+  // Gantt timeline week controls — apply to every GanttTimeline on the tab.
+  // First-day-of-week cycles Sun→Sat; week-number toggles "W23" vs the start-date label.
+  btn('btn-gantt-week-start').addEventListener('click', () => {
+    const opts = [1, 0, 6]; // Monday (ISO 8601) → Sunday (Americas) → Saturday (MENA)
+    const cur = ((Number(getGanttTimelineSetting('weekStartDay', 1)) % 7) + 7) % 7;
+    applyToAllGanttTimelines('weekStartDay', opts[(opts.indexOf(cur) + 1) % opts.length]);
+    updateGanttToggleLabels();
+  });
+  btn('btn-gantt-weekend-start').addEventListener('click', () => {
+    const opts = [6, 5]; // Saturday (Sat–Sun weekend) → Friday (Fri–Sat weekend)
+    const cur = ((Number(getGanttTimelineSetting('weekendStartDay', 6)) % 7) + 7) % 7;
+    applyToAllGanttTimelines('weekendStartDay', opts[(opts.indexOf(cur) + 1) % opts.length]);
+    updateGanttToggleLabels();
+  });
+  btn('btn-gantt-week-number').addEventListener('click', () => {
+    const cur = getGanttTimelineSetting('showWeekNumber', false) === true;
+    applyToAllGanttTimelines('showWeekNumber', !cur);
+    updateGanttToggleLabels();
+  });
+
   // Sequence display toggles — diagram-wide (applies to every Participant)
   btn('btn-sequence-bottom-labels').addEventListener('click', () => {
     const current = isDisplayFlagOn('showBottomLabel');
@@ -267,14 +299,35 @@ export function init(_modules) {
   const runAutoLayout = (direction) => {
     const type = modules.tabs.getActiveTabType?.();
     modules.history.recordPositionsBatch(() => {
-      if (type === 'process') {
-        try {
-          modules.mermaidImport.hierarchicalLayout(modules.graph, null, direction);
-          modules.mermaidImport.snapLinksToPorts(modules.graph, direction);
-          requestAnimationFrame(() => { try { modules.canvas.fitContent(); } catch {} });
-        } catch (err) {
-          console.warn('Process hierarchical layout failed, falling back:', err);
+      if (type === 'datamapping') {
+        // Dedicated lane layout: top-aligned lanes + 36px-spaced objects inside Layer
+        // zones. Mapping links are field-port anchored, so DON'T snap them to side ports.
+        modules.canvas.applyDataMappingLayout();
+      } else if (type === 'process') {
+        // BPMN pools / subprocesses / loops are embedding CONTAINERS. The mermaid
+        // hierarchicalLayout lays every element out as a flat flow node — it positions a
+        // container as a disconnected node while its children take their flow levels, so the
+        // children spill OUTSIDE the container (and the top-anchored auto-fit can't pull the
+        // frame back up). When the diagram uses containment, defer to the generic group-aware
+        // autoLayout: it treats each container as a rigid unit (children translate along, so
+        // they stay inside) and arranges the units + free nodes — and it's the undo-tested
+        // path. A flat process (no containers / embedding) keeps the nicer hierarchical flow.
+        const usesContainment = modules.graph.getElements().some(el => {
+          const t = el.get('type');
+          return t === 'sf.BpmnPool' || t === 'sf.BpmnSubprocess' || t === 'sf.BpmnLoop' || !!el.get('parent');
+        });
+        if (usesContainment) {
           modules.canvas.autoLayout(direction);
+          try { modules.mermaidImport.snapLinksToPorts(modules.graph, direction); } catch {}
+        } else {
+          try {
+            modules.mermaidImport.hierarchicalLayout(modules.graph, null, direction);
+            modules.mermaidImport.snapLinksToPorts(modules.graph, direction);
+            requestAnimationFrame(() => { try { modules.canvas.fitContent(); } catch {} });
+          } catch (err) {
+            console.warn('Process hierarchical layout failed, falling back:', err);
+            modules.canvas.autoLayout(direction);
+          }
         }
       } else {
         modules.canvas.autoLayout(direction);
@@ -286,12 +339,27 @@ export function init(_modules) {
   btn('btn-auto-layout-h').addEventListener('click', () => runAutoLayout('horizontal'));
   btn('btn-auto-layout-v').addEventListener('click', () => runAutoLayout('vertical'));
 
-  // Animate Connectors toggle
+  // Diagram | Table view switch (Data Mapping)
+  btn('btn-view-diagram').addEventListener('click', () => setViewMode('diagram'));
+  btn('btn-view-table').addEventListener('click', () => setViewMode('table'));
+
+  // Map bridge (Data Model only) — clone this model into a new Data Mapping diagram,
+  // wrapping every object in a default "Source" layer. tabs.cloneToMappingTab() owns
+  // the deep-clone + atomic load; here we just trigger it and confirm via a toast.
+  document.getElementById('btn-map-bridge')?.addEventListener('click', () => {
+    const newId = modules.tabs?.cloneToMappingTab?.();
+    if (newId) showToast('Mapped — objects cloned into a new Data Mapping diagram.', 'success');
+    else showToast('Nothing to map — add at least one object first.', 'info');
+  });
+
+  // Animate Connectors toggle — a standard Display checkbox (default OFF). The
+  // label is fixed; the checkbox tick reflects state (no more textContent swap,
+  // which wiped the icon). While on, the PNG export becomes a GIF and the
+  // static-only WEBP export is hidden — see updateExportButtons().
   btn('btn-animate-flow').addEventListener('click', () => {
     const paperEl = document.getElementById('paper');
     const isOn = paperEl.classList.toggle('sf-animate-flow');
-    const animBtn = document.getElementById('btn-animate-flow');
-    if (animBtn) animBtn.textContent = isOn ? 'Stop Animation' : 'Animate Connectors';
+    document.getElementById('btn-animate-flow')?.classList.toggle('is-checked', isOn);
     updateExportButtons(isOn);
     if (isOn) startFlowAnimation(); else stopFlowAnimation();
   });
@@ -1032,6 +1100,7 @@ function getDiagramTypeIcon(type) {
     architecture: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="5" height="5" rx="1"/><rect x="10" y="1" width="5" height="5" rx="1"/><rect x="5.5" y="10" width="5" height="5" rx="1"/><path d="M3.5 6v2h9V6M8 8v2" stroke="currentColor" stroke-width="1" fill="none"/></svg>',
     process: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><circle cx="3" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="7" y="5.5" width="5" height="5" rx="1"/><circle cx="3" cy="8" r="1"/><line x1="5.5" y1="8" x2="7" y2="8" stroke="currentColor" stroke-width="1.5"/></svg>',
     datamodel: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="1" width="6" height="3" rx="1"/><rect x="9" y="7" width="6" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="7" width="6" height="3" rx="1"/></svg>',
+    datamapping: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="0.5" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="0.5" y="2" width="5" height="3" rx="1"/><rect x="10.5" y="2" width="5" height="12" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="10.5" y="2" width="5" height="3" rx="1"/><path d="M5.5 8 L10 8 M8.5 6.5 L10 8 L8.5 9.5" fill="none" stroke="currentColor" stroke-width="1"/><path d="M5.5 11 L10 11" stroke="currentColor" stroke-width="1" opacity="0.55"/></svg>',
     gantt: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2" width="8" height="3" rx="1"/><rect x="4" y="7" width="9" height="3" rx="1" opacity="0.7"/><rect x="7" y="12" width="6" height="3" rx="1" opacity="0.5"/></svg>',
     org: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="5" y="1" width="6" height="4" rx="1"/><rect x="0.5" y="10" width="6" height="4" rx="1" opacity="0.7"/><rect x="9.5" y="10" width="6" height="4" rx="1" opacity="0.7"/><path d="M8 5v2H3.5V10M8 7h4.5V10" stroke="currentColor" stroke-width="1" fill="none"/></svg>',
   };
@@ -1141,6 +1210,29 @@ function formatSaveMeta(save) {
   return `Saved ${savedAgo} · ${expiryStr}`;
 }
 
+// ── Diagram | Table view switch (Data Mapping) ──────────────────────────────
+function setViewMode(mode) {
+  const diag = document.getElementById('btn-view-diagram');
+  const tab = document.getElementById('btn-view-table');
+  const isTable = mode === 'table';
+  const wasTable = !!modules.tableView?.isActive?.();
+  if (isTable) modules.tableView?.show?.(); else modules.tableView?.hide?.();
+  // Auto-hide the side panels in Table mode (the table wants the full width); restore the
+  // stencil on the way back to Diagram (or any tab change away from Table). Act only on a
+  // real transition so repeated diagram-mode calls don't clobber a manually-closed stencil.
+  if (isTable && !wasTable) {
+    _stencilWasOpenBeforeTable = modules.stencil ? !modules.stencil.isHidden() : false;
+    modules.stencil?.hide?.();
+    modules.selection?.clearSelection?.();   // hides the properties inspector
+  } else if (!isTable && wasTable && _stencilWasOpenBeforeTable) {
+    modules.stencil?.show?.();
+  }
+  diag?.classList.toggle('sf-toolbar__segmented-option--active', !isTable);
+  diag?.setAttribute('aria-checked', String(!isTable));
+  tab?.classList.toggle('sf-toolbar__segmented-option--active', isTable);
+  tab?.setAttribute('aria-checked', String(isTable));
+}
+
 function updateDisplayMenuVisibility() {
   const dd = document.getElementById('display-dropdown');
   if (!dd || !modules.tabs) return;
@@ -1148,16 +1240,52 @@ function updateDisplayMenuVisibility() {
 
   const isGantt = type === 'gantt';
   const isDataModel = type === 'datamodel';
+  const isDataMapping = type === 'datamapping';
+  const isDataObjectType = isDataModel || isDataMapping; // both use sf.DataObject
   const isSequence = type === 'sequence';
+
+  // Diagram | Table view switch — shown only for Data Mapping. Use inline display (not
+  // the `hidden` attr): `.sf-toolbar__group { display:flex }` outranks `[hidden]`, so the
+  // attribute alone wouldn't hide it. Reset to the Diagram view on any tab change so the
+  // table never lingers showing another tab's data.
+  const vsGroup = document.getElementById('view-switch-group');
+  const vsSep = document.getElementById('view-switch-sep');
+  if (vsGroup) vsGroup.style.display = isDataMapping ? '' : 'none';
+  if (vsSep) vsSep.style.display = isDataMapping ? '' : 'none';
+  if (modules.tableView?.isActive?.()) setViewMode('diagram');
+
+  // Map bridge button — shown only for Data Model (clones it into a new Data Mapping
+  // diagram). Sits in the same toolbar slot as the view switch; same inline-display rule.
+  const mapGroup = document.getElementById('map-bridge-group');
+  const mapSep = document.getElementById('map-bridge-sep');
+  if (mapGroup) mapGroup.style.display = isDataModel ? '' : 'none';
+  if (mapSep) mapSep.style.display = isDataModel ? '' : 'none';
 
   // Show/hide Gantt-specific options
   const ganttSep = document.getElementById('display-gantt-separator');
   const ganttAssignee = document.getElementById('btn-gantt-assignee');
   const ganttProgress = document.getElementById('btn-gantt-progress');
+  const ganttWeekStart = document.getElementById('btn-gantt-week-start');
+  const ganttWeekendStart = document.getElementById('btn-gantt-weekend-start');
+  const ganttWeekNumber = document.getElementById('btn-gantt-week-number');
   // Hide gantt separator always — auto-layout buttons (above) and gantt options are mutually exclusive
   if (ganttSep) ganttSep.style.display = 'none';
   if (ganttAssignee) ganttAssignee.style.display = isGantt ? '' : 'none';
   if (ganttProgress) ganttProgress.style.display = isGantt ? '' : 'none';
+  if (ganttWeekStart) ganttWeekStart.style.display = isGantt ? '' : 'none';
+  if (ganttWeekendStart) ganttWeekendStart.style.display = isGantt ? '' : 'none';
+  if (ganttWeekNumber) ganttWeekNumber.style.display = isGantt ? '' : 'none';
+
+  // The four "canvas-behaviour" toggles at the top (Auto-Fit Containers, Distributed
+  // Connectors, Crossing Bumps, Focus Dimming) are meaningless for a Gantt chart — it
+  // has no links to group/bump/dim, and auto-fit fights the timeline's own sizing and
+  // visibly breaks it. Hide them (+ their separator) on Gantt. They stay global per-
+  // browser prefs untouched for other types; auto-fit is additionally made inert for
+  // the timeline at the source (embedding.js skips sf.GanttTimeline).
+  ['btn-display-auto-size', 'btn-display-connector-grouping', 'btn-display-crossing-bumps', 'btn-display-focus-dimming']
+    .forEach(id => { const b = document.getElementById(id); if (b) b.style.display = isGantt ? 'none' : ''; });
+  const autoSizeSep = document.getElementById('display-auto-size-separator');
+  if (autoSizeSep) autoSizeSep.style.display = isGantt ? 'none' : '';
 
   // Hide auto-layout buttons for Gantt (timeline-driven) and Sequence
   // (positions are meaningful along the lifeline axes).
@@ -1165,22 +1293,44 @@ function updateDisplayMenuVisibility() {
   const autoH = document.getElementById('btn-auto-layout-h');
   const autoV = document.getElementById('btn-auto-layout-v');
   if (autoH) autoH.style.display = hideAutoLayout ? 'none' : '';
-  if (autoV) autoV.style.display = hideAutoLayout ? 'none' : '';
+  // Data Mapping flows left→right across layers, so only horizontal layout applies:
+  // hide the vertical option and drop the "Horizontal" qualifier from the label.
+  if (autoV) autoV.style.display = (hideAutoLayout || isDataMapping) ? 'none' : '';
+  const hLabel = document.getElementById('auto-layout-h-label');
+  if (hLabel) hLabel.textContent = isDataMapping ? 'Auto Layout' : 'Horizontal Auto Layout';
 
-  // Show data-model-specific options only for datamodel tabs
+  // DataObject display options — shown for both Data Model and Data Mapping tabs
+  // (both use sf.DataObject). Mapping is its own diagram type now, so there's no
+  // per-diagram mapping-mode toggle here.
   const apiBtn = document.getElementById('btn-display-api');
   const lenBtn = document.getElementById('btn-display-lengths');
   const keysBtn = document.getElementById('btn-display-keys-only');
   const dmSep = document.getElementById('display-dm-separator');
-  if (apiBtn) apiBtn.style.display = isDataModel ? '' : 'none';
-  if (lenBtn) lenBtn.style.display = isDataModel ? '' : 'none';
-  if (keysBtn) keysBtn.style.display = isDataModel ? '' : 'none';
-  if (dmSep) dmSep.style.display = isDataModel ? '' : 'none';
+  if (apiBtn) apiBtn.style.display = isDataObjectType ? '' : 'none';
+  if (lenBtn) lenBtn.style.display = isDataObjectType ? '' : 'none';
+  if (keysBtn) keysBtn.style.display = isDataObjectType ? '' : 'none';
+  // In a Data Mapping diagram the key-fields toggle filters to MAPPED fields.
+  const koLabel = document.getElementById('keys-only-label');
+  if (koLabel) koLabel.textContent = isDataMapping ? 'Mapped Fields Only' : 'Key Fields Only';
+  // ALWAYS shown — this separator divides the unchecked toggle group (the DataObject
+  // field toggles when present, always ending with Animate Connectors below) from the
+  // Auto Layout actions / type-specific options beneath it, in EVERY diagram type.
+  if (dmSep) dmSep.style.display = '';
 
-  // Sequence-specific toggles — diagram-wide bottom participant label toggle.
-  // Sits ABOVE Animate Connectors; the flow separator below doubles as the
-  // divider between them. Auto-layout is hidden for Sequence, so no extra
-  // separator is needed above this button.
+  // Object Relationships toggle — Data Mapping only. It's a view-only filter, so reset
+  // it to visible (default ON) on each tab change and reflect that in the checkmark.
+  // (updateDisplayMenuVisibility only runs on tab change / init, never on menu open.)
+  const relsBtn = document.getElementById('btn-display-object-rels');
+  if (relsBtn) {
+    relsBtn.style.display = isDataMapping ? '' : 'none';
+    if (isDataMapping) {
+      modules.canvas?.setObjectRelationshipsVisible?.(true);
+      relsBtn.classList.add('is-checked');
+    }
+  }
+
+  // Sequence-specific toggles — diagram-wide bottom participant label toggle,
+  // shown above the sequence Auto Layout action (its own separator below).
   const seqBottomBtn = document.getElementById('btn-sequence-bottom-labels');
   if (seqBottomBtn) seqBottomBtn.style.display = isSequence ? '' : 'none';
   const seqSep = document.getElementById('display-sequence-separator');
@@ -1188,24 +1338,27 @@ function updateDisplayMenuVisibility() {
   const seqAutoBtn = document.getElementById('btn-sequence-auto-layout');
   if (seqAutoBtn) seqAutoBtn.style.display = isSequence ? '' : 'none';
 
-  // Show animate connectors for architecture, process, datamodel, sequence
-  const showFlow = type === 'architecture' || type === 'process' || type === 'datamodel' || type === 'sequence';
-  const flowSep = document.getElementById('display-flow-separator');
+  // Animate Connectors — an UNCHECKED-default toggle available in EVERY diagram
+  // type (per request: even Org / Gantt, not just "flow" diagrams). It stays at its
+  // HTML home as the LAST item of the unchecked toggle group (after the DataObject
+  // field toggles when present); the always-shown dm-separator below keeps it
+  // SEPARATED from the Auto Layout actions. No per-type reposition — being visually
+  // separated from Auto Layout is the desired look. Because it's shown everywhere,
+  // the animation is no longer force-stopped on tab change; it's a transient global
+  // view state the user clears via the checkbox.
   const flowBtn = document.getElementById('btn-animate-flow');
-  // The flow separator needs to appear whenever there's any visible item
-  // above Animate Connectors — that's auto-layout (arch/process/datamodel)
-  // OR the sequence bottom-labels toggle (sequence).
-  if (flowSep) flowSep.style.display = showFlow ? '' : 'none';
-  if (flowBtn) flowBtn.style.display = showFlow ? '' : 'none';
+  if (flowBtn) flowBtn.style.display = '';
 
-  // Stop animation and reset export buttons when switching away from supported types
-  if (!showFlow) {
-    const paperEl = document.getElementById('paper');
-    if (paperEl?.classList.contains('sf-animate-flow')) {
-      paperEl.classList.remove('sf-animate-flow');
-      if (flowBtn) flowBtn.textContent = 'Animate Connectors';
-      updateExportButtons(false);
-      stopFlowAnimation();
+  // Sequence: keep the toggles in ONE group. Bottom Participant Labels sits directly
+  // ABOVE Animate Connectors (no divider between them, Animate stays the last toggle),
+  // and the sequence separator becomes the single divider before the sequence Auto
+  // Layout. So move Bottom Labels just above Animate and hide the (otherwise always-on)
+  // dm-separator for this type — otherwise it + the sequence separator would split the
+  // toggles into three stacked single-item groups.
+  if (isSequence) {
+    if (dmSep) dmSep.style.display = 'none';
+    if (seqBottomBtn && flowBtn && seqBottomBtn.nextElementSibling !== flowBtn) {
+      flowBtn.parentNode.insertBefore(seqBottomBtn, flowBtn);
     }
   }
 
@@ -1215,7 +1368,7 @@ function updateDisplayMenuVisibility() {
     return;
   }
   dd.style.display = '';
-  if (isDataModel) updateDisplayToggleLabels();
+  if (isDataObjectType) updateDisplayToggleLabels();
   if (isSequence) updateSequenceToggleLabels();
 }
 
@@ -1233,11 +1386,45 @@ function updateDisplayToggleLabels() {
   refreshDisplayDotIndicator();
 }
 
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// GanttTimeline-only settings (weekStartDay, showWeekNumber) live as model props on the
+// timeline cell — read from the first timeline on the tab (or a default when there is none).
+function getGanttTimelineSetting(prop, fallback) {
+  const graph = modules.graph;
+  if (!graph) return fallback;
+  const tl = graph.getElements().find(el => el.get('type') === 'sf.GanttTimeline');
+  return tl ? (tl.get(prop) ?? fallback) : fallback;
+}
+
+// Apply a timeline setting to EVERY GanttTimeline on the tab, as a single undo entry.
+function applyToAllGanttTimelines(prop, value) {
+  const graph = modules.graph;
+  if (!graph) return;
+  const timelines = graph.getElements().filter(el => el.get('type') === 'sf.GanttTimeline');
+  if (!timelines.length) return;
+  modules.history.startBatch();
+  try { timelines.forEach(tl => tl.set(prop, value)); }
+  finally { modules.history.endBatch(); }
+}
+
 function updateGanttToggleLabels() {
   document.getElementById('btn-gantt-assignee')
     ?.classList.toggle('is-checked', isDisplayFlagOn('showAssignee'));
   document.getElementById('btn-gantt-progress')
     ?.classList.toggle('is-checked', isDisplayFlagOn('showProgress'));
+  document.getElementById('btn-gantt-week-number')
+    ?.classList.toggle('is-checked', getGanttTimelineSetting('showWeekNumber', false) === true);
+  const wsLabel = document.getElementById('gantt-week-start-label');
+  if (wsLabel) {
+    const wsd = ((Number(getGanttTimelineSetting('weekStartDay', 1)) % 7) + 7) % 7;
+    wsLabel.textContent = `Week Starts: ${WEEKDAY_NAMES[wsd]}`;
+  }
+  const weLabel = document.getElementById('gantt-weekend-start-label');
+  if (weLabel) {
+    const wesd = ((Number(getGanttTimelineSetting('weekendStartDay', 6)) % 7) + 7) % 7;
+    weLabel.textContent = `Weekend Starts: ${WEEKDAY_NAMES[wesd]}`;
+  }
   refreshDisplayDotIndicator();
 }
 
@@ -1274,6 +1461,9 @@ function refreshDisplayDotIndicator() {
     hasFlagFlippedOff('showAssignee') ||
     hasFlagFlippedOff('showProgress') ||
     hasFlagFlippedOff('showBottomLabel');
+  // NOTE: the Gantt timeline view-preferences (Week Starts / Weekend Starts / Week Numbers)
+  // are deliberately NOT counted here — they're regional/labelling choices that don't hide
+  // any content, so they must not light the Display "eye" indicator.
   btn.classList.toggle('sf-toolbar__button--has-active', nonDefault);
   // A6 (v1.12.0) — extend the tooltip when the dot is showing so the
   // amber indicator isn't conveyed by colour alone (WCAG 1.4.1). Strips
@@ -1559,11 +1749,32 @@ function syncFlowOverlays() {
   }
 }
 
+// Update only a menu item's text label, PRESERVING its leading <svg> icon.
+// Setting `btn.textContent` would replace ALL child nodes including the icon —
+// that was the "Save to GIF lost its icon while animating" bug.
+function setMenuItemLabel(btnEl, label) {
+  if (!btnEl) return;
+  for (const node of btnEl.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
+      node.textContent = ` ${label}`;
+      return;
+    }
+  }
+  btnEl.appendChild(document.createTextNode(` ${label}`));
+}
+
 function updateExportButtons(animating) {
-  const pngBtn = document.getElementById('btn-save-png');
-  const pngTBtn = document.getElementById('btn-save-png-t');
-  if (pngBtn) pngBtn.textContent = animating ? 'Save to GIF' : 'Save to PNG';
-  if (pngTBtn) pngTBtn.textContent = animating ? 'Save to transparent GIF' : 'Save to transparent PNG';
+  // PNG export becomes a GIF while the flow is animating (the btn-save-png click
+  // handlers in init() route to exportGIF when #paper has .sf-animate-flow). Relabel
+  // via setMenuItemLabel so the image icon survives the swap.
+  setMenuItemLabel(document.getElementById('btn-save-png'), animating ? 'Save to GIF' : 'Save to PNG');
+  setMenuItemLabel(document.getElementById('btn-save-png-t'), animating ? 'Save to transparent GIF' : 'Save to transparent PNG');
+  // WEBP export captures only a single static frame, so it can't show the flow —
+  // hide both WEBP options while animating (GIF is the animated raster export).
+  const webp = document.getElementById('btn-save-webp');
+  const webpT = document.getElementById('btn-save-webp-t');
+  if (webp) webp.style.display = animating ? 'none' : '';
+  if (webpT) webpT.style.display = animating ? 'none' : '';
 }
 
 function btn(id) {

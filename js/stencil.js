@@ -1,12 +1,14 @@
 // Stencil panel — draggable component library
 // Organizes built-in components + saved templates by category, search, drag-to-canvas
 
-import { COMPONENT_CATEGORIES, BPMN_CATEGORIES, DATAMODEL_CATEGORIES, GANTT_CATEGORIES, ORG_CATEGORIES, SEQUENCE_CATEGORIES, createElementFromComponent } from './components.js?v=1.14.1';
-import { getAllIcons, getCategories } from './icons.js?v=1.14.1';
-import { updateSimpleNodeLayout, snapActivationToLifeline, canEmbed, findHaloParent, tuckChildInside, showDropGhost, hideDropGhost } from './canvas.js?v=1.14.1';
-import { startImageAddFlow } from './image-component.js?v=1.14.1';
-import { getTemplates, deleteTemplate, renderTemplateThumbnail, instantiateTemplate, onTemplatesChange } from './templates.js?v=1.14.1';
-import { confirmModal } from './feedback.js?v=1.14.1';
+import { COMPONENT_CATEGORIES, BPMN_CATEGORIES, DATAMODEL_CATEGORIES, DATAMAPPING_CATEGORIES, GANTT_CATEGORIES, ORG_CATEGORIES, SEQUENCE_CATEGORIES, createElementFromComponent } from './components.js?v=1.15.0';
+import { getAllIcons, getCategories } from './icons.js?v=1.15.0';
+import { updateSimpleNodeLayout, snapActivationToLifeline, canEmbed, findHaloParent, tuckChildInside, showDropGhost, hideDropGhost } from './canvas.js?v=1.15.0';
+import { startImageAddFlow } from './image-component.js?v=1.15.0';
+import * as history from './history.js?v=1.15.0';
+import { getTemplates, deleteTemplate, renderTemplateThumbnail, instantiateTemplate, onTemplatesChange } from './templates.js?v=1.15.0';
+import { confirmModal } from './feedback.js?v=1.15.0';
+import { DIAGRAM_TYPES } from './tabs.js?v=1.15.0'; // reader-friendly workspace labels (no cycle: tabs ⊄ stencil)
 
 let graph, paper;
 let panelEl, searchEl, bodyEl;
@@ -22,7 +24,8 @@ export function init(_graph, _paper) {
   renderCategories();
 
   // Re-render when the saved-template library changes (save / delete) so the
-  // "My Templates" category appears, updates its count, or disappears.
+  // "My {Type} Templates" / "My Other Templates" categories appear, update their
+  // counts, or disappear.
   onTemplatesChange(() => renderCategories());
 
   // Gap 17 (v1.12.0) — clear-× button shows when the search has a value;
@@ -89,15 +92,29 @@ export function setDiagramType(type) {
 function renderCategories() {
   bodyEl.innerHTML = '';
 
-  // "My Templates" — user-saved templates (internal name). Global across every
-  // diagram type, pinned above everything else. Only rendered when the library
-  // has at least one entry.
-  const myTemplates = getTemplates();
-  if (myTemplates.length > 0) {
-    bodyEl.appendChild(buildTemplatesSection(myTemplates));
+  // Custom templates — ONE count-aware accordion per diagram type that has saved
+  // templates, pinned ABOVE everything (Generic Shapes etc.). The active workspace's
+  // group sorts first and stays expanded; every other type's group is auto-collapsed.
+  // Types with zero templates render nothing (no dead headers / empty dividers).
+  const allTemplates = getTemplates();
+  if (allTemplates.length > 0) {
+    // Active type first, then the remaining known types in DIAGRAM_TYPES order, then
+    // any legacy/imported type not in the registry (appended last).
+    const knownTypes = Object.keys(DIAGRAM_TYPES);
+    const knownSet = new Set(knownTypes);
+    const orderedKnown = [currentDiagramType, ...knownTypes.filter(t => t !== currentDiagramType)];
+    const unknownTypes = [...new Set(allTemplates.map(t => t.diagramType).filter(t => !knownSet.has(t)))];
+    for (const type of [...orderedKnown, ...unknownTypes]) {
+      const group = allTemplates.filter(t => t.diagramType === type);
+      if (group.length === 0) continue;                         // hide empty types
+      const short = DIAGRAM_TYPES[type]?.short || type || 'Untyped';
+      const collapsed = type !== currentDiagramType;            // expand only the active type's group
+      bodyEl.appendChild(buildTemplatesSection(`My ${short} Templates`, `my-templates-${type || 'untyped'}`, group, collapsed));
+    }
   }
 
   const rawCategories = currentDiagramType === 'process' ? BPMN_CATEGORIES
+                      : currentDiagramType === 'datamapping' ? DATAMAPPING_CATEGORIES
                       : currentDiagramType === 'datamodel' ? DATAMODEL_CATEGORIES
                       : currentDiagramType === 'gantt' ? GANTT_CATEGORIES
                       : currentDiagramType === 'org' ? ORG_CATEGORIES
@@ -163,14 +180,17 @@ function buildComponentSection(category) {
   return section;
 }
 
-// ── My Templates (custom user-saved templates; "template" is the internal name) ──
-
-function buildTemplatesSection(templates) {
+// ── Custom templates (user-saved; "template" is the internal name) ──
+// One reusable section builder, called once per diagram type that has templates —
+// "My {Type} Templates". Header label, categoryId, and initial collapsed state vary
+// (the active workspace's group is expanded, the rest collapsed); everything else
+// (thumbnail snapshot, drag/drop, hover-× delete via buildTemplateItem) is identical.
+function buildTemplatesSection(label, categoryId, templates, collapsed = false) {
   const section = document.createElement('div');
-  section.className = 'sf-stencil__category';
-  section.dataset.categoryId = 'my-templates';
+  section.className = 'sf-stencil__category' + (collapsed ? ' sf-stencil__category--collapsed' : '');
+  section.dataset.categoryId = categoryId;
 
-  const header = buildCategoryHeader('My Templates', templates.length);
+  const header = buildCategoryHeader(label, templates.length);
   header.addEventListener('click', () => {
     section.classList.toggle('sf-stencil__category--collapsed');
   });
@@ -384,16 +404,16 @@ function setupDropZone() {
   const canvasEl = document.getElementById('canvas-container');
 
   // Gap 8 (v1.12.0) — during a stencil dragover, highlight the topmost
-  // container-like cell beneath the cursor by adding the existing
-  // `.available-cell` class (same amber outline the connect-from-port
-  // flow uses). Resets on dragleave/drop. The dragged template's TYPE
-  // isn't available from dragover events (only the MIME type is), so
-  // we walk the cursor-point candidates and highlight the topmost cell
-  // that COULD host a child via `canEmbed`. Imperfect (we don't know
-  // the exact child type until drop) but a useful affordance signal.
+  // container-like cell beneath the cursor with the amber drop-target outline.
+  // Uses its OWN class (`sf-drop-target`, styled in canvas.css), NOT the link-drag
+  // `.available-cell` — that one is port-only now (its body outline was removed
+  // because the body is never a connection target). Resets on dragleave/drop. The
+  // dragged template's TYPE isn't available from dragover events (only the MIME type
+  // is), so we walk the cursor-point candidates and highlight the topmost cell that
+  // COULD host a child via `canEmbed`.
   let _highlightedView = null;
   const clearDropHighlight = () => {
-    if (_highlightedView?.el) _highlightedView.el.classList.remove('available-cell');
+    if (_highlightedView?.el) _highlightedView.el.classList.remove('sf-drop-target');
     _highlightedView = null;
   };
   const refreshDropHighlight = (clientX, clientY) => {
@@ -416,7 +436,7 @@ function setupDropZone() {
     if (next === _highlightedView) return;
     clearDropHighlight();
     if (next?.el) {
-      next.el.classList.add('available-cell');
+      next.el.classList.add('sf-drop-target');
       _highlightedView = next;
     }
   };
@@ -653,29 +673,34 @@ function setDragPreview(evt, template) {
 
 /** After drop, try to embed the element into a container/zone at its position */
 function tryEmbed(element) {
-  const bbox = element.getBBox();
-  const childType = element.get('type');
-  // 1) Exact overlap — topmost valid parent. canEmbed is the single source of
-  //    truth for the type rules, keeping this in lockstep with the canvas-drag
-  //    path and covering every parent type (incl. BpmnLoop, which the old inline
-  //    list missed).
-  const overlap = graph.findModelsInArea(bbox)
-    .filter(el => el.id !== element.id)
-    .sort((a, b) => (b.get('z') || 0) - (a.get('z') || 0));
-  for (const candidate of overlap) {
-    if (canEmbed(candidate.get('type'), childType)) {
-      candidate.embed(element);
-      return;
+  // Suppress change:parent recording: a stencil drop's `add` command already captures
+  // the final embedded state (its JSON re-capture round-trips `parent`), so recording
+  // the embed as its own command would split one drop into two undo steps.
+  history.suppressEmbedTracking(() => {
+    const bbox = element.getBBox();
+    const childType = element.get('type');
+    // 1) Exact overlap — topmost valid parent. canEmbed is the single source of
+    //    truth for the type rules, keeping this in lockstep with the canvas-drag
+    //    path and covering every parent type (incl. BpmnLoop, which the old inline
+    //    list missed).
+    const overlap = graph.findModelsInArea(bbox)
+      .filter(el => el.id !== element.id)
+      .sort((a, b) => (b.get('z') || 0) - (a.get('z') || 0));
+    for (const candidate of overlap) {
+      if (canEmbed(candidate.get('type'), childType)) {
+        candidate.embed(element);
+        return;
+      }
     }
-  }
-  // 2) No overlap — the capture halo lets a drop just OUTSIDE a container-like
-  //    parent (especially just below it) still embed. Tuck the element inside
-  //    first so the on-drop auto-fit grows the parent cleanly around it.
-  const halo = findHaloParent(bbox, childType, element.id);
-  if (halo) {
-    tuckChildInside(element, halo);
-    halo.embed(element);
-  }
+    // 2) No overlap — the capture halo lets a drop just OUTSIDE a container-like
+    //    parent (especially just below it) still embed. Tuck the element inside
+    //    first so the on-drop auto-fit grows the parent cleanly around it.
+    const halo = findHaloParent(bbox, childType, element.id);
+    if (halo) {
+      tuckChildInside(element, halo);
+      halo.embed(element);
+    }
+  });
 }
 
 /** Copy display flags (showLabels, showFieldLengths, keyFieldsOnly) from existing DataObjects to a new one */

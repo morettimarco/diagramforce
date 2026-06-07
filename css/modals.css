@@ -218,7 +218,7 @@
    nor the amber "Back up now" outline button (which fills amber on its own
    :hover rule above; without this exclusion the neutral grey would win on
    specificity and the button would hover grey instead of brand-orange). */
-.sf-modal__btn:not(.sf-modal__btn--primary):not(.sf-modal__btn--danger):not(.sf-export-modal__backup-now):hover {
+.sf-modal__btn:not(.sf-modal__btn--primary):not(.sf-modal__btn--danger):not(.sf-export-modal__backup-now):not(.sf-csv-tools__btn):not(.sf-tour__skip):not(.sf-tour__back):hover {
   background: var(--modal-btn-neutral-bg-hover);
 }
 
@@ -738,10 +738,91 @@
 /* ── Field Editor Modal (Full Edit Mode) ─────────── */
 
 .sf-field-modal__dialog {
-  width: 720px;
+  width: 880px;
   max-width: calc(100vw - 32px);
   max-height: 80vh;
 }
+
+/* Display-menu-style checkbox toggle for the Required / Decommissioned columns —
+   a square that reveals a tick when on (mirrors .sf-toolbar__menu-item--toggle). */
+.sf-field-modal__check-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.sf-field-modal__check-toggle .sf-toolbar__checkbox-tick { opacity: 0; }
+.sf-field-modal__check-toggle.is-checked { color: var(--color-primary); }
+.sf-field-modal__check-toggle.is-checked .sf-toolbar__checkbox-tick { opacity: 1; }
+
+/* Import / Export Fields (CSV) — collapsible panel pinned between the (scrolling)
+   field list and the modal footer. */
+.sf-csv-tools {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border-color);
+  margin: 0 var(--spacing-md);
+  font-size: var(--font-size-sm);
+}
+.sf-csv-tools__summary {
+  cursor: pointer;
+  padding: var(--spacing-sm) 0;
+  font-weight: 600;
+  color: var(--text-secondary);
+  user-select: none;
+  list-style: none;
+}
+.sf-csv-tools__summary::-webkit-details-marker { display: none; }
+.sf-csv-tools__summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform var(--transition-fast);
+}
+.sf-csv-tools[open] .sf-csv-tools__summary::before { transform: rotate(90deg); }
+.sf-csv-tools__body { padding-bottom: var(--spacing-sm); }
+.sf-csv-tools__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
+}
+/* The import/export buttons are tinted brand amber so they read as one group, clearly
+   distinct from the modal's primary (blue) Done and the dashed Add Field. */
+.sf-csv-tools__btn {
+  background: #F6B355;
+  color: #2b2000;
+  border: 1px solid #F6B355;
+}
+.sf-csv-tools__btn:hover { background: #e0a043; border-color: #e0a043; color: #2b2000; }
+/* Push the paste-import action to the right so it reads as separate from the three
+   export / file-import buttons on the left. */
+.sf-csv-tools__import-paste { margin-left: auto; }
+.sf-csv-tools__hint {
+  margin: var(--spacing-sm) 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+.sf-csv-tools__textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+.sf-csv-tools__textarea:focus { outline: none; border-color: var(--color-primary); }
+.sf-csv-tools__status { display: block; font-size: var(--font-size-xs); color: var(--text-muted); min-height: 1em; }
+.sf-csv-tools__status--err { color: var(--color-danger, #c23934); }
 
 .sf-field-modal__body {
   padding: var(--spacing-sm) var(--spacing-md) !important;
@@ -764,13 +845,20 @@
 
 .sf-field-modal__row {
   display: grid;
-  grid-template-columns: 24px 32px 1fr 1fr 100px 52px 36px 36px 24px;
+  /* handle · key · api · label · type · length · REQUIRED · DECOMMISSIONED · del */
+  grid-template-columns: 22px 32px minmax(110px, 1fr) minmax(110px, 1fr) 104px 54px 78px 130px 24px;
   gap: 6px;
   align-items: center;
   padding: 4px 0;
   border-bottom: 1px solid var(--border-color);
   min-height: 32px;
 }
+/* The REQUIRED / DECOMMISSIONED headers keep on one line and centre over their
+   (centred) checkbox toggles. */
+.sf-field-modal__col--req,
+.sf-field-modal__col--decom { text-align: center; white-space: nowrap; }
+.sf-field-modal__row .sf-field-modal__col--req,
+.sf-field-modal__row .sf-field-modal__col--decom { justify-self: center; }
 
 .sf-field-modal__row--header {
   font-size: 9px;
@@ -896,7 +984,6 @@
   }
 
   .sf-new-modal__grid {
-    grid-template-columns: 1fr 1fr;
     gap: 12px;
   }
 
@@ -991,3 +1078,97 @@
   font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
+
+/* ── Contextual walkthrough (guided tour) ───────────────────────────────────
+   A non-library tour overlay: a full-screen click-catcher, a spotlight cutout
+   (box-shadow dims everything but the target), and a positioned card. Sits above
+   the app (z 5000); never shifts page layout (all fixed-position). */
+.sf-tour { position: fixed; inset: 0; z-index: 5000; pointer-events: none; }
+.sf-tour__catcher { position: fixed; inset: 0; pointer-events: auto; }
+.sf-tour__catcher--dim { background: rgba(0, 0, 0, 0.55); }
+.sf-tour__spotlight {
+  position: fixed;
+  border-radius: var(--border-radius-md, 8px);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  outline: 2px solid var(--color-primary);
+  pointer-events: none;
+  transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease;
+}
+.sf-tour__card {
+  position: fixed;
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-md, 10px);
+  box-shadow: var(--shadow-lg);
+  padding: var(--spacing-md);
+  pointer-events: auto;
+  transition: left .18s ease, top .18s ease;
+}
+.sf-tour__close {
+  position: absolute; top: 8px; right: 8px;
+  background: none; border: none; cursor: pointer;
+  color: var(--text-muted); font-size: 14px; line-height: 1;
+  padding: 4px; border-radius: var(--border-radius-sm);
+}
+.sf-tour__close:hover { color: var(--text-primary); background: var(--stencil-item-hover); }
+.sf-tour__title { margin: 0 24px 8px 0; font-size: 16px; font-weight: 700; color: var(--text-primary); }
+.sf-tour__body { font-size: var(--font-size-sm); line-height: 1.55; color: var(--text-secondary); }
+.sf-tour__body a { color: var(--color-primary); }
+/* Compact bullet hints (e.g. the closing keyboard-shortcuts step). */
+.sf-tour__list { margin: 4px 0; padding-left: 18px; }
+.sf-tour__list li { margin: 2px 0; }
+
+/* Footer: Skip pinned left, step counter absolutely centred, Back+Next grouped right. */
+.sf-tour__footer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-md);
+}
+.sf-tour__count {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.sf-tour__nav { display: flex; align-items: center; gap: var(--spacing-sm); margin-left: auto; }
+
+/* Skip — brand-amber OUTLINE (no fill); fills amber on hover. Darker amber in light mode for
+   WCAG text contrast (mirrors the export "Back up now" button); brand-amber in dark mode. */
+.sf-tour__skip {
+  --_skip-amber: #D4911F;
+  background: transparent;
+  border-color: var(--_skip-amber);
+  color: var(--_skip-amber);
+}
+[data-theme="dark"] .sf-tour__skip { --_skip-amber: var(--brand-amber); }
+.sf-tour__skip:hover { background: var(--_skip-amber); border-color: var(--_skip-amber); color: #1C1E21; }
+
+/* Back — brand-blue OUTLINE (no fill); fills blue on hover. Mirrors the amber
+   "Back up now" outline pattern, swapped to the brand-blue navigation colour. */
+.sf-tour__back {
+  background: transparent;
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}
+.sf-tour__back:hover { background: var(--brand-blue); border-color: var(--brand-blue); color: #ffffff; }
+
+/* ── First-visit welcome splash ── */
+.sf-welcome-modal__dialog { width: 440px; max-width: calc(100vw - 32px); }
+.sf-welcome__text { margin: 0; font-size: var(--font-size-md); line-height: 1.6; color: var(--text-secondary); }
+.sf-welcome__ok { min-width: 96px; }
+/* Dismiss button sits on the right of the footer (single-button footers default to the
+   left under the shared space-between rule). */
+.sf-welcome-modal .sf-modal__footer { justify-content: flex-end; }
+
+/* Inline "?"-in-circle Help glyph used in copy (welcome splash + tour bodies) — sized to
+   the surrounding text and nudged onto the baseline. Matches the navbar Help button icon. */
+.sf-help-glyph { width: 1.05em; height: 1.05em; vertical-align: -0.18em; }

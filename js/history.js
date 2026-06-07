@@ -22,8 +22,46 @@ const onChangeCallbacks = [];
 // `flushPendingDragCommit()` is also invoked at the start of undo()/redo()
 // so a fast Cmd+Z immediately after a drop still finds the drag on the stack.
 const DRAG_IDLE_MS = 80;
-const pendingChanges = new Map();   // cellId → { position?, size?, angle?, vertices? }
+const pendingChanges = new Map();   // cellId → { position?, size?, angle?, vertices?, source?, target?, fields?, expressionRule?, props? }
 let pendingCommitTimer = null;
+
+const _clone = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
+
+// ── Content props (top-level model props that ARE the source of truth a custom
+// view renders from, but live OUTSIDE `attrs`, so the change:attrs handler never
+// sees them). Without recording these, editing an object name / category / RACI /
+// person details / Gantt date / sequence condition is invisible to undo. They are
+// routed through the same debounced pendingChanges merge as field/expression edits
+// so per-keystroke typing collapses to one entry, and so a content prop set ALONGSIDE
+// a recorded `attrs` change (e.g. objectName + headerLabel/text inside addText's
+// focus-session batch) coalesces into the SAME single undo step.
+//
+// Deliberately EXCLUDED: `z` (auto-assigned by the canvas z-tier system — recorded
+// explicitly by the reorder buttons via recordCommand instead, so the auto-assignment
+// on every drop/drag isn't logged as undo noise); `parent`/`embeds` (embedding — see
+// note in GOTCHAS); and the Gantt Display-menu view prefs `weekStartDay` /
+// `showWeekNumber` / `weekendStartDay` (intentionally non-undoable preferences).
+const CONTENT_PROPS = [
+  // DataObject
+  'objectName', 'category', 'headerColor',
+  // Task (RACI card)
+  'taskName', 'taskDescription', 'descriptionWidth',
+  // OrgPerson (mirrors OrgPersonView's change-listener set)
+  'personName', 'jobTitle', 'email', 'phone', 'role', 'stream', 'location',
+  'company', 'details', 'detailOrder', 'imageUrl', 'iconText', 'vacant',
+  // Container (Team) + OrgPerson shared
+  'tags', 'raci',
+  // BPMN type switches (also repaint via attrs; the type prop itself must restore too)
+  'eventType', 'gatewayType', 'taskType', 'poolDirection',
+  // Gantt content
+  'taskLabel', 'assignee', 'progress', 'barColor', 'milestoneDate', 'pointDown',
+  'startDate', 'endDate', 'numPeriods', 'timelineTitle', 'timelineDescription', 'userTextColor',
+  // Sequence
+  'participantRole', 'lifelinePortCount', 'showBottomLabel', 'showLifeline',
+  'fragmentType', 'fragmentLabel', 'condition', 'elseCondition',
+  // Architecture link + Link element + bracket annotation + Gantt structure
+  'connectionFrequency', 'url', 'bracketSide', 'tasks',
+];
 
 function schedulePendingDragCommit() {
   if (pendingCommitTimer) clearTimeout(pendingCommitTimer);
@@ -91,6 +129,39 @@ function commitPendingDrag() {
         const oc = JSON.parse(oldStr), nc = JSON.parse(newStr);
         undos.push(() => { const c = graph.getCell(id); if (c) c.target(oc); });
         redos.push(() => { const c = graph.getCell(id); if (c) c.target(nc); });
+      }
+    }
+    // DataObject field-array edits — per-keystroke editor input + bulk CSV import
+    // all merge to one entry per idle window (a bulk paste is a single set, so it
+    // stays one atomic command on its own).
+    if (entry.fields) {
+      const { oldF, newF } = entry.fields;
+      const oldStr = JSON.stringify(oldF), newStr = JSON.stringify(newF);
+      if (oldStr !== newStr) {
+        const oc = JSON.parse(oldStr), nc = JSON.parse(newStr);
+        undos.push(() => { const c = graph.getCell(id); if (c) c.set('fields', oc); });
+        redos.push(() => { const c = graph.getCell(id); if (c) c.set('fields', nc); });
+      }
+    }
+    // Mapping expression/rule note typed in the link inspector (Data Cloud
+    // Formula/Calculated transforms). Merged like field edits so typing collapses.
+    if (entry.expressionRule) {
+      const { oldML, newML } = entry.expressionRule;
+      if (oldML !== newML) {
+        undos.push(() => { const c = graph.getCell(id); if (c) c.prop('expressionRule', oldML); });
+        redos.push(() => { const c = graph.getCell(id); if (c) c.prop('expressionRule', newML); });
+      }
+    }
+    // Generic content props (CONTENT_PROPS) — names / category / RACI / dates / etc.
+    // One undo/redo pair per changed prop; multiple props edited in the same idle
+    // window land in the same merged command.
+    if (entry.props) {
+      for (const name in entry.props) {
+        const { old: ov, new: nv } = entry.props[name];
+        if (JSON.stringify(ov ?? null) === JSON.stringify(nv ?? null)) continue;
+        const oc = _clone(ov), nc = _clone(nv);
+        undos.push(() => { const c = graph.getCell(id); if (c) c.set(name, oc); });
+        redos.push(() => { const c = graph.getCell(id); if (c) c.set(name, nc); });
       }
     }
   }
@@ -173,6 +244,7 @@ export function init(_graph) {
 
   graph.on('change:size', (cell) => {
     if (isUndoRedoing) return;
+    if (_suppressPositionTracking) return;  // recordPositionsBatch captures sizes itself
     const oldSize = cell.previous('size');
     if (!oldSize) return;
     const newSize = { ...cell.get('size') };
@@ -216,6 +288,21 @@ export function init(_graph) {
     pushCommand({
       undo: () => { const c = graph.getCell(id); if (c) c.set('attrs', oldAttrsCopy); },
       redo: () => { const c = graph.getCell(id); if (c) c.set('attrs', newAttrs); },
+    });
+  });
+
+  // linkKind (Data Mapping: 'mapping' vs relationship) is a top-level prop, not attrs,
+  // so change:attrs never fires for it. Record it so undo/redo of a Connection-type
+  // switch restores the kind (and the property panel's slider) too, not just the visual.
+  graph.on('change:linkKind', (cell) => {
+    if (isUndoRedoing) return;
+    const oldKind = cell.previous('linkKind') ?? null;
+    const newKind = cell.get('linkKind') ?? null;
+    if (oldKind === newKind) return;
+    const id = cell.id;
+    pushCommand({
+      undo: () => { const c = graph.getCell(id); if (c) c.prop('linkKind', oldKind); },
+      redo: () => { const c = graph.getCell(id); if (c) c.prop('linkKind', newKind); },
     });
   });
 
@@ -342,6 +429,108 @@ export function init(_graph) {
       redo: () => { const c = graph.getCell(id); if (c) c.prop('lineStyle', newStyle); },
     });
   });
+
+  // DataObject `fields` array — edited via the inline/modal field editor and the
+  // bulk CSV import. It's a top-level prop, so change:attrs never fires for it.
+  // Routed through the pendingChanges merge so a stream of per-keystroke editor
+  // edits collapses to one undo entry per idle window, while a bulk import (a
+  // single `set`) commits as its own atomic command.
+  graph.on('change:fields', (cell) => {
+    if (isUndoRedoing) return;
+    if (_suppressPositionTracking) return;
+    const oldF = cell.previous('fields') ?? [];
+    const newF = cell.get('fields') ?? [];
+    if (JSON.stringify(oldF) === JSON.stringify(newF)) return;
+    const id = cell.id;
+    let entry = pendingChanges.get(id);
+    if (!entry) { entry = {}; pendingChanges.set(id, entry); }
+    if (!entry.fields) entry.fields = { oldF: JSON.parse(JSON.stringify(oldF)), newF: JSON.parse(JSON.stringify(newF)) };
+    else entry.fields.newF = JSON.parse(JSON.stringify(newF));
+    schedulePendingDragCommit();
+  });
+
+  // Mapping Type (Data Cloud transform: Standard / Formula / Calculated). A
+  // discrete segmented-control click on a top-level prop → one undo per switch.
+  graph.on('change:mappingType', (cell) => {
+    if (isUndoRedoing) return;
+    const oldT = cell.previous('mappingType') ?? null;
+    const newT = cell.get('mappingType') ?? null;
+    if (oldT === newT) return;
+    const id = cell.id;
+    pushCommand({
+      undo: () => { const c = graph.getCell(id); if (c) c.prop('mappingType', oldT); },
+      redo: () => { const c = graph.getCell(id); if (c) c.prop('mappingType', newT); },
+    });
+  });
+
+  // Mapping expression/rule note (expressionRule) — typed in the link inspector's
+  // progressive-disclosure Expression field. Debounce-merged like field edits.
+  graph.on('change:expressionRule', (cell) => {
+    if (isUndoRedoing) return;
+    const oldML = cell.previous('expressionRule') ?? '';
+    const newML = cell.get('expressionRule') ?? '';
+    if (oldML === newML) return;
+    const id = cell.id;
+    let entry = pendingChanges.get(id);
+    if (!entry) { entry = {}; pendingChanges.set(id, entry); }
+    if (!entry.expressionRule) entry.expressionRule = { oldML, newML };
+    else entry.expressionRule.newML = newML;
+    schedulePendingDragCommit();
+  });
+
+  // Embedding (`parent` / `embeds`) — `cell.embed()`/`unembed()` and the paper's
+  // embeddingMode set a child's `parent` (and the parent's `embeds` array), firing
+  // change:parent. Record it so dragging an EXISTING element INTO or OUT of a container
+  // is undoable — reverting position alone would otherwise leave it wrongly embedded.
+  // Undo/redo go through `restoreParent`, which uses embed/unembed so BOTH sides
+  // (child `parent` + parent `embeds`) stay consistent. Discrete (one finalizeEmbedding
+  // per drop) → immediate push (lands in the open pointer/selection batch alongside the
+  // position change). SUPPRESSED for add-then-embed flows (stencil drop, conversions)
+  // where the `add` command already round-trips the embed via its captured JSON — see
+  // suppressEmbedTracking; recording there would split the drop into two undo steps.
+  graph.on('change:parent', (cell) => {
+    if (isUndoRedoing || _suppressParentTracking) return;
+    const oldParentId = cell.previous('parent') ?? null;
+    const newParentId = cell.get('parent') ?? null;
+    if (oldParentId === newParentId) return;
+    const childId = cell.id;
+    pushCommand({
+      undo: () => restoreParent(childId, oldParentId),
+      redo: () => restoreParent(childId, newParentId),
+    });
+  });
+
+  // Generic content-prop recording (CONTENT_PROPS) — one merged handler per prop.
+  // Routes through pendingChanges so typing collapses, and so a prop set inside a
+  // property-panel batch (addText/addColor) coalesces with its sibling attr change.
+  CONTENT_PROPS.forEach((name) => {
+    graph.on('change:' + name, (cell) => {
+      if (isUndoRedoing) return;
+      const oldVal = cell.previous(name);
+      const newVal = cell.get(name);
+      if (JSON.stringify(oldVal ?? null) === JSON.stringify(newVal ?? null)) return;
+      const id = cell.id;
+      let entry = pendingChanges.get(id);
+      if (!entry) { entry = {}; pendingChanges.set(id, entry); }
+      if (!entry.props) entry.props = {};
+      // Keep the FIRST oldVal seen in this window; always refresh to the latest newVal.
+      if (!(name in entry.props)) entry.props[name] = { old: _clone(oldVal), new: _clone(newVal) };
+      else entry.props[name].new = _clone(newVal);
+      schedulePendingDragCommit();
+    });
+  });
+}
+
+/**
+ * Push an explicit reversible command (respects an open batch). For discrete model
+ * mutations that aren't covered by the change-listeners — e.g. the z-order reorder
+ * buttons, where `z` is auto-assigned by the canvas tier system so it can't be a
+ * blanket change:z listener (that would log every drop/drag). The caller has already
+ * applied the change; this just records how to undo/redo it.
+ */
+export function recordCommand(undo, redo) {
+  if (typeof undo !== 'function' || typeof redo !== 'function') return;
+  pushCommand({ undo, redo });
 }
 
 function pushCommand(cmd) {
@@ -426,8 +615,10 @@ export function recordPositionsBatch(callback) {
   // Snapshot positions of every element + endpoints of every link
   // BEFORE the callback fires its mutations.
   const beforePos = new Map();
+  const beforeSize = new Map();
   for (const el of graph.getElements()) {
     beforePos.set(el.id, { ...el.position() });
+    beforeSize.set(el.id, { ...el.size() });
   }
   const beforeEndpoints = new Map();
   for (const link of graph.getLinks()) {
@@ -461,6 +652,19 @@ export function recordPositionsBatch(callback) {
     const ox = oldPos.x, oy = oldPos.y, nx = newPos.x, ny = newPos.y;
     undos.push(() => { const c = graph.getCell(id); if (c) c.position(ox, oy); });
     redos.push(() => { const c = graph.getCell(id); if (c) c.position(nx, ny); });
+  }
+
+  // 1b. Size diffs — a layout that resizes (e.g. Data Mapping lanes hugging their
+  //     objects) changes element sizes; fold them into the same single undo step.
+  for (const el of graph.getElements()) {
+    const oldSize = beforeSize.get(el.id);
+    const newSize = { ...el.size() };
+    if (!oldSize) continue;
+    if (oldSize.width === newSize.width && oldSize.height === newSize.height) continue;
+    const id = el.id;
+    const ow = oldSize.width, oh = oldSize.height, nw = newSize.width, nh = newSize.height;
+    undos.push(() => { const c = graph.getCell(id); if (c) c.resize(ow, oh); });
+    redos.push(() => { const c = graph.getCell(id); if (c) c.resize(nw, nh); });
   }
 
   // 2. Link endpoint diffs — `snapLinksToPorts()` is the main producer.
@@ -499,6 +703,34 @@ export function recordPositionsBatch(callback) {
 }
 
 let _suppressPositionTracking = false;
+let _suppressParentTracking = false;
+
+// Restore a child's embedding to `targetParentId` (null = top-level) via JointJS
+// embed/unembed so the parent's `embeds` array stays in sync with the child's `parent`.
+// Used by the change:parent undo/redo commands. The embed/unembed it performs fire
+// change:parent again, but the listener bails while isUndoRedoing is true.
+function restoreParent(childId, targetParentId) {
+  if (!graph) return;
+  const child = graph.getCell(childId);
+  if (!child) return;
+  const currentParentId = child.get('parent') ?? null;
+  if (currentParentId === targetParentId) return;
+  if (currentParentId) { const cp = graph.getCell(currentParentId); if (cp) cp.unembed(child); }
+  if (targetParentId) { const tp = graph.getCell(targetParentId); if (tp) tp.embed(child); }
+}
+
+/**
+ * Run `fn` without recording change:parent. For add-then-embed flows (stencil drop,
+ * shape conversions) where the cell's `add` command already captures the final embedded
+ * state in its JSON — recording the embed separately would split one drop into two undo
+ * steps. Drags / multi-select capture do NOT use this, so their embeds stay undoable.
+ */
+export function suppressEmbedTracking(fn) {
+  const prev = _suppressParentTracking;
+  _suppressParentTracking = true;
+  try { return fn(); }
+  finally { _suppressParentTracking = prev; }
+}
 
 /** True when a batch is currently open via startBatch. */
 export function isInBatch() { return batchDepth > 0; }

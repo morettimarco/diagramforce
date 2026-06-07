@@ -5,14 +5,14 @@
 // the persistence runtime context, wired in persistence.init(). Legacy decode
 // uses the global `pako`.
 
-import { encodeShareV1, decodeShareV1 } from '../share-codec.js?v=1.14.1';
-import { diagramHasImage } from '../image-component.js?v=1.14.1';
-import { showToast, showError, buildModal } from '../feedback.js?v=1.14.1';
-import { escHtml } from '../util.js?v=1.14.1';
-import { pctx } from './context.js?v=1.14.1';
+import { encodeShareV1, decodeShareV1, encodeShareV2, decodeShareV2, slimForShare } from '../share-codec.js?v=1.15.0';
+import { diagramHasImage } from '../image-component.js?v=1.15.0';
+import { showToast, showError, buildModal } from '../feedback.js?v=1.15.0';
+import { escHtml } from '../util.js?v=1.15.0';
+import { pctx } from './context.js?v=1.15.0';
 
 export function shareAsURL() {
-  const { graph, appVersion: APP_VERSION, tabNameCb: getTabNameCallback, diagramTypeCb: getDiagramTypeCallback } = pctx;
+  const { graph, appVersion: APP_VERSION, tabNameCb: getTabNameCallback, diagramTypeCb: getDiagramTypeCallback, mappingModeCb: getMappingModeCallback } = pctx;
   if (!getTabNameCallback || !getDiagramTypeCallback) return;
   // Belt-and-braces: the dropdown button is already disabled when images are
   // present, but keyboard shortcut / hamburger entry / `share` action route
@@ -26,13 +26,17 @@ export function shareAsURL() {
     av: APP_VERSION,
     name: getTabNameCallback(),
     type: getDiagramTypeCallback(),
-    graph: graph.toJSON(),
+    mappingMode: getMappingModeCallback ? getMappingModeCallback() : false,
+    // Slim out load-reconstructable data (default ports/size, mapping-link routing,
+    // icon artwork) before encoding — the import path rebuilds it. Big win for
+    // port-bearing + icon-heavy diagrams; lossless after load reconstruction.
+    graph: slimForShare(graph.toJSON()),
   };
   try {
-    // v1 codec: structural-key minification + zlib preset dictionary, ~40-50%
-    // smaller than the legacy raw-deflate path. Output starts with `v1.`;
-    // loadFromURL detects the prefix and routes accordingly.
-    const payload = encodeShareV1(data);
+    // v2 codec: v1's key-minification + dictionary, extended to field-array keys
+    // and post-v1 props, with a dictionary re-tuned for the slimmed payload. Output
+    // starts with `v2.`; loadFromURL detects the prefix (and still decodes v1/legacy).
+    const payload = encodeShareV2(data);
     const url = `${window.location.origin}${window.location.pathname}#diagram=${payload}`;
     showShareModal(url);
   } catch (err) {
@@ -60,12 +64,17 @@ export async function loadFromURL() {
     let data;
     if (verMatch) {
       const ver = parseInt(verMatch[1], 10);
-      if (ver !== 1) {
+      // Every shipped decoder stays alive (forward links from a newer build are the
+      // only ones we can't read). v2 is current; v1 covers links made before it.
+      if (ver === 2) {
+        data = decodeShareV2(`v2.${verMatch[2]}`);
+      } else if (ver === 1) {
+        data = decodeShareV1(`v1.${verMatch[2]}`);
+      } else {
         showShareLoadError('This share link was created by a newer version of Diagramforce. Please ask the sender to update their link.');
         history.replaceState(null, '', window.location.pathname);
         return false;
       }
-      data = decodeShareV1(`v1.${verMatch[2]}`);
     } else {
       // Legacy: raw deflate, no preset dictionary, no key minification.
       let base64 = legacyMatch[1].replace(/-/g, '+').replace(/_/g, '/');
@@ -98,7 +107,7 @@ export async function loadFromURL() {
     // Import the diagram using the existing import handler
     if (onImportCallback) {
       const type = normalizeDiagramType(data.type);
-      onImportCallback(data.name || 'Shared Diagram', type, data.graph, data.viewport || null);
+      onImportCallback(data.name || 'Shared Diagram', type, data.graph, data.viewport || null, data.mappingMode);
       return true;
     }
     return false;
