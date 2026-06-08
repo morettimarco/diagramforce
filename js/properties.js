@@ -1,13 +1,13 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { wrapSelectionWithMarker } from './markdown.js?v=1.15.3';
-import { confirmModal, showToast, buildModal } from './feedback.js?v=1.15.3';
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.15.3';
-import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, updateDataObjectHeaderLayout, syncMobilePanelHeight, canEmbed, applyMappingLinkStyle, applyRelationshipLinkStyle, syncMappingTypeBadge, syncFrequencyLabel } from './canvas.js?v=1.15.3';
-import * as stencilModule from './stencil.js?v=1.15.3';
-import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.15.3';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.15.3';
+import { wrapSelectionWithMarker } from './markdown.js?v=1.15.4';
+import { confirmModal, showToast, buildModal } from './feedback.js?v=1.15.4';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.15.4';
+import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, updateDataObjectHeaderLayout, syncMobilePanelHeight, canEmbed, applyMappingLinkStyle, applyRelationshipLinkStyle, syncMappingTypeBadge, syncFrequencyLabel } from './canvas.js?v=1.15.4';
+import * as stencilModule from './stencil.js?v=1.15.4';
+import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.15.4';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.15.4';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -16,13 +16,13 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.15.3';
-import * as history from './history.js?v=1.15.3';
-import { startImageAddFlow } from './image-component.js?v=1.15.3';
-import { escHtml, sanitizeFilenamePart } from './util.js?v=1.15.3';
-import { getActiveTabName } from './tabs.js?v=1.15.3';
-import { saveSelectionAsTemplate } from './templates.js?v=1.15.3';
-import { newFid } from './shapes.js?v=1.15.3';
+} from './clipboard.js?v=1.15.4';
+import * as history from './history.js?v=1.15.4';
+import { startImageAddFlow } from './image-component.js?v=1.15.4';
+import { escHtml, sanitizeFilenamePart } from './util.js?v=1.15.4';
+import { getActiveTabName } from './tabs.js?v=1.15.4';
+import { saveSelectionAsTemplate } from './templates.js?v=1.15.4';
+import { newFid } from './shapes.js?v=1.15.4';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
@@ -447,6 +447,15 @@ export function init(_graph, _paper, _selection) {
       footerEl.innerHTML = '';
       restoreStencilAfterProperties();
     }
+  });
+
+  // A freshly-drawn connector is tagged `linkKind:'mapping'` (or reclassified) by canvas's
+  // `link:connect` handler, which can land AFTER the selection has already rendered the panel
+  // with the generic connector fields. Re-render when the SELECTED link's `linkKind` changes so
+  // the mapping-specific fields (Mapping type, Expression / rules) appear immediately — no
+  // re-select needed. One persistent listener; fires only for the active cell, so it's cheap.
+  graph.on('change:linkKind', (cell) => {
+    if (getActiveCell()?.id === cell.id) refresh();
   });
 
   // Double-click on element opens inline text editor on canvas.
@@ -3513,7 +3522,15 @@ function renderLinkProps(cell) {
       // Expression / rules note, bound to `expressionRule` → table Expression / Rule column.
       if (curType !== 'Standard') {
         addText(labelSec, 'Expression / rules', cell.prop('expressionRule') || cell.prop('mappingLabel') || '', v => {
-          cell.prop('expressionRule', v || '');
+          // One undo step (prop + badge tooltip). Re-sync so the connector token's hover
+          // tooltip reflects the new rule immediately, without a reload.
+          history.startBatch();
+          try {
+            cell.prop('expressionRule', v || '');
+            syncMappingTypeBadge(cell);
+          } finally {
+            history.endBatch();
+          }
         });
       }
     }

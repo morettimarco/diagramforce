@@ -1,10 +1,10 @@
 // Tabs — multi-diagram tab management
 // Each tab holds its own graph JSON, viewport, and undo/redo history.
 
-import { APP_VERSION, classifyVersionDiff, normalizeDiagramType, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES } from './persistence.js?v=1.15.3';
-import { escHtml, formatRelativeTime } from './util.js?v=1.15.3';
-import { showError, showToast, buildModal } from './feedback.js?v=1.15.3';
-import { createElementFromComponent } from './components.js?v=1.15.3';
+import { APP_VERSION, classifyVersionDiff, normalizeDiagramType, isQuotaError, getStorageFootprint, STORAGE_WARNING_BYTES, compactGraphForSave } from './persistence.js?v=1.15.4';
+import { escHtml, formatRelativeTime } from './util.js?v=1.15.4';
+import { showError, showToast, buildModal } from './feedback.js?v=1.15.4';
+import { createElementFromComponent } from './components.js?v=1.15.4';
 
 let graph, paper, canvasModule, selectionModule, historyModule, persistenceModule, stencilModule;
 let tabListEl;
@@ -813,7 +813,11 @@ function saveTabs() {
       lastSavedAt: t.lastSavedAt || null,
       lastSaveType: t.lastSaveType || null,
       lastModifiedAt: t.lastModifiedAt || null,
-      graphJSON: t.id === activeTabId ? graph.toJSON() : t.graphJSON,
+      // Compact each tab's graph (drop reconstructed-on-load ports/size/angle/icon/routing) so the
+      // session blob — the heaviest, most-frequently-written localStorage entry — stays small.
+      // compactGraphForSave deep-clones, so the live `t.graphJSON` is untouched; session restore
+      // rebuilds everything via the common fromJSON + migrate path.
+      graphJSON: compactGraphForSave(t.id === activeTabId ? graph.toJSON() : t.graphJSON),
       viewport: t.id === activeTabId ? canvasModule.getViewport() : t.viewport,
     }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...meta, tabs: full }));

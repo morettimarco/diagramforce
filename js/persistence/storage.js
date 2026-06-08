@@ -7,8 +7,9 @@
 // dateSuffix, triggerDownload) all come from the persistence runtime context —
 // so it imports no other sub-module (acyclic).
 
-import { showToast, showError, confirmModal, buildModal } from '../feedback.js?v=1.15.3';
-import { pctx } from './context.js?v=1.15.3';
+import { showToast, showError, confirmModal, buildModal } from '../feedback.js?v=1.15.4';
+import { pctx } from './context.js?v=1.15.4';
+import { compactGraphForSave } from './json-pipeline.js?v=1.15.4';
 
 // localStorage key scheme + retention (formerly top-of-persistence consts).
 export const NAMED_SAVE_PREFIX = 'sfdiag::save::';
@@ -97,7 +98,8 @@ async function saveSingleTab(name, graphJSON, viewport, diagramType, mappingMode
     appVersion: APP_VERSION,
     diagramType,
     mappingMode,
-    graph: graphJSON,
+    // Drop reconstructed-on-load data (DataObject ports) to shrink the localStorage footprint.
+    graph: compactGraphForSave(graphJSON),
     viewport,
   };
   try {
@@ -362,6 +364,9 @@ export function exportSelection({ tabIds = [], saveKeys = [], includeTemplates =
       if (!d || tabNames.has(d.name)) continue; // dedup vs an included open tab
       diagrams.push(d);
     }
+    // Shrink every exported graph by dropping reconstructed-on-load data (DataObject ports).
+    // compactGraphForSave returns a new object, so the open tabs' live graphs stay untouched.
+    for (const d of diagrams) { d.graph = compactGraphForSave(d.graph); }
     const templates = includeTemplates ? (templatesBackupApi?.getTemplates?.() || []) : [];
 
     if (diagrams.length === 0 && templates.length === 0) {

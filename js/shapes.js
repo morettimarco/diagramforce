@@ -2,8 +2,8 @@
 // All shapes are under the `sf` namespace
 // Uses JointJS v4 JSON markup array syntax
 
-import { parseMarkdown } from './markdown.js?v=1.15.3';
-import { fieldFocus } from './canvas/focus-state.js?v=1.15.3';
+import { parseMarkdown } from './markdown.js?v=1.15.4';
+import { fieldFocus } from './canvas/focus-state.js?v=1.15.4';
 
 // ── Stable field identity (fid) ────────────────────────────────────
 // Pre-1.15.0, sf.DataObject field ports were keyed by ARRAY INDEX
@@ -42,6 +42,11 @@ export function ensureFieldFids(cell) {
 // ports (mapping) or only PK/FK fields (default ER).
 let mappingModeGetter = null;
 export function setMappingModeGetter(fn) { mappingModeGetter = fn; }
+
+// Wraps a mutation in a single undo entry — wired from app.js to history.startBatch/endBatch so
+// the DataObject collapse toggle (a `collapsed` prop change + the follow-on resize) is one undo.
+let dataObjectHistoryBatcher = null;
+export function setDataObjectHistoryBatcher(fn) { dataObjectHistoryBatcher = fn; }
 
 // Does a field have a live link on either of its ports? Drives "Show Only Mapped"
 // — connected fields stay visible so collapsing the rest never breaks a link.
@@ -1947,9 +1952,9 @@ export function register() {
   joint.shapes.sf.DataObjectView = joint.dia.ElementView.extend({
     initialize() {
       joint.dia.ElementView.prototype.initialize.apply(this, arguments);
-      this.listenTo(this.model, 'change:fields change:showLabels change:showFieldLengths change:keyFieldsOnly', () => this._renderFieldRows());
-      this.listenTo(this.model, 'change:fields change:keyFieldsOnly', () => this._syncFieldPorts());
-      this.listenTo(this.model, 'change:keyFieldsOnly', () => this._autoResize());
+      this.listenTo(this.model, 'change:fields change:showLabels change:showFieldLengths change:keyFieldsOnly change:collapsed', () => this._renderFieldRows());
+      this.listenTo(this.model, 'change:fields change:keyFieldsOnly change:collapsed', () => this._syncFieldPorts());
+      this.listenTo(this.model, 'change:keyFieldsOnly change:collapsed', () => this._autoResize());
       this.listenTo(this.model, 'change:category change:fields change:size', () => this._renderBadges());
     },
     update() {
@@ -1961,11 +1966,10 @@ export function register() {
 
     _autoResize() {
       const model = this.model;
-      const visibleCount = getVisibleDataObjectFields(model).length;
-      const HEADER_H = 32;
-      const ROW_H = 22;
-      const height = HEADER_H + Math.max(visibleCount, 1) * ROW_H + 4;
-      model.resize(model.size().width, height);
+      const HEADER_H = 32, ROW_H = 22, TOGGLE_H = 18;
+      // Collapsed → just the header + the collapse toggle row; expanded → + the field rows.
+      const rows = model.get('collapsed') ? 0 : Math.max(getVisibleDataObjectFields(model).length, 1);
+      model.resize(model.size().width, HEADER_H + rows * ROW_H + TOGGLE_H);
     },
 
     // Data Cloud badge in the header (renders regardless of mapping mode, so
@@ -2063,13 +2067,17 @@ export function register() {
       // rounded near-circles in Data Model (rx 4 on an 8×8 rect = a circle — there they
       // act as ER PK/FK anchors). `allFields` is the mapping-mode flag.
       const fieldCornerR = allFields ? 2 : 4;
+      // When the object is collapsed its field rows are hidden, so converge every field port to
+      // the header centre — the mapping links then fan into the collapsed object's header instead
+      // of dangling at vanished row positions.
+      const collapsed = !!model.get('collapsed');
       const desired = [];
       getVisibleDataObjectFields(model).forEach((field, i) => {
         const leftId = `field-left-${field.fid}`;
         const rightId = `field-right-${field.fid}`;
         const wanted = field.keyType || allFields || linkedPorts.has(leftId) || linkedPorts.has(rightId);
         if (wanted) {
-          const y = HEADER_H + i * ROW_H + ROW_H / 2;
+          const y = collapsed ? HEADER_H / 2 : HEADER_H + i * ROW_H + ROW_H / 2;
           // PK = amber, FK = blue, FQK = brand red, plain field (mapping) = neutral grey.
           const fill = field.keyType === 'pk' ? '#F6B355' : field.keyType === 'fk' ? '#1D73C9' : field.keyType === 'fqk' ? '#DA4E55' : '#9AA0A6';
           const rectAttrs = { width: 8, height: 8, x: -4, y: -4, rx: fieldCornerR, ry: fieldCornerR, magnet: true, fill, stroke: '#FFFFFF', strokeWidth: 1.5 };
@@ -2119,7 +2127,8 @@ export function register() {
       const g = document.createElementNS(ns, 'g');
       g.setAttribute('class', 'do-fields-g');
 
-      fields.forEach((field, i) => {
+      const collapsed = !!model.get('collapsed');
+      if (!collapsed) fields.forEach((field, i) => {
         const y = HEADER_H + i * ROW_H;
         if (y + ROW_H > height + 2) return;
 
@@ -2215,6 +2224,44 @@ export function register() {
 
         g.appendChild(rowG);
       });
+
+      // ── Collapse / expand toggle row (always the last row, present in both states) ──
+      // Collapsed → header + ▾ (click to expand); expanded → header + fields + ▴ (click to
+      // collapse). A click toggles `collapsed`; mousedown is stopped so it never starts a
+      // drag/selection — the toggle is a control, not the object body.
+      const TOGGLE_H = 18;
+      const ty = HEADER_H + (collapsed ? 0 : Math.max(getVisibleDataObjectFields(model).length, 1) * ROW_H);
+      const tg = document.createElementNS(ns, 'g');
+      tg.setAttribute('class', 'do-collapse-toggle');
+      tg.setAttribute('cursor', 'pointer');
+      const thit = document.createElementNS(ns, 'rect');
+      thit.setAttribute('x', '0'); thit.setAttribute('y', String(ty));
+      thit.setAttribute('width', String(width)); thit.setAttribute('height', String(TOGGLE_H));
+      thit.setAttribute('fill', 'transparent'); thit.setAttribute('pointer-events', 'all');
+      tg.appendChild(thit);
+      if (!collapsed) {
+        const sep = document.createElementNS(ns, 'line');
+        sep.setAttribute('x1', '0'); sep.setAttribute('y1', String(ty));
+        sep.setAttribute('x2', String(width)); sep.setAttribute('y2', String(ty));
+        sep.setAttribute('stroke', 'var(--node-border)'); sep.setAttribute('stroke-opacity', '0.15');
+        tg.appendChild(sep);
+      }
+      const cxc = width / 2, cyc = ty + TOGGLE_H / 2;
+      const chev = document.createElementNS(ns, 'path');
+      chev.setAttribute('d', collapsed
+        ? `M ${cxc - 5} ${cyc - 2} L ${cxc} ${cyc + 3} L ${cxc + 5} ${cyc - 2}`
+        : `M ${cxc - 5} ${cyc + 2} L ${cxc} ${cyc - 3} L ${cxc + 5} ${cyc + 2}`);
+      chev.setAttribute('fill', 'none'); chev.setAttribute('stroke', 'var(--text-muted)');
+      chev.setAttribute('stroke-width', '1.5'); chev.setAttribute('stroke-linecap', 'round');
+      chev.setAttribute('stroke-linejoin', 'round'); chev.setAttribute('pointer-events', 'none');
+      tg.appendChild(chev);
+      thit.addEventListener('mousedown', (evt) => evt.stopPropagation());
+      thit.addEventListener('click', (evt) => {
+        evt.stopPropagation();
+        const toggle = () => this.model.prop('collapsed', !this.model.get('collapsed'));
+        if (dataObjectHistoryBatcher) dataObjectHistoryBatcher(toggle); else toggle();
+      });
+      g.appendChild(tg);
 
       this.el.appendChild(g);
     },

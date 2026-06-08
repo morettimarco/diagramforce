@@ -1,25 +1,25 @@
 // SF Diagrams — App bootstrap
 // Initializes all modules in order. JointJS is a global (loaded via CDN script tag).
 
-import * as theme       from './theme.js?v=1.15.3';
-import * as icons       from './icons.js?v=1.15.3';
-import { getAllStencilSvgs } from './components.js?v=1.15.3';
-import * as shapes      from './shapes.js?v=1.15.3';
-import * as canvas      from './canvas.js?v=1.15.3';
-import * as stencil     from './stencil.js?v=1.15.3';
-import * as selection   from './selection.js?v=1.15.3';
-import * as history     from './history.js?v=1.15.3';
-import * as clipboard   from './clipboard.js?v=1.15.3';
-import * as templates    from './templates.js?v=1.15.3';
-import * as keyboard    from './keyboard.js?v=1.15.3';
-import * as toolbar     from './toolbar.js?v=1.15.3';
-import * as properties  from './properties.js?v=1.15.3';
-import * as persistence from './persistence.js?v=1.15.3';
-import * as tabs        from './tabs.js?v=1.15.3';
-import * as mermaidImport from './mermaid-import.js?v=1.15.3';
-import * as tableView    from './table-view.js?v=1.15.3';
-import * as walkthrough  from './walkthrough.js?v=1.15.3';
-import * as a11y         from './a11y.js?v=1.15.3';
+import * as theme       from './theme.js?v=1.15.4';
+import * as icons       from './icons.js?v=1.15.4';
+import { getAllStencilSvgs } from './components.js?v=1.15.4';
+import * as shapes      from './shapes.js?v=1.15.4';
+import * as canvas      from './canvas.js?v=1.15.4';
+import * as stencil     from './stencil.js?v=1.15.4';
+import * as selection   from './selection.js?v=1.15.4';
+import * as history     from './history.js?v=1.15.4';
+import * as clipboard   from './clipboard.js?v=1.15.4';
+import * as templates    from './templates.js?v=1.15.4';
+import * as keyboard    from './keyboard.js?v=1.15.4';
+import * as toolbar     from './toolbar.js?v=1.15.4';
+import * as properties  from './properties.js?v=1.15.4';
+import * as persistence from './persistence.js?v=1.15.4';
+import * as tabs        from './tabs.js?v=1.15.4';
+import * as mermaidImport from './mermaid-import.js?v=1.15.4';
+import * as tableView    from './table-view.js?v=1.15.4';
+import * as walkthrough  from './walkthrough.js?v=1.15.4';
+import * as a11y         from './a11y.js?v=1.15.4';
 
 // Clickjacking defence. `frame-ancestors` / `X-Frame-Options` cannot be sent
 // from a static GitHub Pages file, so the framing policy is enforced here.
@@ -109,6 +109,8 @@ async function main() {
   // restore renders cells (mapping mode reveals every field's connectable ports).
   properties.setMappingModeGetter(() => tabs.getActiveMappingMode());
   shapes.setMappingModeGetter(() => tabs.getActiveMappingMode());
+  // DataObject collapse toggle → one undo entry (the `collapsed` prop + its follow-on resize).
+  shapes.setDataObjectHistoryBatcher((fn) => { history.startBatch(); try { fn(); } finally { history.endBatch(); } });
   canvas.setMappingModeGetter(() => tabs.getActiveMappingMode());
 
   tabs.init(graph, paper, canvas, selection, history, persistence, stencil);

@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { encodeShareV1, decodeShareV1 } from '../js/share-codec.js';
-import { sanitizeGraphJSON } from '../js/persistence.js';
+import { sanitizeGraphJSON, compactGraphForSave } from '../js/persistence.js';
 
 const EXAMPLES = new URL('../examples/', import.meta.url);
 let files = [];
@@ -65,4 +65,67 @@ test('sanitizeGraphJSON drops cells whose type is not in the allowlist', () => {
   const g = { cells: [{ type: 'sf.Note', id: 'ok' }, { type: 'sf.Evil', id: 'bad' }, { type: 'standard.Link', id: 'link' }] };
   sanitizeGraphJSON(g);
   assert.deepEqual(g.cells.map((c) => c.id), ['ok', 'link'], 'unknown cell type filtered out');
+});
+
+test('sanitizeGraphJSON drops links pointing at a missing cell (the LLM dangling-ref crash) but keeps valid + point links', () => {
+  // Reproduces the Gemini failure mode: a link names a target object the
+  // diagram never defines, which would make graph.fromJSON throw
+  // "LinkView: invalid target cell" and sink the whole load.
+  const g = {
+    cells: [
+      { type: 'sf.DataObject', id: 'objA' },
+      { type: 'sf.DataObject', id: 'objB' },
+      { type: 'standard.Link', id: 'good', source: { id: 'objA', port: 'field-right-x' }, target: { id: 'objB', port: 'field-left-y' } },
+      { type: 'standard.Link', id: 'dangling-tgt', source: { id: 'objA' }, target: { id: 'obj-ghost' } },
+      { type: 'standard.Link', id: 'dangling-src', source: { id: 'obj-missing' }, target: { id: 'objB' } },
+      { type: 'standard.Link', id: 'point', source: { x: 10, y: 10 }, target: { x: 99, y: 99 } },
+    ],
+  };
+  sanitizeGraphJSON(g);
+  assert.deepEqual(
+    g.cells.map((c) => c.id),
+    ['objA', 'objB', 'good', 'point'],
+    'links to a non-existent cell dropped; valid id-links + point-only links kept',
+  );
+});
+
+test('compactGraphForSave strips DataObject ports (reconstructed on load), shrinking the save', () => {
+  // A field port as it's actually serialised — its own markup + full attrs. These dominate a
+  // datamapping save (two per field), and _syncFieldPorts rebuilds them on every load.
+  const fieldPort = (id, group) => ({ id, group, args: { x: 0, y: 48 }, markup: [{ tagName: 'rect', selector: 'rect' }], attrs: { rect: { width: 8, height: 8, x: -4, y: -4, rx: 2, ry: 2, magnet: true, fill: '#9AA0A6', stroke: '#FFFFFF', strokeWidth: 1.5 } } });
+  const heavyPorts = {
+    groups: {
+      top: { position: { name: 'top' }, attrs: { circle: { r: 5, magnet: true, fill: 'var(--port-color, #1D73C9)', stroke: '#FFFFFF', strokeWidth: 1.5 } }, markup: [{ tagName: 'circle', selector: 'circle' }] },
+      bottom: { position: { name: 'bottom' }, attrs: { circle: { r: 5, magnet: true, fill: 'var(--port-color, #1D73C9)', stroke: '#FFFFFF', strokeWidth: 1.5 } }, markup: [{ tagName: 'circle', selector: 'circle' }] },
+      fieldLeft: { position: { name: 'absolute' }, attrs: { rect: { width: 8, height: 8 } }, markup: [{ tagName: 'rect', selector: 'rect' }] },
+      fieldRight: { position: { name: 'absolute' }, attrs: { rect: { width: 8, height: 8 } }, markup: [{ tagName: 'rect', selector: 'rect' }] },
+    },
+    items: [
+      { id: 'port-top', group: 'top' }, { id: 'port-bottom', group: 'bottom' },
+      fieldPort('field-left-a', 'fieldLeft'), fieldPort('field-right-a', 'fieldRight'),
+      fieldPort('field-left-b', 'fieldLeft'), fieldPort('field-right-b', 'fieldRight'),
+    ],
+  };
+  const obj = { id: 'o1', type: 'sf.DataObject', position: { x: 0, y: 0 }, size: { width: 260, height: 120 }, objectName: 'X', fields: [{ label: 'A', fid: 'a' }, { label: 'B', fid: 'b' }], ports: heavyPorts };
+  const note = { id: 'n1', type: 'sf.Note', ports: { items: [{ id: 'p', group: 'top' }] } };  // non-DataObject ports must survive
+  const g = { cells: [obj, note] };
+  const before = JSON.stringify(g).length;
+
+  const out = compactGraphForSave(g);
+
+  const outObj = out.cells.find((c) => c.id === 'o1');
+  assert.equal(outObj.ports, undefined, 'DataObject ports stripped');
+  assert.equal(outObj.objectName, 'X', 'other DataObject props kept');
+  assert.deepEqual(outObj.fields, [{ label: 'A', fid: 'a' }, { label: 'B', fid: 'b' }], 'fields kept');
+  assert.ok(out.cells.find((c) => c.id === 'n1').ports, 'non-DataObject ports left intact');
+
+  assert.ok(g.cells[0].ports, 'input not mutated — original DataObject still has ports');
+
+  const after = JSON.stringify(out).length;
+  assert.ok(after < before * 0.6, `expected the DataObject save to shrink >40%, got ${before} → ${after} bytes`);
+});
+
+test('compactGraphForSave preserves content losslessly for a graph with nothing to strip', () => {
+  const g = { cells: [{ id: 'n', type: 'sf.Note' }] };
+  assert.deepEqual(compactGraphForSave(g), g, 'content preserved (a fresh clone via slimForShare)');
 });

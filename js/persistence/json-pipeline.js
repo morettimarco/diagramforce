@@ -6,11 +6,12 @@
 // runtime-only and reads live state/callbacks from the persistence context (pctx);
 // version checks + dedup signatures come from the leaf versioning module.
 
-import { contentSignature, checkVersionWarning } from './versioning.js?v=1.15.3';
-import { normalizeDateSuffix } from '../util.js?v=1.15.3';
-import { escHtml } from '../util.js?v=1.15.3';
-import { showToast, showError, buildModal } from '../feedback.js?v=1.15.3';
-import { pctx } from './context.js?v=1.15.3';
+import { contentSignature, checkVersionWarning } from './versioning.js?v=1.15.4';
+import { normalizeDateSuffix } from '../util.js?v=1.15.4';
+import { escHtml } from '../util.js?v=1.15.4';
+import { showToast, showError, buildModal } from '../feedback.js?v=1.15.4';
+import { pctx } from './context.js?v=1.15.4';
+import { slimForShare } from '../share-codec.js?v=1.15.4';
 
 // Maximum number of cells to accept from external sources (share URLs, JSON import)
 const MAX_CELL_COUNT = 2000;
@@ -82,8 +83,64 @@ export function sanitizeGraphJSON(graphData) {
   graphData.cells = graphData.cells.filter(c =>
     c && typeof c === 'object' && typeof c.type === 'string' && ALLOWED_CELL_TYPES.has(c.type)
   );
+  // S5 (v1.15.4) — drop links whose source/target references a cell that isn't
+  // present. An LLM-authored diagram frequently names an object in a link that
+  // it never actually defines (or mistypes the id) — exactly the Gemini failure
+  // mode. Without this guard, graph.fromJSON throws "LinkView: invalid target
+  // cell" and the ENTIRE diagram fails to load; one dangling reference
+  // shouldn't sink an otherwise-valid diagram, so we drop just the bad link.
+  // Point endpoints ({x,y} with no id) and same-file references are untouched.
+  const validIds = new Set();
+  for (const c of graphData.cells) { if (c.id != null) validIds.add(c.id); }
+  const droppedLinkIds = [];
+  graphData.cells = graphData.cells.filter((c) => {
+    const srcId = c.source?.id, tgtId = c.target?.id;
+    if ((srcId != null && !validIds.has(srcId)) || (tgtId != null && !validIds.has(tgtId))) {
+      droppedLinkIds.push(c.id ?? '(unnamed link)');
+      return false;
+    }
+    return true;
+  });
+  if (droppedLinkIds.length) {
+    console.warn(
+      `Diagramforce: skipped ${droppedLinkIds.length} link(s) referencing a missing cell:`,
+      droppedLinkIds,
+    );
+  }
   for (const cell of graphData.cells) { stripAttrs(cell); }
   return graphData;
+}
+
+/**
+ * Shrink a graph JSON for persistence — named saves, JSON export, AND the session auto-save —
+ * by dropping data the app fully reconstructs on load. Works for **every diagram type**, not
+ * just datamapping.
+ *
+ * Two lossless layers (lossless because their reconstruction all runs on the COMMON load path —
+ * `fromJSON` + `migrateLinks` + `migrateNodes`, which includes `refreshAllIconHrefs` and
+ * `_syncFieldPorts` — the same path named-save load / JSON import / session restore use):
+ *   1. **`slimForShare`** (share-codec) — the exact slimmer already proven on share URLs. For
+ *      ALL shapes it drops a default `ports`/`size` block, `angle:0`, mapping-link routing, and
+ *      icon artwork (→ a compact `data-icon-id` placeholder the icon registry re-resolves).
+ *   2. **DataObject `ports`** — slimForShare keeps these when they DIFFER from the shape default
+ *      (the generated field/ER ports of datamodel/datamapping), but `_syncFieldPorts` rebuilds
+ *      them on every load, so drop them too. This is the bulk of a field-heavy save (~87 % of a
+ *      7-field object).
+ *
+ * `slimForShare` deep-clones, so the input is never mutated (safe on a shared in-memory
+ * `tab.graphJSON`) and the delete below is free.
+ *
+ * Deliberately does NOT strip link `attrs`: `migrateLinks` is idempotent and does NOT rebuild a
+ * mapping link's `line/stroke` (colour) or target arrow when they're absent, so stripping them
+ * would be lossy (it would drop user colour / width customisations). Links stay verbatim.
+ */
+export function compactGraphForSave(graphJSON) {
+  if (!graphJSON || !Array.isArray(graphJSON.cells)) return graphJSON;
+  const out = slimForShare(graphJSON);
+  for (const c of out.cells || []) {
+    if (c && c.type === 'sf.DataObject') delete c.ports;
+  }
+  return out;
 }
 
 export function importJSON() {
@@ -263,7 +320,16 @@ async function loadJSONText(jsonText, fallbackName) {
   // ── Single diagram → new tab (original behaviour) ──
   try {
     const name = data.title || fallbackName || 'Imported';
-    if (data?.graph) sanitizeGraphJSON(data.graph);
+    // Count endpoint-links before/after sanitise so we can tell the user how many
+    // pointed at a missing shape and were skipped (the common LLM-output error) —
+    // the diagram still loads instead of failing wholesale.
+    const countLinks = (g) => (g?.cells || []).filter((c) => c && (c.source || c.target)).length;
+    let droppedLinks = 0;
+    if (data?.graph) {
+      const before = countLinks(data.graph);
+      sanitizeGraphJSON(data.graph);
+      droppedLinks = Math.max(0, before - countLinks(data.graph));
+    }
     if (onImportCallback && data?.graph) {
       onImportCallback(name, normalizeDiagramType(data.diagramType), data.graph, data.viewport, data.mappingMode);
     } else if (data?.graph) {
@@ -273,7 +339,15 @@ async function loadJSONText(jsonText, fallbackName) {
     } else {
       throw new Error('No graph data found in JSON.');
     }
-    showToast(`Loaded "${name}" ✓`, 'success');
+    if (droppedLinks > 0) {
+      showToast(
+        `Loaded "${name}" — skipped ${droppedLinks} connector${droppedLinks === 1 ? '' : 's'} `
+        + `pointing to a shape that isn't in the file.`,
+        'warning',
+      );
+    } else {
+      showToast(`Loaded "${name}" ✓`, 'success');
+    }
     return true;
   } catch (err) {
     showError(`Failed to load ${fallbackName ? `"${fallbackName}"` : 'JSON'}: ${err.message}`);

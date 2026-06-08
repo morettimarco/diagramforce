@@ -1,8 +1,8 @@
 // Pre-built Salesforce architecture components
 // Each component is a config object describing a diagram element
 
-import { getIconDataUri } from './icons.js?v=1.15.3';
-import { getVisibleDataObjectFields } from './shapes.js?v=1.15.3';
+import { getIconDataUri } from './icons.js?v=1.15.4';
+import { getVisibleDataObjectFields } from './shapes.js?v=1.15.4';
 
 /** Convert inline stencilSvg markup to a data URI for use as a canvas icon.
  *  Each child element must carry its own fill/stroke — the wrapper SVG sets NO
@@ -1020,10 +1020,11 @@ export function resizeDataObjectToFit(cell) {
   // match — a private key-only copy here shrank the object to fit just the PK and
   // clipped every mapped row (the "Show Only Mapped is broken" bug).
   const visible = getVisibleDataObjectFields(cell);
-  const HEADER_H = 32;
-  const ROW_H = 22;
-  const height = HEADER_H + Math.max(visible.length, 1) * ROW_H + 4;
-  cell.resize(cell.size().width, height);
+  const HEADER_H = 32, ROW_H = 22, TOGGLE_H = 18;
+  // Collapsed → header + the collapse toggle row only; expanded → + the field rows. Must mirror
+  // DataObjectView._autoResize so the view and the model agree on height.
+  const rows = cell.get('collapsed') ? 0 : Math.max(visible.length, 1);
+  cell.resize(cell.size().width, HEADER_H + rows * ROW_H + TOGGLE_H);
 }
 
 // Lookup map from SVG content → registered icon ID (populated by getAllStencilSvgs)
@@ -1354,9 +1355,9 @@ export function createElementFromComponent(component, position = { x: 100, y: 10
       ];
       const objectName = component.objectName || label || 'Object';
       const headerColor = component.headerColor || '#1D73C9';
-      const HEADER_H = 32;
-      const ROW_H = 22;
-      const height = HEADER_H + Math.max(fields.length, 1) * ROW_H + 4;
+      const HEADER_H = 32, ROW_H = 22, TOGGLE_H = 18;
+      // + TOGGLE_H for the collapse/expand row the view always renders at the bottom.
+      const height = HEADER_H + Math.max(fields.length, 1) * ROW_H + TOGGLE_H;
       return new joint.shapes.sf.DataObject({
         position,
         size: { width: 260, height },

@@ -2,7 +2,8 @@
 // from canvas.js (Phase 4, Slice 4). migrateLinks/migrateNodes normalise legacy
 // marker + shape formats; updateSimpleNodeLayout re-centres SimpleNode content.
 // Reads the live graph/paper + refreshAllIconHrefs via the canvas context (cctx).
-import { cctx } from './context.js?v=1.15.3';
+import { cctx } from './context.js?v=1.15.4';
+import { getVisibleDataObjectFields } from '../shapes.js?v=1.15.4';
 
 // Legacy line-style dash strings → corrected standards. The line-style picklist
 // previews advertise round dots and long-dashes, but pre-fix saves stored
@@ -298,6 +299,19 @@ export function migrateNodes() {
       // Re-apply the optional header-icon layout so a loaded object with an icon keeps
       // its right-shifted label (and one without stays left-aligned). Idempotent.
       updateDataObjectHeaderLayout(el);
+      // Self-heal height for the v1.15.4 collapse toggle row: pre-1.15.4 saves sized the
+      // object with a 4px bottom pad (`+ 4`); the persistent toggle row is now 18px, so an
+      // un-migrated object would render the chevron overhanging its body by 14px. Recompute
+      // to the canonical `HEADER_H + rows·ROW_H + TOGGLE_H` (rows=0 when collapsed) so the
+      // body background contains the toggle. Idempotent: a no-op once heights already match.
+      // Must be non-silent: the body rect (height = calc(h)) only repaints on a real change:size
+      // — a silent resize leaves the stale height painted (verified — the async render does not
+      // pick up a silent size change). Runs inside the load's setLoadingJSON guard, so it doesn't
+      // count as a user edit (the autosave/dirty listener is wired after the initial restore).
+      const HEADER_H = 32, ROW_H = 22, TOGGLE_H = 18;
+      const rows = el.get('collapsed') ? 0 : Math.max(getVisibleDataObjectFields(el).length, 1);
+      const wantH = HEADER_H + rows * ROW_H + TOGGLE_H;
+      if (el.size().height !== wantH) el.resize(el.size().width, wantH);
     }
     // sf.Line stores its dash string directly on line/strokeDasharray; older
     // saves carry the pre-fix '3 4'/'16 8 2 8' values that no longer match the
