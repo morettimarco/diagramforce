@@ -6,12 +6,12 @@
 // runtime-only and reads live state/callbacks from the persistence context (pctx);
 // version checks + dedup signatures come from the leaf versioning module.
 
-import { contentSignature, checkVersionWarning } from './versioning.js?v=1.15.4';
-import { normalizeDateSuffix } from '../util.js?v=1.15.4';
-import { escHtml } from '../util.js?v=1.15.4';
-import { showToast, showError, buildModal } from '../feedback.js?v=1.15.4';
-import { pctx } from './context.js?v=1.15.4';
-import { slimForShare } from '../share-codec.js?v=1.15.4';
+import { contentSignature, checkVersionWarning } from './versioning.js?v=1.15.5';
+import { normalizeDateSuffix } from '../util.js?v=1.15.5';
+import { escHtml } from '../util.js?v=1.15.5';
+import { showToast, showError, buildModal } from '../feedback.js?v=1.15.5';
+import { pctx } from './context.js?v=1.15.5';
+import { slimForShare } from '../share-codec.js?v=1.15.5';
 
 // Maximum number of cells to accept from external sources (share URLs, JSON import)
 const MAX_CELL_COUNT = 2000;
@@ -83,7 +83,7 @@ export function sanitizeGraphJSON(graphData) {
   graphData.cells = graphData.cells.filter(c =>
     c && typeof c === 'object' && typeof c.type === 'string' && ALLOWED_CELL_TYPES.has(c.type)
   );
-  // S5 (v1.15.4) — drop links whose source/target references a cell that isn't
+  // S5 (v1.15.5) — drop links whose source/target references a cell that isn't
   // present. An LLM-authored diagram frequently names an object in a link that
   // it never actually defines (or mistypes the id) — exactly the Gemini failure
   // mode. Without this guard, graph.fromJSON throws "LinkView: invalid target

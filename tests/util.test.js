@@ -3,7 +3,7 @@
 // module-private and untestable (compareSemver, normalizeDateSuffix).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { escHtml, formatRelativeTime, compareSemver, normalizeDateSuffix } from '../js/util.js';
+import { escHtml, formatRelativeTime, compareSemver, normalizeDateSuffix, parseSolidColor, nodeContrastText } from '../js/util.js';
 
 test('escHtml escapes the five HTML-significant chars, & first (not double-escaped)', () => {
   assert.equal(escHtml(`&<>"'`), '&amp;&lt;&gt;&quot;&#39;');
@@ -41,4 +41,34 @@ test('normalizeDateSuffix heals a trailing YYYYMMDD → YYYY-MM-DD (only real da
   assert.equal(normalizeDateSuffix('Draft 20261332'), 'Draft 20261332');     // month 13 invalid → no-op
   assert.equal(normalizeDateSuffix('My Diagram'), 'My Diagram');
   assert.equal(normalizeDateSuffix(''), '');
+});
+
+test('parseSolidColor parses opaque hex / rgb(a) and rejects theme vars + translucent fills', () => {
+  assert.deepEqual(parseSolidColor('#FFFFFF'), [255, 255, 255]);
+  assert.deepEqual(parseSolidColor('#fff'), [255, 255, 255]);       // shorthand expands
+  assert.deepEqual(parseSolidColor('#1E293B'), [30, 41, 59]);
+  assert.deepEqual(parseSolidColor('rgb(13, 157, 218)'), [13, 157, 218]);
+  assert.deepEqual(parseSolidColor('rgba(255, 0, 0, 0.9)'), [255, 0, 0]); // alpha ≥ 0.6 ⇒ solid
+  // Not a usable solid colour ⇒ null (caller keeps the theme default):
+  assert.equal(parseSolidColor('var(--node-bg)'), null);            // theme-adaptive
+  assert.equal(parseSolidColor('rgba(148, 163, 184, 0.03)'), null); // translucent (Zone tint)
+  assert.equal(parseSolidColor('transparent'), null);
+  assert.equal(parseSolidColor('none'), null);
+  assert.equal(parseSolidColor('white'), null);                     // named colour (not handled)
+  assert.equal(parseSolidColor(''), null);
+  assert.equal(parseSolidColor(undefined), null);
+});
+
+test('nodeContrastText picks dark text on light bodies and light text on dark bodies', () => {
+  // Light bodies (the LLM "white card" case) ⇒ dark text, matching the light --node-text token.
+  assert.equal(nodeContrastText('#FFFFFF').label, '#1C1E21');
+  assert.equal(nodeContrastText('#FFF7ED').label, '#1C1E21');       // MC cream card
+  assert.match(nodeContrastText('#FFFFFF').subtitle, /^rgba\(0, 0, 0/);
+  // Dark bodies ⇒ light text, matching the dark --node-text token.
+  assert.equal(nodeContrastText('#242526').label, '#F5F6F7');
+  assert.equal(nodeContrastText('#1E293B').label, '#F5F6F7');
+  assert.match(nodeContrastText('#242526').subtitle, /^rgba\(255, 255, 255/);
+  // Theme-adaptive / translucent bodies ⇒ null (leave the text on the theme default).
+  assert.equal(nodeContrastText('var(--node-bg)'), null);
+  assert.equal(nodeContrastText('rgba(0,0,0,0.04)'), null);
 });

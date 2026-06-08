@@ -88,3 +88,47 @@ export function sanitizeFilenamePart(s, fallback = 'untitled') {
   if (!v) v = fallback;
   return v.slice(0, 80);
 }
+
+/**
+ * Parse a CSS colour string to `[r, g, b]` ONLY when it is an explicit, ~opaque solid —
+ * a `#rgb` / `#rrggbb` hex, or `rgb()/rgba()` with alpha ≥ 0.6. Returns null for `var(...)`
+ * references, `none`/`transparent`, translucent fills (alpha < 0.6, which mostly show the
+ * canvas behind them), and named colours. Used to decide whether a hardcoded node fill is a
+ * real, theme-independent colour we can compute text contrast against.
+ */
+export function parseSolidColor(c) {
+  if (typeof c !== 'string') return null;
+  const s = c.trim();
+  if (!s || s.startsWith('var(') || s === 'none' || s === 'transparent') return null;
+  let m = s.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
+  if (m) {
+    let h = m[1];
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  m = s.match(/^rgba?\(([^)]+)\)$/i);
+  if (m) {
+    const p = m[1].split(/[,\s/]+/).filter(Boolean);
+    if (p.length >= 3) {
+      const a = p[3] === undefined ? 1 : parseFloat(p[3]);
+      if (!(a >= 0.6)) return null;            // translucent ⇒ shows the canvas ⇒ treat as theme
+      return [parseInt(p[0], 10), parseInt(p[1], 10), parseInt(p[2], 10)];
+    }
+  }
+  return null;
+}
+
+/**
+ * Given an explicit `body.fill`, the label + subtitle colours that contrast it (dark text on a
+ * light body, light text on a dark body) — or null when the body is theme-adaptive/translucent
+ * (caller keeps the theme defaults). Threshold uses Rec. 709 perceptual luminance. The returned
+ * hexes match the light/dark `--node-text` tokens so a recoloured node matches its native peers.
+ */
+export function nodeContrastText(bodyFill) {
+  const rgb = parseSolidColor(bodyFill);
+  if (!rgb) return null;
+  const lum = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255;
+  return lum > 0.6
+    ? { label: '#1C1E21', subtitle: 'rgba(0, 0, 0, 0.55)' }       // light body ⇒ dark text
+    : { label: '#F5F6F7', subtitle: 'rgba(255, 255, 255, 0.6)' }; // dark body ⇒ light text
+}

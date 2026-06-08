@@ -1,13 +1,13 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { wrapSelectionWithMarker } from './markdown.js?v=1.15.4';
-import { confirmModal, showToast, buildModal } from './feedback.js?v=1.15.4';
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.15.4';
-import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, updateDataObjectHeaderLayout, syncMobilePanelHeight, canEmbed, applyMappingLinkStyle, applyRelationshipLinkStyle, syncMappingTypeBadge, syncFrequencyLabel } from './canvas.js?v=1.15.4';
-import * as stencilModule from './stencil.js?v=1.15.4';
-import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.15.4';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.15.4';
+import { wrapSelectionWithMarker } from './markdown.js?v=1.15.5';
+import { confirmModal, showToast, buildModal } from './feedback.js?v=1.15.5';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.15.5';
+import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, updateDataObjectHeaderLayout, syncMobilePanelHeight, canEmbed, applyMappingLinkStyle, applyRelationshipLinkStyle, syncMappingTypeBadge, syncFrequencyLabel } from './canvas.js?v=1.15.5';
+import * as stencilModule from './stencil.js?v=1.15.5';
+import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.15.5';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.15.5';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -16,13 +16,13 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.15.4';
-import * as history from './history.js?v=1.15.4';
-import { startImageAddFlow } from './image-component.js?v=1.15.4';
-import { escHtml, sanitizeFilenamePart } from './util.js?v=1.15.4';
-import { getActiveTabName } from './tabs.js?v=1.15.4';
-import { saveSelectionAsTemplate } from './templates.js?v=1.15.4';
-import { newFid } from './shapes.js?v=1.15.4';
+} from './clipboard.js?v=1.15.5';
+import * as history from './history.js?v=1.15.5';
+import { startImageAddFlow } from './image-component.js?v=1.15.5';
+import { escHtml, sanitizeFilenamePart } from './util.js?v=1.15.5';
+import { getActiveTabName } from './tabs.js?v=1.15.5';
+import { saveSelectionAsTemplate } from './templates.js?v=1.15.5';
+import { newFid } from './shapes.js?v=1.15.5';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
@@ -863,12 +863,96 @@ function showMultiProperties(count) {
   const ids = selection.getSelectedIds();
   const cells = ids.map(id => graph.getCell(id)).filter(Boolean);
   const elements = cells.filter(c => c.isElement());
+  const links = cells.filter(c => c.isLink());
+
+  // ── Connectors — shared appearance for the selected links (Colour / Line style / Line
+  // width). Shown for ANY selection that includes links (pure-link or mixed) so many
+  // connectors can be recoloured at once; each control applies to every selected link in ONE
+  // undo step. (Previously a pure-link multi-select read "No elements selected" — no edits.)
+  // refresh() only re-renders a SINGLE-cell panel, so the multi panel re-renders itself by
+  // re-running showMultiProperties — needed when a control changes which fields apply
+  // (Connection type → mapping fields appear/vanish; Mapping type → Expression discloses).
+  const rerenderMulti = () => showMultiProperties(count);
+
+  const renderConnectorSection = () => {
+    if (links.length === 0) return;
+
+    // ── Mapping (Data Cloud) — shown when EVERY selected link is a field→field connector, so a
+    // batch of mappings (e.g. one source field fanned to several DMOs) can take one shared
+    // Connection type / Mapping type / Expression in a single undo step. Mirrors the single-link
+    // Content controls; each applies to every selected mapping link.
+    const isFieldToField = (l) => {
+      const s = l.get('source'), t = l.get('target');
+      return typeof s?.port === 'string' && s.port.startsWith('field-')
+          && typeof t?.port === 'string' && t.port.startsWith('field-');
+    };
+    if (links.every(isFieldToField)) {
+      const mapSec = section(bodyEl, 'Mapping');
+      const kinds = links.map(l => l.prop('linkKind') === 'mapping' ? 'mapping' : 'relationship');
+      addSegmented(mapSec, 'Connection type', kinds[0], [
+        { value: 'relationship', label: 'Relationship' },
+        { value: 'mapping', label: 'Mapping' },
+      ], v => {
+        history.startBatch();
+        try { links.forEach(l => applyLinkConnectionType(l, v)); } finally { history.endBatch(); }
+        rerenderMulti();   // mapping fields appear (→ mapping) or vanish (→ relationship)
+      });
+      if (links.every(l => l.prop('linkKind') === 'mapping')) {
+        const types = links.map(l => MAPPING_TYPES.includes(l.prop('mappingType')) ? l.prop('mappingType') : 'Standard');
+        const sameType = types.every(t => t === types[0]);
+        addSelect(mapSec, 'Mapping type', sameType ? types[0] : 'Standard',
+          MAPPING_TYPES.map(t => ({ value: t, label: t })), v => {
+            history.startBatch();
+            try { links.forEach(l => applyLinkMappingType(l, v)); } finally { history.endBatch(); }
+            rerenderMulti();   // Expression discloses/hides for the new shared type
+          });
+        // Expression / rules — disclosed once the selection shares a single non-Standard type
+        // (the "same field, same transformation across DMOs" case). Blank = mixed: type to set all.
+        if (sameType && types[0] !== 'Standard') {
+          const exprs = links.map(l => l.prop('expressionRule') || l.prop('mappingLabel') || '');
+          const sameExpr = exprs.every(e => e === exprs[0]);
+          addText(mapSec, 'Expression / rules', sameExpr ? exprs[0] : '', v => {
+            history.startBatch();
+            try { links.forEach(l => applyLinkExpression(l, v)); } finally { history.endBatch(); }
+          }, null, sameExpr ? undefined : { placeholder: 'Multiple — type to set all' });
+        }
+      }
+    }
+
+    const sec = section(bodyEl, 'Connectors');
+    const strokes = links.map(l => l.attr('line/stroke')).filter(v => v != null && v !== '');
+    const sameStroke = strokes.length === links.length && strokes.every(s => s === strokes[0]);
+    addColorMulti(sec, 'Color', sameStroke ? strokes[0] : null, v => {
+      history.startBatch();
+      try { links.forEach(l => applyLinkStroke(l, v)); } finally { history.endBatch(); }
+    });
+    const styles = links.map(l => l.prop('lineStyle') || 'none');
+    const sameStyle = styles.every(s => s === styles[0]);
+    addSelect(sec, 'Line style', sameStyle ? styles[0] : 'none', LINK_LINE_STYLE_OPTS, v => {
+      history.startBatch();
+      try { links.forEach(l => applyLinkLineStyle(l, v)); } finally { history.endBatch(); }
+    });
+    const widths = links.map(l => l.attr('line/strokeWidth') ?? 2);
+    const sameWidth = widths.every(w => w === widths[0]);
+    addNumber(sec, 'Line width', sameWidth ? widths[0] : '', v => {
+      history.startBatch();
+      try { links.forEach(l => applyLinkStrokeWidth(l, v)); } finally { history.endBatch(); }
+    });
+  };
 
   if (elements.length === 0) {
-    bodyEl.innerHTML = `<p class="df-properties__multi-msg">No elements selected.</p>`;
+    // Pure-connector selection — the element-centric sections below don't apply.
+    if (links.length === 0) {
+      bodyEl.innerHTML = `<p class="df-properties__multi-msg">No editable cells selected.</p>`;
+    } else {
+      renderConnectorSection();
+    }
     addDeleteBtn(footerEl, () => { graph.removeCells(cells); selection.clearSelection(); });
     return;
   }
+
+  // Mixed selection (elements + links): connector appearance first, then the element sections.
+  renderConnectorSection();
 
   // ── Colors section — only shown when the selected types have at least
   // one shared color slot. We intersect each type's schema by label so we
@@ -3425,6 +3509,85 @@ function renderSequenceFragmentProps(cell) {
   addDeleteBtn(footerEl, () => { graph.removeCells([cell]); selection.clearSelection(); });
 }
 
+// ── Shared connector-appearance setters ───────────────────────────────────────
+// Used by BOTH the single-link panel (renderLinkProps) and the multi-select Connectors
+// section so a one-link edit and a many-link edit behave identically. None of these opens a
+// history batch — the CALLER wraps (one undo step per edit, however many links it touches).
+
+// Connector line-style picklist (Solid / Dashed / Dotted) — em-space gap then a sample.
+// `lineStyle` is a top-level prop (a bg-coloured overlay clone paints the dashes; the real
+// path stays solid so arrow/ER markers render crisp on Safari — see startLineStyleOverlays).
+const LINK_LINE_STYLE_OPTS = (() => {
+  const G = '   ';
+  return [
+    { value: 'none', label: `Solid${G}─────` },
+    { value: '8 4',  label: `Dashed${G}╌ ╌ ╌ ╌ ╌` },
+    { value: '2 4',  label: `Dotted${G}· · · · · · ·` },
+  ];
+})();
+
+// Line colour. Arrow markers auto-inherit from the line; ER/stub markers carry an explicit
+// stroke that must track it; a mapping badge re-tints; and the link's SVG group is re-inserted
+// to dodge Safari's <marker> cache (full attrs replacement + sync render — see applyMarker).
+function applyLinkStroke(cell, v) {
+  const allAttrs = JSON.parse(JSON.stringify(cell.get('attrs') || {}));
+  if (!allAttrs.line) allAttrs.line = {};
+  allAttrs.line.stroke = v;
+  const sm = allAttrs.line.sourceMarker;
+  if (sm && sm.stroke && sm.stroke !== 'none') sm.stroke = v;
+  const tm = allAttrs.line.targetMarker;
+  if (tm && tm.stroke && tm.stroke !== 'none') tm.stroke = v;
+  cell.set('attrs', allAttrs);
+  if (cell.prop('linkKind') === 'mapping') syncMappingTypeBadge(cell);
+  paper.updateViews();
+  const view = paper.findViewByModel(cell);
+  if (view?.el?.parentNode) {
+    const parent = view.el.parentNode;
+    const next = view.el.nextSibling;
+    parent.removeChild(view.el);
+    if (next) parent.insertBefore(view.el, next);
+    else parent.appendChild(view.el);
+  }
+}
+
+// Line width. A plain "None" stub end (`M 0 0 L -12 0`) is a continuation of the line, so it
+// tracks the width; decorated ends (arrow / crow's foot) keep their own weight.
+function applyLinkStrokeWidth(cell, v) {
+  cell.attr('line/strokeWidth', v);
+  for (const end of ['sourceMarker', 'targetMarker']) {
+    if (cell.attr(`line/${end}`)?.d === 'M 0 0 L -12 0') cell.attr(`line/${end}/stroke-width`, v);
+  }
+}
+
+// Line style → the `lineStyle` prop (never `line/strokeDasharray`, which is force-cleared as
+// defence-in-depth so the real path stays solid for crisp Safari markers).
+function applyLinkLineStyle(cell, v) {
+  cell.prop('lineStyle', v === 'none' ? null : v);
+  if (cell.attr('line/strokeDasharray')) cell.attr('line/strokeDasharray', null);
+}
+
+// ── Shared Data Cloud mapping setters (single-link panel + multi-select Mapping section) ──
+// The 5-value transform picklist, shared so single + multi stay in lockstep.
+const MAPPING_TYPES = ['Standard', 'Formula', 'Streaming Transform', 'Batch Transform', 'Calculated Insight'];
+
+// Connection type for a field→field link: mapping ↔ relationship. Swaps `linkKind` and the
+// whole router/connector/marker style. No history batch and no panel re-render — the caller
+// owns both (it must re-render to disclose/hide the mapping fields).
+function applyLinkConnectionType(cell, v) {
+  if (v === 'mapping') { cell.prop('linkKind', 'mapping'); applyMappingLinkStyle(cell); }
+  else { cell.prop('linkKind', null); applyRelationshipLinkStyle(cell); }
+}
+// Mapping transform type (Standard / Formula / …) + its connector code badge (F / ST / BT / CI).
+function applyLinkMappingType(cell, v) {
+  cell.prop('mappingType', v);
+  syncMappingTypeBadge(cell);
+}
+// Expression / rule note (non-Standard types) → table Expression column + badge hover tooltip.
+function applyLinkExpression(cell, v) {
+  cell.prop('expressionRule', v || '');
+  syncMappingTypeBadge(cell);
+}
+
 function renderLinkProps(cell) {
   // Content — primary text only (Font size moved to Appearance for
   // consistency with every other shape's typography placement).
@@ -3485,15 +3648,9 @@ function renderLinkProps(cell) {
       { value: 'mapping', label: 'Mapping' },
     ], v => {
       // One history step for the whole switch — it mutates linkKind + several attrs +
-      // router + connector + connectionPoints, and without batching undo/redo would
-      // step through each change instead of the single click the user made.
+      // router + connector + connectionPoints (shared with the multi-select Mapping section).
       history.startBatch();
-      try {
-        if (v === 'mapping') { cell.prop('linkKind', 'mapping'); applyMappingLinkStyle(cell); }
-        else { cell.prop('linkKind', null); applyRelationshipLinkStyle(cell); }
-      } finally {
-        history.endBatch();
-      }
+      try { applyLinkConnectionType(cell, v); } finally { history.endBatch(); }
       refresh();
     });
 
@@ -3503,34 +3660,20 @@ function renderLinkProps(cell) {
     // TYPE / Mapping Label columns; non-Standard types also drop a code badge (F / ST
     // / BT / CI) on the connector's target stub via syncMappingTypeBadge.
     if (cell.prop('linkKind') === 'mapping') {
-      const MAPPING_TYPES = ['Standard', 'Formula', 'Streaming Transform', 'Batch Transform', 'Calculated Insight'];
       const curType = MAPPING_TYPES.includes(cell.prop('mappingType')) ? cell.prop('mappingType') : 'Standard';
       addSelect(labelSec, 'Mapping type', curType,
         MAPPING_TYPES.map(t => ({ value: t, label: t })),
         v => {
-          // One undo step for the whole switch (prop + label badge).
           history.startBatch();
-          try {
-            cell.prop('mappingType', v);
-            syncMappingTypeBadge(cell);
-          } finally {
-            history.endBatch();
-          }
+          try { applyLinkMappingType(cell, v); } finally { history.endBatch(); }
           refresh();   // re-render so the Expression field shows/hides for the new type
         });
       // Progressive disclosure: any non-Standard (computed) transform exposes the
       // Expression / rules note, bound to `expressionRule` → table Expression / Rule column.
       if (curType !== 'Standard') {
         addText(labelSec, 'Expression / rules', cell.prop('expressionRule') || cell.prop('mappingLabel') || '', v => {
-          // One undo step (prop + badge tooltip). Re-sync so the connector token's hover
-          // tooltip reflects the new rule immediately, without a reload.
           history.startBatch();
-          try {
-            cell.prop('expressionRule', v || '');
-            syncMappingTypeBadge(cell);
-          } finally {
-            history.endBatch();
-          }
+          try { applyLinkExpression(cell, v); } finally { history.endBatch(); }
         });
       }
     }
@@ -3540,66 +3683,14 @@ function renderLinkProps(cell) {
   const appearance = section(bodyEl, 'Appearance');
   addColor(appearance, 'Color', cell.attr('line/stroke') ?? '#888888',
     v => {
-      // Full attrs replacement with sync rendering for Safari compatibility.
-      // Arrow markers (no explicit fill/stroke) auto-inherit from line stroke.
-      // ER markers with explicit stroke need manual sync.
-      history.startBatch();   // attrs + (mapping) badge label = one undo step
-      try {
-      const allAttrs = JSON.parse(JSON.stringify(cell.get('attrs') || {}));
-      if (!allAttrs.line) allAttrs.line = {};
-      allAttrs.line.stroke = v;
-      const sm = allAttrs.line.sourceMarker;
-      if (sm && sm.stroke && sm.stroke !== 'none') sm.stroke = v;
-      const tm = allAttrs.line.targetMarker;
-      if (tm && tm.stroke && tm.stroke !== 'none') tm.stroke = v;
-      cell.set('attrs', allAttrs);
-      // A mapping-type badge's border + letters track the connector's colour.
-      if (cell.prop('linkKind') === 'mapping') syncMappingTypeBadge(cell);
-      paper.updateViews();
-      // Safari SVG marker cache workaround — see applyMarker() below for the
-      // why. Same DOM re-insert pattern.
-      const view = paper.findViewByModel(cell);
-      if (view?.el?.parentNode) {
-        const parent = view.el.parentNode;
-        const next = view.el.nextSibling;
-        parent.removeChild(view.el);
-        if (next) parent.insertBefore(view.el, next);
-        else parent.appendChild(view.el);
-      }
-      } finally {
-        history.endBatch();
-      }
+      // attrs + (mapping) badge label = one undo step; shared with the multi-select panel.
+      history.startBatch();
+      try { applyLinkStroke(cell, v); } finally { history.endBatch(); }
     });
-  // Same name → em-space gap → line-sample convention as
-  // renderLineProps, minus 'breaks' (links use only the three standard
-  // dash patterns).
-  const EM = ' ';
-  const GAP = EM + EM + EM;
-  addSelect(appearance, 'Line style', cell.prop('lineStyle') || 'none', [
-    { value: 'none', label: `Solid${GAP}─────` },
-    { value: '8 4',  label: `Dashed${GAP}╌ ╌ ╌ ╌ ╌` },
-    { value: '2 4',  label: `Dotted${GAP}· · · · · · ·` },
-  ], v => {
-    // The line style is stored on a custom `lineStyle` prop — NOT on
-    // `line/strokeDasharray` — so the rendered line always stays solid
-    // (keeping arrow/ER markers crisp in Safari, which otherwise
-    // propagates dasharray into marker content at the renderer level).
-    // canvas.js' startLineStyleOverlays() paints a bg-coloured clone that
-    // "erases" stripes to simulate the dash pattern.
-    cell.prop('lineStyle', v === 'none' ? null : v);
-    // Defence in depth: make sure the native line dasharray never lands
-    // on the real path, even if some legacy code path writes it.
-    if (cell.attr('line/strokeDasharray')) cell.attr('line/strokeDasharray', null);
-  });
+  addSelect(appearance, 'Line style', cell.prop('lineStyle') || 'none', LINK_LINE_STYLE_OPTS,
+    v => applyLinkLineStyle(cell, v));
   addNumber(appearance, 'Line width', cell.attr('line/strokeWidth') ?? 2,
-    v => {
-      cell.attr('line/strokeWidth', v);
-      // A plain "None" end is a continuation of the line, so it tracks the line
-      // width; any decorated end (arrow / crow's foot) keeps its own weight.
-      for (const end of ['sourceMarker', 'targetMarker']) {
-        if (cell.attr(`line/${end}`)?.d === 'M 0 0 L -12 0') cell.attr(`line/${end}/stroke-width`, v);
-      }
-    });
+    v => applyLinkStrokeWidth(cell, v));
   // Font size — connector label typography. Lives in Appearance for
   // consistency with the universal convention (text content in Content;
   // text styling in Appearance).

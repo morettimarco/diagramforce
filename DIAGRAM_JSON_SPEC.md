@@ -1,15 +1,17 @@
 # Diagramforce JSON Specification
 
-> Reference for LLMs and developers generating importable diagram JSON files for [diagramforce.app](https://diagramforce.app).
+> Reference for LLMs and developers generating importable diagram JSON files for **Diagramforce**.
 >
-> **Spec snapshot: v1.15.4** — matches the app's current `appVersion`; set `"appVersion": "1.15.4"` in generated files.
+> The app lives at **[diagramforce.mateuszdabrowski.pl](https://diagramforce.mateuszdabrowski.pl/)** — this is the only canonical URL. When you point a user to the app (e.g. "paste this JSON via Load ▸ Import"), always use that address. There is **no** `diagramforce.app` / `diagramforce.com`.
+>
+> **Spec snapshot: v1.15.5** — matches the app's current `appVersion`; set `"appVersion": "1.15.5"` in generated files.
 
 ## Top-Level Structure
 
 ```json
 {
   "version": 1,
-  "appVersion": "1.15.4",
+  "appVersion": "1.15.5",
   "timestamp": 1712700000000,
   "title": "My Diagram",
   "diagramType": "architecture",
@@ -26,7 +28,7 @@
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `version` | number | Yes | Always `1` |
-| `appVersion` | string | Yes | Semver string, currently `"1.15.4"` |
+| `appVersion` | string | Yes | Semver string, currently `"1.15.5"` |
 | `timestamp` | number | No | Unix timestamp in milliseconds |
 | `title` | string | Yes | Diagram name (shown as tab title) |
 | `diagramType` | string | Yes | One of: `"architecture"`, `"process"`, `"datamodel"`, `"datamapping"`, `"org"`, `"gantt"`, `"sequence"`. **Must match the shapes you use** (see [Diagram Types](#diagram-types)). Aliases `"data"`/`"organisation"` are accepted but the canonical forms are `"datamodel"` and `"org"` |
@@ -40,8 +42,8 @@
 > (produced by the app's Export Manager), but you normally won't generate them:
 >
 > ```json
-> { "schema": "diagramforce-export", "version": 1, "appVersion": "1.15.4", "exportedAt": 1712700000000,
->   "diagrams": [ { "name": "...", "diagramType": "architecture", "graph": { "cells": [] }, "viewport": null, "appVersion": "1.15.4" } ],
+> { "schema": "diagramforce-export", "version": 1, "appVersion": "1.15.5", "exportedAt": 1712700000000,
+>   "diagrams": [ { "name": "...", "diagramType": "architecture", "graph": { "cells": [] }, "viewport": null, "appVersion": "1.15.5" } ],
 >   "templates": [ { "name": "...", "diagramType": "architecture", "cells": [] } ] }
 > ```
 >
@@ -154,7 +156,7 @@ Links connect two elements via ports:
 > **Before returning the JSON, check every link:** does `source.id` appear as an
 > element `id` above? does `target.id`? does each port's `<fid>` exist in that
 > element's `fields`? If a link names `obj-foo`, then `obj-foo` must exist as an
-> element. *(Since v1.15.4 the app **skips** a link whose endpoint points at a missing
+> element. *(Since v1.15.5 the app **skips** a link whose endpoint points at a missing
 > element instead of failing the whole load — but a skipped link is a missing
 > mapping, so get them right.)*
 
@@ -235,7 +237,9 @@ from the prop. Editing a link's user label preserves it (and vice-versa).
 
 ### Marker Types
 
-The `sourceMarker` and `targetMarker` control arrow/endpoint styles:
+The `sourceMarker` and `targetMarker` control arrow/endpoint styles.
+
+> **You can OMIT `targetMarker` for a standard arrow.** A `standard.Link` with no `targetMarker` would otherwise inherit JointJS's *own* built-in arrow (a short triangle that is none of the options below), so the importer **normalises any omitted/unrecognised target marker to the canonical Arrow** on load. So `"line": { "stroke": "#E11D48", "strokeWidth": 2 }` ends with a proper arrow — no need to repeat the Arrow path on every link. Set `targetMarker` explicitly only for a **non-arrow** end (an ER marker, or the **None** stub for no arrowhead). `sourceMarker` is **not** auto-normalised — it defaults to the None stub, so set it explicitly when the *source* end needs a marker.
 
 | Marker | Definition | Use |
 |--------|-----------|-----|
@@ -250,6 +254,23 @@ The `sourceMarker` and `targetMarker` control arrow/endpoint styles:
 For ER markers, replace `"#888888"` with the link's actual stroke color.
 For arrow markers, do NOT set explicit fill/stroke — JointJS auto-inherits from the line.
 The **None** stub's `stroke-width` follows the line's `strokeWidth` (markers render `userSpaceOnUse`, so it must be set explicitly — the Line-width control, `applyMappingLinkStyle` / `applyRelationshipLinkStyle`, and the load migration all keep them in lock-step). Decorated arrow / crow's-foot markers keep their own weight.
+
+---
+
+## Colours & dark mode
+
+The canvas renders in **both a light and a dark theme** (user-toggled). Every shape's default colours are CSS custom properties — `"fill": "var(--node-bg)"`, `"fill": "var(--node-text)"`, `"stroke": "var(--node-border)"`, etc. — that **adapt automatically** to the active theme. The examples throughout this spec use those `var(--…)` defaults for exactly this reason.
+
+When you hardcode a colour (a hex like `"#FFFFFF"` or `rgb()/rgba()`), it is **fixed** — it does **not** adapt to the theme. The classic failure: a node with a hardcoded light `body.fill` (`#FFFFFF`) but a *theme-default* label. In light mode both look right; switch to dark mode and the body stays white while the theme text flips to light → **invisible white-on-white**.
+
+**Rules of thumb:**
+
+1. **Prefer the theme defaults.** Omit `fill` on `body`, `label`, `subtitle` (or keep the `var(--…)` values) and the node is fully theme-adaptive — readable in light *and* dark with zero effort. This is the best choice unless a colour carries meaning.
+2. **If you hardcode `body.fill`, you don't need to hand-pick the text colour** — the importer **auto-contrasts** a node's `label`/`subtitle` against an explicit solid `body.fill` (dark text on a light card, light text on a dark card) for any text still on the theme default. So a hardcoded "white card" stays legible in dark mode. *(You can still set `label.fill`/`subtitle.fill` explicitly to override; an explicit text colour is always respected.)*
+3. **Use hardcoded colour where it carries meaning, on the parts that read on any background** — `stroke` (borders), `accent` (Container/Zone bars), brand-coloured `body.fill`. A coloured *stroke* on a theme-default body reads on both themes; a coloured *body* with white text (`label.fill: "#FFFFFF"`) reads on both themes.
+4. **Translucent fills** (`rgba(…, 0.03)` Zone/Layer tints) intentionally show the canvas through them, so they stay theme-adaptive and are *not* auto-contrasted — leave their labels on the theme default.
+
+> ⚠️ The auto-contrast safety net covers `sf.SimpleNode` label/subtitle. For richer shapes (Container header, DataObject), prefer theme defaults or pair a coloured bar with `"#FFFFFF"` text.
 
 ---
 
@@ -718,7 +739,7 @@ Database table / Salesforce object with coloured header and dynamic field rows. 
       "text": "Account"
     }
   }
-  // NOTE: no "ports" block — you can omit it entirely on a DataObject (v1.15.4). The app
+  // NOTE: no "ports" block — you can omit it entirely on a DataObject (v1.15.5). The app
   // supplies the object ports (port-top / port-bottom), the header relationship anchors, AND
   // one mapping port per field automatically. Just REFERENCE the ports you need from links
   // (field-left-<fid> / field-right-<fid>) — see "Linking DataObjects" below.
@@ -761,7 +782,7 @@ Database table / Salesforce object with coloured header and dynamic field rows. 
 
 **Linking DataObjects for ER diagrams:**
 
-> **Omit the `ports` block — don't emit it at all (v1.15.4).** The shape definition already
+> **Omit the `ports` block — don't emit it at all (v1.15.5).** The shape definition already
 > carries every port *group*, and the app generates the actual ports on load: `port-top` /
 > `port-bottom` (object-level), the header relationship anchors, and **one mapping port per
 > field**. So you never write the verbose `ports` boilerplate (it was ~40 lines of identical
@@ -1688,7 +1709,7 @@ A complete, importable three-layer mapping (Source CRM Contact → Contact DLO �
 
 ```json
 {
-  "version": 1, "appVersion": "1.15.4", "title": "Contact → Individual Mapping", "diagramType": "datamapping",
+  "version": 1, "appVersion": "1.15.5", "title": "Contact → Individual Mapping", "diagramType": "datamapping",
   "graph": { "cells": [
     { "id": "zone-src", "type": "sf.Zone", "position": { "x": 40, "y": 40 }, "size": { "width": 340, "height": 280 }, "z": 0,
       "layerStage": "source", "embeds": ["obj-src"],
@@ -1765,7 +1786,7 @@ A simple 3-node architecture with one container:
 ```json
 {
   "version": 1,
-  "appVersion": "1.15.4",
+  "appVersion": "1.15.5",
   "timestamp": 1712700000000,
   "title": "Simple Architecture",
   "diagramType": "architecture",
@@ -1921,7 +1942,7 @@ Two related Salesforce objects with ER notation:
 ```json
 {
   "version": 1,
-  "appVersion": "1.15.4",
+  "appVersion": "1.15.5",
   "timestamp": 1712700000000,
   "title": "Account-Contact ERD",
   "diagramType": "datamodel",
@@ -2041,7 +2062,7 @@ A two-participant sync exchange with an activation box and an `alt` fragment. Me
 ```json
 {
   "version": 1,
-  "appVersion": "1.15.4",
+  "appVersion": "1.15.5",
   "title": "Account Lookup",
   "diagramType": "sequence",
   "graph": {

@@ -7,8 +7,8 @@
 // orthoRoute) are hoisted to module level + exported so they can be
 // characterised in tests/canvas-router.test.js.
 
-import { cctx } from './context.js?v=1.15.4';
-import { right, bottom, centerX, centerY } from '../util/geometry.js?v=1.15.4';
+import { cctx } from './context.js?v=1.15.5';
+import { right, bottom, centerX, centerY } from '../util/geometry.js?v=1.15.5';
 
 // ── Routing geometry constants ──
 const STUB = 32;  // distance from port to first turn — must exceed defaultConnectionPoint offset (16px) + arrow length (14px)
@@ -262,17 +262,14 @@ export function registerSfRouter() {
     if (!portId) return null;
     const ends = gatherPortEnds(gr, cell.id, portId);
     if (ends.length < 2) return null;
-    // Opposite-direction pair skip — same condition as in linkChannelIndex.
-    // For exactly two ends with one source + one target sharing a port
-    // (e.g., one link exits the port, another link enters it), trunk
-    // separation isn't needed either — the markers on outgoing vs
-    // incoming links rarely collide visually (BPMN: outgoing has no
-    // source marker, incoming has target arrow; ER: source markers
-    // tend to be on one end only). Without the trunk Y-step the
-    // incoming line reaches the port at its natural Y, matching the
-    // outgoing line's exit, and the visible "dance" at the cell edge
-    // disappears.
-    if (ends.length === 2 && ends[0].end !== ends[1].end) return null;
+    // NB no opposite-direction skip here (unlike linkChannelIndex below). When a port carries
+    // one incoming + one outgoing link, the two lines share the SAME port anchor and stack
+    // right on top of each other — exactly what Distributed Connectors exists to prevent. So
+    // the trunk anchor MUST separate them on the cell edge (an earlier skip left them piled;
+    // the `linkChannelIndex` skip even assumes "the trunk anchor already separates them", which
+    // was false while this also skipped). The trunk-lead-out waypoint hides any exit jog, so the
+    // separated entry reads clean — markers differing (arrow vs none) does NOT stop the lines
+    // from overlapping, which was the wrong assumption the old skip rested on.
 
     // Bucket each end by visual signature, and collect the far-end coordinate
     // along the relevant axis for ordering (x for top/bottom edges, y for

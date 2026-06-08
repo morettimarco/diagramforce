@@ -2,8 +2,9 @@
 // from canvas.js (Phase 4, Slice 4). migrateLinks/migrateNodes normalise legacy
 // marker + shape formats; updateSimpleNodeLayout re-centres SimpleNode content.
 // Reads the live graph/paper + refreshAllIconHrefs via the canvas context (cctx).
-import { cctx } from './context.js?v=1.15.4';
-import { getVisibleDataObjectFields } from '../shapes.js?v=1.15.4';
+import { cctx } from './context.js?v=1.15.5';
+import { getVisibleDataObjectFields } from '../shapes.js?v=1.15.5';
+import { nodeContrastText } from '../util.js?v=1.15.5';
 
 // Legacy line-style dash strings → corrected standards. The line-style picklist
 // previews advertise round dots and long-dashes, but pre-fix saves stored
@@ -129,6 +130,16 @@ export function migrateLinks() {
         const sw = 2;
         const markerFill = hasCircle ? 'var(--bg-canvas, #1A1A1A)' : 'none';
         link.attr(`line/${key}`, { type: 'path', d: newD, fill: markerFill, stroke, 'stroke-width': sw });
+      }
+      // Any OTHER (unrecognised) TARGET marker — most commonly the JointJS standard.Link
+      // built-in arrow that leaks in when imported / LLM JSON sets `line.stroke` but OMITS
+      // `targetMarker`: the deep-merge keeps JointJS's default `M 10 -5 0 0 10 5 z`, a short
+      // filled arrow that is none of the app's marker options. Normalise it to the app's
+      // canonical arrowhead so every connector ends exactly like a UI-drawn one. Target end
+      // only (source ends default to the plain stub above). An explicit arrow-LESS end is
+      // `{ type: 'none' }` (no `d`) and is skipped by the `!m?.d` guard, so it stays bare.
+      else if (key === 'targetMarker') {
+        link.attr('line/targetMarker', { type: 'path', d: 'M 0 -6 L -14 0 L 0 6 z' });
       }
     }
 
@@ -257,6 +268,32 @@ export function updateSimpleNodeLayout(cell) {
   }
 }
 
+// ── Theme-aware text contrast for hardcoded node colours ──────────────────────
+// LLM-generated / imported diagrams routinely hardcode a light `body.fill` (e.g. #FFFFFF)
+// tuned for light mode but leave label/subtitle on the theme default (var(--node-text)).
+// In dark mode the theme text flips to light → invisible on the still-light body. When a
+// SimpleNode's body is an explicit SOLID colour, bake a contrasting text colour (via util's
+// nodeContrastText) for any label/subtitle still on the theme default — readable in BOTH
+// themes, because an explicit body is theme-independent so the contrast is valid in light and
+// dark alike. Explicit text colours (the author's choice) and theme-adaptive / translucent
+// bodies are left untouched (the latter show the canvas, so the theme default is correct).
+
+// A fill is "theme default" (safe to recolour) when it's absent or a CSS var() reference.
+function isThemeDefaultFill(c) {
+  return !c || (typeof c === 'string' && c.trim().startsWith('var('));
+}
+
+// Bake contrasting label/subtitle colours onto a SimpleNode whose body is an explicit solid
+// colour, for any text still on the theme default. No-op for theme-adaptive bodies (text keeps
+// adapting) and for explicitly-coloured text. Runs on load (migrateNodes); idempotent.
+export function applyNodeTextContrast(cell) {
+  if (cell.get('type') !== 'sf.SimpleNode') return;
+  const contrast = nodeContrastText(cell.attr('body/fill'));
+  if (!contrast) return;
+  if (isThemeDefaultFill(cell.attr('label/fill'))) cell.attr('label/fill', contrast.label);
+  if (isThemeDefaultFill(cell.attr('subtitle/fill'))) cell.attr('subtitle/fill', contrast.subtitle);
+}
+
 // Optional header icon for a DataObject (Data Model / Data Mapping). Empty by
 // default; when an icon is picked, show it on the LEFT of the header bar and shift
 // the object-name label right to clear it. Mirrors updateSimpleNodeLayout — a
@@ -283,6 +320,10 @@ export function migrateNodes() {
   for (const el of graph.getElements()) {
     if (el.get('type') === 'sf.SimpleNode' && !el.get('iconMode')) {
       updateSimpleNodeLayout(el);
+      // Keep hardcoded light "cards" (common in LLM/imported diagrams) legible in dark mode:
+      // bake a contrasting text colour when the body is an explicit solid but the text is the
+      // theme default (which would otherwise flip to light and vanish on the light body).
+      applyNodeTextContrast(el);
     }
     // The field "Decommissioned" flag was renamed to "Deprecated" — carry the old
     // `decommissioned` property forward to `deprecated` so pre-rename diagrams keep
@@ -299,7 +340,7 @@ export function migrateNodes() {
       // Re-apply the optional header-icon layout so a loaded object with an icon keeps
       // its right-shifted label (and one without stays left-aligned). Idempotent.
       updateDataObjectHeaderLayout(el);
-      // Self-heal height for the v1.15.4 collapse toggle row: pre-1.15.4 saves sized the
+      // Self-heal height for the v1.15.5 collapse toggle row: pre-1.15.5 saves sized the
       // object with a 4px bottom pad (`+ 4`); the persistent toggle row is now 18px, so an
       // un-migrated object would render the chevron overhanging its body by 14px. Recompute
       // to the canonical `HEADER_H + rows·ROW_H + TOGGLE_H` (rows=0 when collapsed) so the
