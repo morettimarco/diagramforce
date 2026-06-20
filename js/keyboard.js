@@ -32,7 +32,7 @@ const PC_TOKENS  = { Ctrl: 'Ctrl', Cmd: 'Ctrl', Meta: 'Ctrl', Alt: 'Alt', Option
  * Final glyphs on macOS are joined without a `+` separator (Apple HIG
  * convention: "⌘S", "⌘⇧Z"). Other platforms use plain "Ctrl+S".
  */
-export function kbd(combo) {
+function kbd(combo) {
   if (typeof combo !== 'string' || !combo) return '';
   const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
   if (IS_MAC) {
@@ -47,7 +47,7 @@ export function kbd(combo) {
  * glyphs. Idempotent — running it twice is harmless because the kbd()
  * output never contains a literal "Ctrl+" on macOS.
  */
-export function applyPlatformShortcutsToTooltips() {
+function applyPlatformShortcutsToTooltips() {
   // Match `(Ctrl+X)`, `(Ctrl+Shift+Z)`, etc. inside a title=. Outer parens
   // are preserved; only the combo inside gets rewritten when it contains
   // at least one named modifier (Ctrl/Shift/Alt/Cmd/Meta). Bare-token
@@ -80,6 +80,10 @@ function handleKeydown(evt) {
   const tag = evt.target.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || evt.target.isContentEditable) return;
 
+  // While the guided walkthrough is open it owns the keyboard (Tab/Escape via trapFocus,
+  // arrows via its own handler) — don't fire canvas shortcuts behind the overlay.
+  if (modules.walkthrough?.isActive?.()) return;
+
   // Ctrl/Cmd+Z — Undo
   if (mod && !shiftKey && key === 'z') {
     evt.preventDefault();
@@ -103,7 +107,7 @@ function handleKeydown(evt) {
   if (mod && key === 'a') {
     if (modules.selection.getCount() === 1) {
       // Single element selected — focus and select label text in properties panel
-      const labelInput = document.querySelector('.sf-properties__body .sf-properties__input');
+      const labelInput = document.querySelector('.df-properties__body .df-properties__input');
       if (labelInput) {
         evt.preventDefault();
         labelInput.focus();
@@ -216,8 +220,8 @@ function handleKeydown(evt) {
 
   // Printable character with element selected → auto-focus label input
   if (!mod && key.length === 1 && modules.selection.getCount() === 1) {
-    const panel = document.querySelector('.sf-properties__body');
-    const labelInput = panel?.querySelector('.sf-properties__input');
+    const panel = document.querySelector('.df-properties__body');
+    const labelInput = panel?.querySelector('.df-properties__input');
     if (labelInput) {
       labelInput.focus();
       // Don't prevent default — let the character be typed into the input

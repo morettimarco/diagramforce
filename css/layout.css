@@ -7,6 +7,12 @@
 html, body {
   height: 100%;
   overflow: hidden;
+  /* Pinch-zoom belongs to the canvas alone (it runs its own JointJS pan/zoom).
+     Permit scroll/pan inside the chrome but never let the browser viewport-zoom
+     it: on mobile a stray pinch followed by a panel reflow can strand controls
+     off-screen and lock the user out. The canvas opts out via `touch-action:
+     none` and drives pinch in JS (see canvas.js touch handlers). */
+  touch-action: pan-x pan-y;
   font-family: var(--font-family);
   font-size: var(--font-size-md);
   line-height: var(--line-height);
@@ -14,7 +20,7 @@ html, body {
   background: var(--bg-app);
 }
 
-.sf-app {
+.df-app {
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -22,18 +28,19 @@ html, body {
   overflow: hidden;
 }
 
-.sf-main {
+.df-main {
   display: flex;
   flex: 1;
   overflow: hidden;
   position: relative;
 }
 
-.sf-canvas {
+.df-canvas {
   flex: 1;
   position: relative;
   overflow: hidden;
   background: var(--bg-canvas);
+  touch-action: none; /* canvas owns pan/zoom via JS (see canvas.js touch handlers) */
 }
 
 #paper {
@@ -72,7 +79,7 @@ select:focus-visible {
    announced by screen readers but not painted. Standard "sr-only" pattern.
    Clip method is used over `display:none` so the element stays in the
    accessibility tree. */
-.sf-visually-hidden {
+.df-visually-hidden {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -88,7 +95,7 @@ select:focus-visible {
    keyboard focus, at which point it animates into the top-left corner
    above all chrome. Keyboard-only users can press Tab once on page load
    to bypass the toolbar / tabs / stencil and jump straight to the canvas. */
-.sf-skip-link {
+.df-skip-link {
   position: absolute;
   top: -40px;
   left: 8px;
@@ -104,15 +111,15 @@ select:focus-visible {
   box-shadow: var(--shadow-md);
   transition: top var(--transition-fast);
 }
-.sf-skip-link:focus,
-.sf-skip-link:focus-visible {
+.df-skip-link:focus,
+.df-skip-link:focus-visible {
   top: 8px;
   outline: 2px solid var(--text-inverse, #fff);
   outline-offset: 2px;
 }
 
 /* ── Drag handle for mobile bottom sheets ─────────────────────── */
-.sf-drag-handle {
+.df-drag-handle {
   display: none;
   align-items: center;
   justify-content: center;
@@ -124,7 +131,7 @@ select:focus-visible {
   -webkit-user-select: none;
 }
 
-.sf-drag-handle::after {
+.df-drag-handle::after {
   content: '';
   width: 36px;
   height: 4px;
@@ -135,13 +142,12 @@ select:focus-visible {
 
 /* ── Mobile layout ─────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  .sf-main {
+  .df-main {
     flex-direction: column;
   }
 
-  .sf-canvas {
+  .df-canvas {
     flex: 1;
     min-height: 0;
-    touch-action: none; /* Prevent browser gestures on canvas */
   }
 }

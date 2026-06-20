@@ -2,7 +2,88 @@
 // All shapes are under the `sf` namespace
 // Uses JointJS v4 JSON markup array syntax
 
-import { parseMarkdown } from './markdown.js?v=1.12.4';
+import { parseMarkdown } from './markdown.js?v=1.16.1';
+import { fieldFocus } from './canvas/focus-state.js?v=1.16.1';
+
+// ── Stable field identity (fid) ────────────────────────────────────
+// Pre-1.15.0, sf.DataObject field ports were keyed by ARRAY INDEX
+// (`field-left-2`), so reordering or deleting a field silently re-bound any
+// connected link to whatever field then occupied that index. Each field now
+// carries an immutable `fid`; ports are `field-left-<fid>` / `field-right-<fid>`
+// so a link follows its field across reorder / delete / apiName rename. A fid
+// only needs to be unique WITHIN one DataObject (port IDs are cell-scoped), so
+// duplicated objects may safely share fids. The leading 'f' keeps a fid from
+// ever matching the legacy numeric-index form, which lets the load migration
+// (migration.js) distinguish old positional ports from new fid ports.
+//
+// INVARIANT: every field must have a fid before its ports are built. Guaranteed
+// by sf.DataObject.initialize (construction: load / paste / factory) and
+// re-asserted in DataObjectView._syncFieldPorts (covers fields added later via
+// the editor). Any NEW field-creation path can rely on one of those two.
+export function newFid(existing) {
+  let id;
+  do { id = 'f' + Math.random().toString(36).slice(2, 9); } while (existing && existing.has(id));
+  return id;
+}
+
+export function ensureFieldFids(cell) {
+  const fields = cell.get('fields');
+  if (!Array.isArray(fields) || fields.length === 0) return;
+  if (fields.every(f => f && f.fid)) return; // idempotent no-op once all fids exist
+  const seen = new Set(fields.filter(f => f && f.fid).map(f => f.fid));
+  cell.set('fields', fields.map(f => {
+    if (f && !f.fid) { const id = newFid(seen); seen.add(id); return { ...f, fid: id }; }
+    return f;
+  }), { silent: true });
+}
+
+// Data Cloud mapping mode flag (per active diagram), wired from app.js. Read by
+// DataObjectView._syncFieldPorts to decide whether EVERY field gets connectable
+// ports (mapping) or only PK/FK fields (default ER).
+let mappingModeGetter = null;
+export function setMappingModeGetter(fn) { mappingModeGetter = fn; }
+
+// Wraps a mutation in a single undo entry — wired from app.js to history.startBatch/endBatch so
+// the DataObject collapse toggle (a `collapsed` prop change + the follow-on resize) is one undo.
+let dataObjectHistoryBatcher = null;
+export function setDataObjectHistoryBatcher(fn) { dataObjectHistoryBatcher = fn; }
+
+// Reads the Auto-Fit Containers toggle (canvas.isAutoSizingEnabled) — wired from app.js. When on,
+// collapsing/expanding a DataObject re-packs its lane (shifts same-parent siblings below it).
+let autoFitGetter = null;
+export function setAutoFitGetter(fn) { autoFitGetter = fn; }
+
+// Does a field have a live link on either of its ports? Drives "Show Only Mapped"
+// — connected fields stay visible so collapsing the rest never breaks a link.
+function fieldHasLink(model, field) {
+  const graph = model.graph;
+  if (!graph || !field || !field.fid) return false;
+  const left = `field-left-${field.fid}`, right = `field-right-${field.fid}`;
+  for (const link of graph.getConnectedLinks(model)) {
+    for (const end of ['source', 'target']) {
+      const ep = link.get(end);
+      if (ep && ep.id === model.id && (ep.port === left || ep.port === right)) return true;
+    }
+  }
+  return false;
+}
+
+// The fields a DataObject currently renders — rows, ports, and height all agree on
+// this single list:
+//   • keyFieldsOnly off             → every field
+//   • keyFieldsOnly on + mapping ON → mapped fields PLUS key (PK/FK) fields
+//     ("Show Only Mapped": unmapped non-key rows collapse, but keys stay as
+//     structural anchors so the object keeps context — and any field with a live
+//     link always stays, so no JointJS link is ever destroyed)
+//   • keyFieldsOnly on + mapping off → only PK/FK fields ("Key Fields Only")
+export function getVisibleDataObjectFields(model) {
+  const fields = model.get('fields') || [];
+  if (!model.get('keyFieldsOnly')) return fields;
+  const mapping = !!(mappingModeGetter && mappingModeGetter());
+  return mapping
+    ? fields.filter(f => f && (fieldHasLink(model, f) || f.keyType))
+    : fields.filter(f => f && f.keyType);
+}
 
 // ── Markdown foreignObject helper (CR-6.1) ─────────────────────────
 // sf.TextLabel and sf.Note render their text as native HTML inside an SVG
@@ -590,21 +671,119 @@ export function register() {
           width: 'calc(w)', height: 'calc(h)',
           fill: 'transparent', stroke: 'none',
         },
+        // Transparent hit target sized by sf.LineView to the painted caption
+        // above the line, so clicking the label selects the line. The markdown
+        // FO is pointer-events:none, so clicks fall through to this rect, which
+        // JointJS hit-tests for selection. Hidden until the line has a label.
+        labelHit: {
+          x: 0, y: 0, width: 0, height: 0,
+          fill: 'transparent', stroke: 'none',
+          visibility: 'hidden',
+        },
         line: {
           x1: 0, y1: 'calc(0.5 * h)', x2: 'calc(w)', y2: 'calc(0.5 * h)',
           stroke: 'var(--text-muted)',
           strokeWidth: 2,
           strokeLinecap: 'round',
         },
+        // Optional caption rendered above the line by sf.LineView via a
+        // markdown <foreignObject>. Empty by default. This SVG <text> only
+        // stores the text/style attrs — it's hidden (display:none) by the FO
+        // renderer, which paints the actual markdown.
+        label: {
+          text: '',
+          fontSize: 13,
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+          fill: 'var(--text-secondary)',
+          x: 0, y: 0,
+          textVerticalAnchor: 'bottom',
+        },
       },
     },
     {
       markup: [
         { tagName: 'rect', selector: 'hitArea' },
+        { tagName: 'rect', selector: 'labelHit' },
         { tagName: 'line', selector: 'line' },
+        { tagName: 'text', selector: 'label' },
       ],
     }
   );
+
+  // sf.LineView — paints the optional caption above the line as markdown.
+  // The line sits at the element's vertical centre in an 8px-tall box, so the
+  // label band lives above it (negative y), bottom-anchored (align-items:
+  // flex-end) so multi-line markdown grows upward and never crosses the line.
+  // Empty label ⇒ nothing visible (the FO renders an empty content div).
+  // Auto-resolved for sf.Line elements via paper.cellViewNamespace.
+  joint.shapes.sf.LineView = joint.dia.ElementView.extend({
+    initialize() {
+      joint.dia.ElementView.prototype.initialize.apply(this, arguments);
+      this.listenTo(this.model, 'change:attrs change:size', () => this._renderMarkdown());
+    },
+    render() {
+      joint.dia.ElementView.prototype.render.apply(this, arguments);
+      this._renderMarkdown();
+      return this;
+    },
+    update() {
+      joint.dia.ElementView.prototype.update.apply(this, arguments);
+      this._renderMarkdown();
+    },
+    _renderMarkdown() {
+      const m = this.model;
+      const { width, height } = m.size();
+      const label = m.attr('label') || {};
+      const text = label.text ?? '';
+      const fontSize = label.fontSize ?? 13;
+      const fontFamily = label.fontFamily ?? 'system-ui, -apple-system, sans-serif';
+      const fill = label.fill ?? 'var(--text-secondary)';
+      const GAP = 4;     // gap between caption and line
+      const BAND = 64;   // label band height; overflow:visible lets taller text grow upward
+      const w = Math.max(width, 120);
+      const foY = (height / 2) - GAP - BAND;
+      const css = `display:flex;align-items:flex-end;justify-content:flex-start;`
+        + `width:100%;height:100%;`
+        + `font-size:${fontSize}px;font-family:${fontFamily};color:${fill};`
+        + `line-height:1.3;text-align:left;`
+        + `white-space:pre-wrap;word-break:break-word;overflow:visible;`;
+      ensureMarkdownFO(this, 'label', text, { x: 0, y: foY, width: w, height: BAND, css, hideSelector: 'label' });
+      const fo = this.el.querySelector(':scope > foreignObject[data-md="label"]');
+      if (fo) fo.setAttribute('overflow', 'visible');
+      // Size the click target to the painted caption. Sync handles the laid-out
+      // update path; one deduped rAF handles the first render that runs before
+      // the view is inserted into the DOM (FO not laid out yet ⇒ offsetWidth 0).
+      this._sizeLabelHit();
+      if (text && typeof requestAnimationFrame === 'function') {
+        if (this._hitRaf) cancelAnimationFrame(this._hitRaf);
+        this._hitRaf = requestAnimationFrame(() => { this._hitRaf = null; this._sizeLabelHit(); });
+      }
+    },
+    _sizeLabelHit() {
+      const hit = this.el.querySelector('[joint-selector="labelHit"]');
+      if (!hit) return;
+      const { height } = this.model.size();
+      const text = (this.model.attr('label') || {}).text ?? '';
+      const GAP = 4, BAND = 64;
+      const foY = (height / 2) - GAP - BAND;
+      const fo = this.el.querySelector(':scope > foreignObject[data-md="label"]');
+      const content = fo && fo.querySelector('[data-md-content]');
+      const tw = content ? content.offsetWidth : 0;
+      const th = content ? content.offsetHeight : 0;
+      if (text && tw > 0 && th > 0) {
+        const PAD = 3;
+        hit.setAttribute('x', String(-PAD));
+        hit.setAttribute('y', String(foY + BAND - th - PAD));
+        hit.setAttribute('width', String(tw + PAD * 2));
+        hit.setAttribute('height', String(th + PAD * 2));
+        hit.setAttribute('visibility', 'visible');
+      } else {
+        hit.setAttribute('visibility', 'hidden');
+        hit.setAttribute('width', '0');
+        hit.setAttribute('height', '0');
+      }
+    },
+  });
 
   // --- Image ---
   // Raster image element. The data URI lives on `attrs.image.href`; the body
@@ -1581,7 +1760,7 @@ export function register() {
   joint.shapes.sf.AnnotationView = joint.dia.ElementView.extend({
     initialize() {
       joint.dia.ElementView.prototype.initialize.apply(this, arguments);
-      this.listenTo(this.model, 'change:attrs change:size change:bracketSide',
+      this.listenTo(this.model, 'change:attrs change:size change:bracketSide change:angle',
         () => this._renderMarkdown());
     },
     render() {
@@ -1606,16 +1785,37 @@ export function register() {
       const isRight = (m.get('bracketSide') || 'right') === 'right';
       const x = isRight ? 0 : GUTTER;
       const w = Math.max(0, width - GUTTER);
+      // Auto-horizontal label — the annotation's text always reads level no
+      // matter how the bracket is rotated. The <foreignObject> lives inside the
+      // element's own rotation frame, so we counter the bracket's angle:
+      // foAngle = −elementAngle. Re-rendered on change:angle (in the listenTo
+      // above) so it holds as the bracket turns. SVG transform on the FO, NOT a
+      // CSS transform on the inner HTML — CSS composed unreliably with the
+      // element rotation and made the label vanish. overflow:visible while the
+      // FO is turned so the text isn't clipped by its box.
+      const norm = a => ((Math.round(a) % 360) + 360) % 360;
+      const foAngle = norm(-(m.angle() || 0));
       const css = `display:flex;align-items:center;justify-content:flex-start;`
         + `width:100%;height:100%;`
         + `font-size:${fontSize}px;font-family:${fontFamily};color:${fill};`
         + `line-height:1.3;text-align:left;`
-        + `white-space:pre-wrap;word-break:break-word;overflow:hidden;`;
+        + `white-space:pre-wrap;word-break:break-word;`
+        + (foAngle ? `overflow:visible;` : `overflow:hidden;`);
       ensureMarkdownFO(this, 'label', text, {
         x, y: 0, width: w, height,
         css,
         hideSelector: 'label',
       });
+      const fo = this.el.querySelector(':scope > foreignObject[data-md="label"]');
+      if (fo) {
+        if (foAngle) {
+          fo.setAttribute('transform', `rotate(${foAngle} ${x + w / 2} ${height / 2})`);
+          fo.setAttribute('overflow', 'visible');
+        } else {
+          fo.removeAttribute('transform');
+          fo.removeAttribute('overflow');
+        }
+      }
     },
   });
 
@@ -1661,6 +1861,17 @@ export function register() {
           fill: '#1D73C9',
           stroke: 'none',
         },
+        // Optional contextual icon (Account / Contact / Email / Snowflake …). Empty by
+        // default — width/height 0 keeps it invisible until one is picked; updateDataObjectHeaderLayout
+        // sizes it to 16×16 and shifts headerLabel right to clear it.
+        headerIcon: {
+          x: 10,
+          y: 8,
+          width: 0,
+          height: 0,
+          href: '',
+          preserveAspectRatio: 'xMidYMid meet',
+        },
         headerLabel: {
           x: 12,
           y: 16,
@@ -1677,29 +1888,43 @@ export function register() {
         groups: {
           top: portGroups.top,
           bottom: portGroups.bottom,
+          // Field-row ports rendered as SQUARES (`rect`) — the visual marker for a
+          // **mapping** port (vs the round relationship ports). `_syncFieldPorts` sets
+          // each port's fill (by keyType) and toggles the corner radius per mode: a
+          // crisp square (rx≈2) in Data Mapping, a rounded near-circle (rx=4) in Data
+          // Model where these field ports act as ER (PK/FK) relationship anchors.
+          // Square markup also keeps them OUT of the `.available-magnet circle` amber
+          // highlight, so a drag doesn't flood every field port yellow.
           fieldLeft: {
             position: { name: 'absolute' },
             attrs: {
-              circle: {
-                r: 4,
-                magnet: true,
-                fill: '#F6B355',
-                stroke: '#FFFFFF',
-                strokeWidth: 1.5,
-              },
+              rect: { width: 8, height: 8, x: -4, y: -4, rx: 2, ry: 2, magnet: true, fill: '#F6B355', stroke: '#FFFFFF', strokeWidth: 1.5 },
             },
-            markup: [{ tagName: 'circle', selector: 'circle' }],
+            markup: [{ tagName: 'rect', selector: 'rect' }],
           },
           fieldRight: {
             position: { name: 'absolute' },
             attrs: {
-              circle: {
-                r: 4,
-                magnet: true,
-                fill: '#1D73C9',
-                stroke: '#FFFFFF',
-                strokeWidth: 1.5,
-              },
+              rect: { width: 8, height: 8, x: -4, y: -4, rx: 2, ry: 2, magnet: true, fill: '#1D73C9', stroke: '#FFFFFF', strokeWidth: 1.5 },
+            },
+            markup: [{ tagName: 'rect', selector: 'rect' }],
+          },
+          // Header-level ER relationship anchors — object↔object relationships, present
+          // in BOTH Data Model and Data Mapping. They look and behave exactly like the
+          // top/bottom relationship ports (round, `--port-color`), distinct from the
+          // square field/mapping ports. Positioned on the header's side edges by
+          // `_syncFieldPorts`; see canvas.js link:connect for the crow's-foot seeding.
+          erLeft: {
+            position: { name: 'absolute' },
+            attrs: {
+              circle: { r: 5, magnet: true, fill: 'var(--port-color, #1D73C9)', stroke: '#FFFFFF', strokeWidth: 1.5 },
+            },
+            markup: [{ tagName: 'circle', selector: 'circle' }],
+          },
+          erRight: {
+            position: { name: 'absolute' },
+            attrs: {
+              circle: { r: 5, magnet: true, fill: 'var(--port-color, #1D73C9)', stroke: '#FFFFFF', strokeWidth: 1.5 },
             },
             markup: [{ tagName: 'circle', selector: 'circle' }],
           },
@@ -1715,8 +1940,16 @@ export function register() {
         { tagName: 'rect', selector: 'body' },
         { tagName: 'rect', selector: 'header' },
         { tagName: 'rect', selector: 'headerCover' },
+        { tagName: 'image', selector: 'headerIcon' },
         { tagName: 'text', selector: 'headerLabel' },
       ],
+      initialize(...args) {
+        joint.dia.Element.prototype.initialize.apply(this, args);
+        // Backfill stable fids for the initial fields (default template,
+        // loaded JSON, paste). Runs at construction — before the load
+        // migration — so links can be re-keyed against fields[i].fid.
+        ensureFieldFids(this);
+      },
     }
   );
 
@@ -1724,89 +1957,196 @@ export function register() {
   joint.shapes.sf.DataObjectView = joint.dia.ElementView.extend({
     initialize() {
       joint.dia.ElementView.prototype.initialize.apply(this, arguments);
-      this.listenTo(this.model, 'change:fields change:showLabels change:showFieldLengths change:keyFieldsOnly', () => this._renderFieldRows());
-      this.listenTo(this.model, 'change:fields change:keyFieldsOnly', () => this._syncFieldPorts());
-      this.listenTo(this.model, 'change:keyFieldsOnly', () => this._autoResize());
+      this.listenTo(this.model, 'change:fields change:showLabels change:showFieldLengths change:keyFieldsOnly change:collapsed', () => this._renderFieldRows());
+      this.listenTo(this.model, 'change:fields change:keyFieldsOnly change:collapsed', () => this._syncFieldPorts());
+      this.listenTo(this.model, 'change:keyFieldsOnly change:collapsed', () => this._autoResize());
+      // Collapse/expand converges (or restores) every field port via _syncFieldPorts, but JointJS
+      // re-renders the port ELEMENTS asynchronously. A connected link that re-routes before that
+      // flush anchors to the stale, expanded port position — so a collapsed object's mapping links
+      // stay drawn as if it were still expanded (most visible on mobile, where the flush lands even
+      // later). Force the ports + connected links to settle explicitly. See _rerouteConnectedLinks.
+      this.listenTo(this.model, 'change:collapsed', () => this._rerouteConnectedLinks());
+      this.listenTo(this.model, 'change:category change:fields change:size', () => this._renderBadges());
     },
     update() {
       joint.dia.ElementView.prototype.update.apply(this, arguments);
       this._renderFieldRows();
       this._syncFieldPorts();
+      this._renderBadges();
     },
 
     _autoResize() {
       const model = this.model;
+      const HEADER_H = 32, ROW_H = 22, TOGGLE_H = 18;
+      // Collapsed → just the header + the collapse toggle row; expanded → + the field rows.
+      const rows = model.get('collapsed') ? 0 : Math.max(getVisibleDataObjectFields(model).length, 1);
+      model.resize(model.size().width, HEADER_H + rows * ROW_H + TOGGLE_H);
+    },
+
+    // Data Cloud badge in the header (renders regardless of mapping mode, so
+    // shared/loaded diagrams show it): a single hollow category pill, right-
+    // aligned so it doesn't fight the left-aligned object name. Pointer-events
+    // off so it never intercepts selection clicks.
+    _renderBadges() {
+      const model = this.model;
+      const ns = 'http://www.w3.org/2000/svg';
+      const old = this.el.querySelector('.do-badges-g');
+      if (old) old.remove();
+      // Category is a Data Cloud (mapping) concept — only surface the badge when
+      // mapping mode is on (i.e. a Data Mapping diagram), so a pure Data Model
+      // object never shows a stray category badge. Re-evaluated on every render,
+      // so the same shared DataObject adapts when copied between the two types.
+      if (!(mappingModeGetter && mappingModeGetter())) return;
+      const { width } = model.size();
+      const g = document.createElementNS(ns, 'g');
+      g.setAttribute('class', 'do-badges-g');
+      g.setAttribute('pointer-events', 'none');
+      let x = width - 8; // right edge; chips are placed leaving-to-the-left
+      // Hollow SLDS-style badge: transparent fill, subtle outline, white text — same
+      // colour as the header label so the pills read as one family and sit quietly.
+      const chip = (text) => {
+        const w = Math.max(18, text.length * 5.4 + 12);
+        x -= w;
+        const rect = document.createElementNS(ns, 'rect');
+        rect.setAttribute('x', String(x)); rect.setAttribute('y', '8');
+        rect.setAttribute('width', String(w)); rect.setAttribute('height', '16');
+        rect.setAttribute('rx', '8'); rect.setAttribute('ry', '8');
+        rect.setAttribute('fill', 'none');
+        rect.setAttribute('stroke', 'rgba(255,255,255,0.5)');
+        rect.setAttribute('stroke-width', '1');
+        g.appendChild(rect);
+        const t = document.createElementNS(ns, 'text');
+        t.setAttribute('x', String(x + w / 2)); t.setAttribute('y', '16.5');
+        t.setAttribute('text-anchor', 'middle'); t.setAttribute('dominant-baseline', 'central');
+        t.setAttribute('font-size', '9'); t.setAttribute('font-weight', '600');
+        t.setAttribute('font-family', 'system-ui, -apple-system, sans-serif');
+        t.setAttribute('fill', '#FFFFFF'); t.setAttribute('opacity', '0.85');
+        t.textContent = text;
+        g.appendChild(t);
+        x -= 5; // gap before the next chip to the left
+      };
+      // Mapped-fields counter (X/Y): how many of this object's fields carry a mapping
+      // link, of the total. Always shown in mapping mode, always the label colour.
       const fields = model.get('fields') || [];
-      const keyFieldsOnly = model.get('keyFieldsOnly');
-      const visibleCount = keyFieldsOnly ? fields.filter(f => f.keyType).length : fields.length;
-      const HEADER_H = 32;
-      const ROW_H = 22;
-      const height = HEADER_H + Math.max(visibleCount, 1) * ROW_H + 4;
-      model.resize(model.size().width, height);
+      const total = fields.length;
+      const mapped = fields.filter(f => fieldHasLink(model, f)).length;
+      chip(`${mapped}/${total}`);
+      // Category chip (only when set).
+      const category = model.get('category');
+      if (category) chip(category);
+      this.el.appendChild(g);
     },
 
     _syncFieldPorts() {
       const model = this.model;
-      const fields = model.get('fields') || [];
-      const keyFieldsOnly = model.get('keyFieldsOnly');
+      // Self-heal: guarantee every field has a fid before building ports.
+      // Covers fields added after construction (e.g. via the field editor),
+      // which never re-run the model initialize. Silent — pure normalization.
+      ensureFieldFids(model);
       const { width } = model.size();
       const HEADER_H = 32;
       const ROW_H = 22;
 
-      // Get existing field ports
-      const existingPorts = (model.get('ports')?.items || []).filter(
-        p => p.group === 'fieldLeft' || p.group === 'fieldRight'
-      );
-      const existingIds = new Set(existingPorts.map(p => p.id));
-
-      // Build desired field ports for PK/FK fields.
-      // Port y-position uses the visible row index (filtered when keyFieldsOnly is on);
-      // port IDs remain tied to the original field index for stable link endpoints.
+      // Which fields get connectable ports:
+      //   • PK/FK fields              — always (default ER behaviour)
+      //   • mapping mode ON           — EVERY field (source→DMO field mapping)
+      //   • a field with a live link  — always, so a saved mapping link to a
+      //     non-key field keeps its endpoint even when mapping mode is off on load
+      const allFields = !!(mappingModeGetter && mappingModeGetter());
+      const linkedPorts = new Set();
+      const graph = model.graph;
+      if (graph && !allFields) {
+        for (const link of graph.getConnectedLinks(model)) {
+          for (const end of ['source', 'target']) {
+            const ep = link.get(end);
+            if (ep && ep.id === model.id && typeof ep.port === 'string'
+                && (ep.port.startsWith('field-left-') || ep.port.startsWith('field-right-'))) {
+              linkedPorts.add(ep.port);
+            }
+          }
+        }
+      }
+      // Each rebuilt port carries its OWN `markup` (and full `attrs`), not just a group
+      // reference. This is deliberate: a cell saved before this change bakes in stale
+      // `ports.groups` markup (old: field=circle, er=square), and a saved instance's
+      // groups OVERRIDE the shape-definition groups on load. Per-PORT markup wins over
+      // the group markup, so every diagram — new or pre-existing — renders the current
+      // shapes: SQUARE field/mapping ports, ROUND relationship ports.
+      const FIELD_MARKUP = [{ tagName: 'rect', selector: 'rect' }];
+      const ER_MARKUP = [{ tagName: 'circle', selector: 'circle' }];
+      // Field ports are SQUARES in Data Mapping (rx 2 — they read as mapping ports) and
+      // rounded near-circles in Data Model (rx 4 on an 8×8 rect = a circle — there they
+      // act as ER PK/FK anchors). `allFields` is the mapping-mode flag.
+      const fieldCornerR = allFields ? 2 : 4;
+      // When the object is collapsed its field rows are hidden, so converge every field port to
+      // the header centre — the mapping links then fan into the collapsed object's header instead
+      // of dangling at vanished row positions.
+      const collapsed = !!model.get('collapsed');
       const desired = [];
-      let visibleIdx = 0;
-      fields.forEach((field, i) => {
-        const isVisible = !keyFieldsOnly || field.keyType;
-        if (!isVisible) return;
-        if (field.keyType) {
-          const y = HEADER_H + visibleIdx * ROW_H + ROW_H / 2;
-          const leftId = `field-left-${i}`;
-          const rightId = `field-right-${i}`;
-          desired.push({
-            id: leftId, group: 'fieldLeft',
-            args: { x: 0, y },
-            attrs: { circle: { fill: field.keyType === 'pk' ? '#F6B355' : '#1D73C9' } },
-          });
-          desired.push({
-            id: rightId, group: 'fieldRight',
-            args: { x: width, y },
-            attrs: { circle: { fill: field.keyType === 'pk' ? '#F6B355' : '#1D73C9' } },
-          });
-        }
-        visibleIdx++;
-      });
-
-      const desiredIds = new Set(desired.map(p => p.id));
-
-      // Remove ports that no longer exist
-      const toRemove = existingPorts.filter(p => !desiredIds.has(p.id)).map(p => p.id);
-      if (toRemove.length) model.removePorts(toRemove);
-
-      // Add/update ports
-      desired.forEach(p => {
-        if (existingIds.has(p.id)) {
-          // Update position
-          model.portProp(p.id, 'args', p.args);
-        } else {
-          model.addPort(p);
+      getVisibleDataObjectFields(model).forEach((field, i) => {
+        const leftId = `field-left-${field.fid}`;
+        const rightId = `field-right-${field.fid}`;
+        const wanted = field.keyType || allFields || linkedPorts.has(leftId) || linkedPorts.has(rightId);
+        if (wanted) {
+          const y = collapsed ? HEADER_H / 2 : HEADER_H + i * ROW_H + ROW_H / 2;
+          // PK = amber, FK = blue, FQK = brand red, plain field (mapping) = neutral grey.
+          const fill = field.keyType === 'pk' ? '#F6B355' : field.keyType === 'fk' ? '#1D73C9' : field.keyType === 'fqk' ? '#DA4E55' : '#9AA0A6';
+          const rectAttrs = { width: 8, height: 8, x: -4, y: -4, rx: fieldCornerR, ry: fieldCornerR, magnet: true, fill, stroke: '#FFFFFF', strokeWidth: 1.5 };
+          desired.push({ id: leftId, group: 'fieldLeft', args: { x: 0, y }, markup: FIELD_MARKUP, attrs: { rect: rectAttrs } });
+          desired.push({ id: rightId, group: 'fieldRight', args: { x: width, y }, markup: FIELD_MARKUP, attrs: { rect: rectAttrs } });
         }
       });
+
+      // Header-level ER relationship ports — round relationship anchors on the header's
+      // side edges, present in BOTH Data Model and Data Mapping (object↔object
+      // relationships). They look/behave like the top/bottom relationship ports.
+      // Vertically centred on the header. Stable ids so cloned / saved relationship
+      // links re-anchor on load.
+      const erCircle = { r: 5, magnet: true, fill: 'var(--port-color, #1D73C9)', stroke: '#FFFFFF', strokeWidth: 1.5 };
+      const erPorts = [
+        { id: 'er-left',  group: 'erLeft',  args: { x: 0,     y: HEADER_H / 2 }, markup: ER_MARKUP, attrs: { circle: erCircle } },
+        { id: 'er-right', group: 'erRight', args: { x: width, y: HEADER_H / 2 }, markup: ER_MARKUP, attrs: { circle: erCircle } },
+      ];
+
+      // Apply by replacing the whole field-port set in ONE prop write — this
+      // reliably adds, repositions, AND removes in a single pass. (JointJS's
+      // incremental removePort/removePorts proved unreliable for real removals,
+      // leaving stale ports behind when mapping mode turned non-key ports off.)
+      // Top/bottom object-level ports are preserved untouched; er-* ports are
+      // rebuilt here too (filtered out below) so they appear/disappear with mode.
+      const currentItems = model.get('ports')?.items || [];
+      const nonFieldPorts = currentItems.filter(p =>
+        p.group !== 'fieldLeft' && p.group !== 'fieldRight' && p.group !== 'erLeft' && p.group !== 'erRight');
+      // rewrite:true REPLACES the items array. Without it JointJS deep-MERGES by
+      // index, so a shorter new list keeps the tail of the previous longer one —
+      // removed ports would linger. (Same option the sequence-port rebuilds use.)
+      model.prop('ports/items', [...nonFieldPorts, ...erPorts, ...desired], { rewrite: true });
+    },
+
+    // Settle a collapse/expand: flush the rendered port elements to the model's positions, then
+    // re-route every connected link against those settled anchors. Without the explicit
+    // _updatePorts() the port elements lag (JointJS renders them asynchronously), so a link
+    // re-routed here would still read the old, expanded port position and never follow the
+    // collapse. Runs synchronously (the common case) and again on the next frame (mobile flushes
+    // ports late). Guarded against teardown — findViewByModel returns null for a removed view.
+    _rerouteConnectedLinks() {
+      const model = this.model;
+      const paper = this.paper;
+      const graph = model.graph;
+      if (!graph || !paper) return;
+      const flush = () => {
+        this._updatePorts?.();
+        for (const link of graph.getConnectedLinks(model)) {
+          paper.findViewByModel(link)?.update?.();
+        }
+      };
+      flush();
+      requestAnimationFrame(flush);
     },
 
     _renderFieldRows() {
       const model = this.model;
-      const allFields = model.get('fields') || [];
-      const keyFieldsOnly = model.get('keyFieldsOnly');
-      const fields = keyFieldsOnly ? allFields.filter(f => f.keyType) : allFields;
+      const fields = getVisibleDataObjectFields(model);
       const { width, height } = model.size();
       const HEADER_H = 32;
       const ROW_H = 22;
@@ -1819,9 +2159,27 @@ export function register() {
       const g = document.createElementNS(ns, 'g');
       g.setAttribute('class', 'do-fields-g');
 
-      fields.forEach((field, i) => {
+      const collapsed = !!model.get('collapsed');
+      if (!collapsed) fields.forEach((field, i) => {
         const y = HEADER_H + i * ROW_H;
         if (y + ROW_H > height + 2) return;
+
+        // Per-field row group: lets flow-focus / field-hover target and dim an
+        // individual field (data-fid), and an inset transparent hit-rect makes the
+        // whole row hoverable without covering the edge ports (left x=0 / right x=w).
+        const rowG = document.createElementNS(ns, 'g');
+        rowG.setAttribute('class', 'do-field-row');
+        if (field.fid) rowG.setAttribute('data-fid', field.fid);
+        // Re-assert any active flow-focus dim on this field (survives re-render).
+        if (field.fid && fieldFocus.dimmed?.has(`${model.id}::${field.fid}`)) rowG.classList.add('df-field-dimmed');
+        const hit = document.createElementNS(ns, 'rect');
+        hit.setAttribute('x', '12');
+        hit.setAttribute('y', String(y));
+        hit.setAttribute('width', String(Math.max(0, width - 24)));
+        hit.setAttribute('height', String(ROW_H));
+        hit.setAttribute('fill', 'transparent');
+        hit.setAttribute('pointer-events', 'all');
+        rowG.appendChild(hit);
 
         // Separator line between rows
         if (i > 0) {
@@ -1832,46 +2190,60 @@ export function register() {
           sep.setAttribute('y2', String(y));
           sep.setAttribute('stroke', 'var(--node-border)');
           sep.setAttribute('stroke-opacity', '0.15');
-          g.appendChild(sep);
+          rowG.appendChild(sep);
         }
 
         const textY = y + 15;
         let labelX = 12;
 
-        // Key badge (PK in amber, FK in blue)
+        // Key badge (PK amber, FK blue, FQK brand red — Data Cloud Fully Qualified Key)
         if (field.keyType) {
-          const isPK = field.keyType === 'pk';
+          const kt = field.keyType;
           const badge = document.createElementNS(ns, 'text');
           badge.setAttribute('x', '8');
           badge.setAttribute('y', String(textY));
           badge.setAttribute('font-size', '8');
           badge.setAttribute('font-weight', '700');
           badge.setAttribute('font-family', 'system-ui, sans-serif');
-          badge.setAttribute('fill', isPK ? '#F6B355' : '#1D73C9');
-          badge.textContent = isPK ? 'PK' : 'FK';
-          g.appendChild(badge);
-          labelX = 26;
+          badge.setAttribute('fill', kt === 'pk' ? '#F6B355' : kt === 'fk' ? '#1D73C9' : '#DA4E55');
+          badge.textContent = kt === 'pk' ? 'PK' : kt === 'fk' ? 'FK' : 'FQK';
+          rowG.appendChild(badge);
+          labelX = kt === 'fqk' ? 32 : 26;   // FQK is 3 chars — nudge the label clear of it
         }
 
-        // Field label
+        // Field type (right-aligned), with optional length — computed first so its width
+        // can reserve space when truncating the label below.
+        const showLen = model.get('showFieldLengths');
+        let typeStr = field.type || '';
+        if (showLen && field.length) typeStr += `(${field.length})`;
+
+        // Field label — truncated with an ellipsis so an over-long API name can never spill
+        // past the object edge or collide with the right-aligned Data Type. The full,
+        // untruncated text stays available as an SVG <title> tooltip.
         const showLabels = model.get('showLabels');
-        let labelText = (field.apiName || field.label || '') +
-          (showLabels && field.label ? ` (${field.label})` : '');
-        if (field.required) labelText += ' *';
+        const fullLabel = (field.apiName || field.label || '') +
+          (showLabels && field.label ? ` (${field.label})` : '') +
+          (field.required ? ' *' : '');
+        const typeW = typeStr ? typeStr.length * 5.6 + 8 : 4;   // ~px, font-size 10
+        const avail = width - labelX - typeW - 8;               // px left for the label
+        const maxChars = Math.max(3, Math.floor(avail / 6.3));  // ~px per char, font-size 11
+        let labelText = fullLabel;
+        if (labelText.length > maxChars) labelText = labelText.slice(0, maxChars - 1).trimEnd() + '…';
         const label = document.createElementNS(ns, 'text');
         label.setAttribute('x', String(labelX));
         label.setAttribute('y', String(textY));
         label.setAttribute('font-size', '11');
         label.setAttribute('font-family', 'system-ui, sans-serif');
-        label.setAttribute('fill', field.decommissioned ? 'var(--text-muted)' : 'var(--node-text)');
-        if (field.decommissioned) label.setAttribute('text-decoration', 'line-through');
+        label.setAttribute('fill', field.deprecated ? 'var(--text-muted)' : 'var(--node-text)');
+        if (field.deprecated) label.setAttribute('text-decoration', 'line-through');
         label.textContent = labelText;
-        g.appendChild(label);
+        if (labelText !== fullLabel) {
+          const t = document.createElementNS(ns, 'title');
+          t.textContent = fullLabel;
+          label.appendChild(t);
+        }
+        rowG.appendChild(label);
 
-        // Field type (right-aligned), with optional length
-        const showLen = model.get('showFieldLengths');
-        let typeStr = field.type || '';
-        if (showLen && field.length) typeStr += `(${field.length})`;
         const typeEl = document.createElementNS(ns, 'text');
         typeEl.setAttribute('x', String(width - 10));
         typeEl.setAttribute('y', String(textY));
@@ -1880,8 +2252,69 @@ export function register() {
         typeEl.setAttribute('font-family', 'system-ui, sans-serif');
         typeEl.setAttribute('fill', 'var(--text-muted)');
         typeEl.textContent = typeStr;
-        g.appendChild(typeEl);
+        rowG.appendChild(typeEl);
+
+        g.appendChild(rowG);
       });
+
+      // ── Collapse / expand toggle row (always the last row, present in both states) ──
+      // Collapsed → header + ▾ (click to expand); expanded → header + fields + ▴ (click to
+      // collapse). A click toggles `collapsed`; mousedown is stopped so it never starts a
+      // drag/selection — the toggle is a control, not the object body.
+      const TOGGLE_H = 18;
+      const ty = HEADER_H + (collapsed ? 0 : Math.max(getVisibleDataObjectFields(model).length, 1) * ROW_H);
+      const tg = document.createElementNS(ns, 'g');
+      tg.setAttribute('class', 'do-collapse-toggle');
+      tg.setAttribute('cursor', 'pointer');
+      const thit = document.createElementNS(ns, 'rect');
+      thit.setAttribute('x', '0'); thit.setAttribute('y', String(ty));
+      thit.setAttribute('width', String(width)); thit.setAttribute('height', String(TOGGLE_H));
+      thit.setAttribute('fill', 'transparent'); thit.setAttribute('pointer-events', 'all');
+      tg.appendChild(thit);
+      if (!collapsed) {
+        const sep = document.createElementNS(ns, 'line');
+        sep.setAttribute('x1', '0'); sep.setAttribute('y1', String(ty));
+        sep.setAttribute('x2', String(width)); sep.setAttribute('y2', String(ty));
+        sep.setAttribute('stroke', 'var(--node-border)'); sep.setAttribute('stroke-opacity', '0.15');
+        tg.appendChild(sep);
+      }
+      const cxc = width / 2, cyc = ty + TOGGLE_H / 2;
+      const chev = document.createElementNS(ns, 'path');
+      chev.setAttribute('d', collapsed
+        ? `M ${cxc - 5} ${cyc - 2} L ${cxc} ${cyc + 3} L ${cxc + 5} ${cyc - 2}`
+        : `M ${cxc - 5} ${cyc + 2} L ${cxc} ${cyc - 3} L ${cxc + 5} ${cyc + 2}`);
+      chev.setAttribute('fill', 'none'); chev.setAttribute('stroke', 'var(--text-muted)');
+      chev.setAttribute('stroke-width', '1.5'); chev.setAttribute('stroke-linecap', 'round');
+      chev.setAttribute('stroke-linejoin', 'round'); chev.setAttribute('pointer-events', 'none');
+      tg.appendChild(chev);
+      thit.addEventListener('mousedown', (evt) => evt.stopPropagation());
+      thit.addEventListener('click', (evt) => {
+        evt.stopPropagation();
+        const m = this.model;
+        const toggle = () => {
+          const beforeH = m.size().height;
+          m.prop('collapsed', !m.get('collapsed'));   // change:collapsed → _autoResize → resize (sync)
+          // Auto-Fit ON: re-pack the lane in BOTH directions — a collapse closes the freed gap,
+          // an expand pushes room open — by shifting same-parent siblings BELOW this object by the
+          // height delta. Runs inside the same undo batch (synchronous after the resize). No global
+          // reshuffle / no viewport re-frame; the parent then re-fits via its change:size trigger.
+          if (autoFitGetter && autoFitGetter()) {
+            const delta = m.size().height - beforeH;
+            const gr = m.graph, parentId = m.get('parent');
+            if (gr && parentId && delta) {
+              const myTop = m.position().y;
+              gr.getElements().forEach(c => {
+                if (c !== m && c.get('parent') === parentId && c.get('type') === 'sf.DataObject'
+                    && c.position().y > myTop) {
+                  c.position(c.position().x, c.position().y + delta);
+                }
+              });
+            }
+          }
+        };
+        if (dataObjectHistoryBatcher) dataObjectHistoryBatcher(toggle); else toggle();
+      });
+      g.appendChild(tg);
 
       this.el.appendChild(g);
     },
@@ -2222,6 +2655,9 @@ export function register() {
       rowHeight: 48,          // height per task row (tall enough for embedded elements)
       timelineTitle: 'Tasks',      // replaces the hardcoded "Tasks" header
       timelineDescription: '',     // description text below title
+      weekStartDay: 1,             // first day of week (week-view column split): 1=Mon, 0=Sun, 6=Sat
+      showWeekNumber: false,       // week view: label columns "W23" instead of the week start date
+      weekendStartDay: 6,          // first weekend day (day-view shading): 6=Sat (Sat–Sun) or 5=Fri (Fri–Sat)
       attrs: {
         body: {
           width: 'calc(w)',
@@ -2268,7 +2704,7 @@ export function register() {
   joint.shapes.sf.GanttTimelineView = joint.dia.ElementView.extend({
     initialize() {
       joint.dia.ElementView.prototype.initialize.apply(this, arguments);
-      this.listenTo(this.model, 'change:startDate change:endDate change:viewMode change:numPeriods change:size change:tasks change:taskListWidth change:rowHeight change:timelineTitle change:timelineDescription', () => this._renderColumns());
+      this.listenTo(this.model, 'change:startDate change:endDate change:viewMode change:numPeriods change:size change:tasks change:taskListWidth change:rowHeight change:timelineTitle change:timelineDescription change:weekStartDay change:showWeekNumber change:weekendStartDay', () => this._renderColumns());
     },
     update() {
       joint.dia.ElementView.prototype.update.apply(this, arguments);
@@ -2284,6 +2720,9 @@ export function register() {
       const viewMode = model.get('viewMode') || 'week';
       const numPeriods = model.get('numPeriods') || 12;
       const startStr = model.get('startDate') || '';
+      const weekStartDay = ((Number(model.get('weekStartDay') ?? 1) % 7) + 7) % 7; // 0..6
+      const showWeekNumber = model.get('showWeekNumber') === true;
+      const weekendStartDay = ((Number(model.get('weekendStartDay') ?? 6) % 7) + 7) % 7; // 6=Sat / 5=Fri
       const tasks = model.get('tasks') || [];
       const taskListWidth = tasks.length ? (model.get('taskListWidth') || 200) : 0;
       const rowHeight = Math.max(model.get('rowHeight') || 48, 48);
@@ -2324,11 +2763,10 @@ export function register() {
       const start = startStr ? new Date(startStr + 'T00:00:00') : new Date();
       if (isNaN(start.getTime())) return;
 
-      // Snap start to Monday (week view) or 1st of month (month view)
+      // Snap start to the configured first-day-of-week (week view) or 1st of month (month view)
       if (viewMode === 'week') {
         const day = start.getDay();
-        const diff = day === 0 ? -6 : 1 - day;
-        start.setDate(start.getDate() + diff);
+        start.setDate(start.getDate() - ((day - weekStartDay + 7) % 7));
       } else if (viewMode === 'month') {
         start.setDate(1);
       }
@@ -2401,9 +2839,11 @@ export function register() {
           colGroup.appendChild(mkText(ms.startX + spanW / 2, topH / 2, `${MONTHS_SHORT[ms.month]} ${ms.year}`, '11', '700', 'var(--text-primary)'));
         });
 
-        // Weekend column highlight across ALL rows (header + tasks)
+        // Weekend column highlight across ALL rows (header + tasks). The 2-day weekend
+        // block runs from weekendStartDay (6=Sat → Sat–Sun; 5=Fri → Fri–Sat).
         days.forEach((day) => {
-          const isWeekend = day.date.getDay() === 0 || day.date.getDay() === 6;
+          const dow = day.date.getDay();
+          const isWeekend = dow === weekendStartDay || dow === (weekendStartDay + 1) % 7;
           if (isWeekend) colGroup.appendChild(mkRect(day.x, topH, colW, height - topH, 'var(--stencil-item-hover)'));
         });
 
@@ -2417,13 +2857,22 @@ export function register() {
         });
       } else if (viewMode === 'week') {
         // Top row: months that span across weeks
-        // Bottom row: week start dates ("3 Apr" format)
+        // Bottom row: week start dates ("3 Apr") OR week numbers ("W14") per showWeekNumber
         const weeks = [];
         const d = new Date(start);
         for (let i = 0; i < numPeriods; i++) {
           weeks.push({ start: new Date(d), x: oX + i * colW });
           d.setDate(d.getDate() + 7);
         }
+
+        // Week number counted from the week containing Jan 1 of that date's year,
+        // relative to the configured first-day-of-week (so it tracks weekStartDay).
+        const weekNumberFor = (wd) => {
+          const jan1 = new Date(wd.getFullYear(), 0, 1);
+          const firstWeekStart = new Date(jan1);
+          firstWeekStart.setDate(jan1.getDate() - ((jan1.getDay() - weekStartDay + 7) % 7));
+          return Math.floor(Math.round((wd - firstWeekStart) / 86400000) / 7) + 1;
+        };
 
         // Group weeks by month for top row
         const monthSpans = [];
@@ -2450,8 +2899,11 @@ export function register() {
         weeks.forEach((w, i) => {
           if (i % 2 === 1) colGroup.appendChild(mkRect(w.x, topH, colW, botH, 'var(--stencil-item-hover)'));
           if (i > 0) colGroup.appendChild(mkLine(w.x, topH, w.x, headerH, '0.3'));
+          const wkLabel = showWeekNumber
+            ? `W${weekNumberFor(w.start)}`
+            : `${w.start.getDate()} ${MONTHS_SHORT[w.start.getMonth()]}`;
           colGroup.appendChild(mkText(w.x + colW / 2, topH + botH / 2,
-            `${w.start.getDate()} ${MONTHS_SHORT[w.start.getMonth()]}`, '10', '500', 'var(--text-secondary)'));
+            wkLabel, '10', '500', 'var(--text-secondary)'));
         });
       } else {
         // Month view: top row = years, bottom row = month names
@@ -3230,12 +3682,12 @@ export function register() {
     'sf.Task',
     {
       size: { width: 540, height: 160 },
-      // Below Container (1000) AND Person (2000) so embedded Person/Team
-      // cards always render ABOVE the Task body. With Task at 1500 the
-      // task overlapped Teams sitting next to it on the canvas — z=900
-      // also keeps Tasks from obscuring nearby Containers in non-embed
-      // layouts.
-      z: 900,
+      // Canonical layer is Z_BASE['sf.Task'] = 500 (the "containers" tier) — below
+      // Container/Team (1000) AND Person (2000) so embedded RACI cards always render
+      // ABOVE the Task body, and the canvas change:z guard restores it there after a
+      // drag. This literal is just the pre-canvas fallback (the add-listener reassigns
+      // a fresh drop into the tier); kept in-tier so it never strands the card on top.
+      z: 500,
       taskName: 'Task',
       taskDescription: '',
       // Width of the LEFT column (name + description). Stays fixed when the
@@ -3388,6 +3840,50 @@ export function register() {
       if (hintEl) hintEl.style.visibility = hasChildren ? 'hidden' : 'visible';
     },
   });
+
+  // --- TaskGroup ---
+  // RACI section: a dashed grouping frame (Zone-like) that holds multiple Task
+  // cards so related RACI rows can be organised into labelled sections. Grey
+  // accent distinguishes it from the blue Department zone. Sits in the Zone z-tier
+  // (0) so it stays BEHIND its embedded Tasks (z 500). Its only valid child is a
+  // Task (see canEmbed) — the Tasks carry their own Person/Team assignees.
+  joint.dia.Element.define(
+    'sf.TaskGroup',
+    {
+      size: { width: 640, height: 360 },
+      z: 0,       // Zone tier: 0 – 499 (always behind Tasks and their cards)
+      attrs: {
+        body: {
+          width: 'calc(w)',
+          height: 'calc(h)',
+          rx: 8,
+          ry: 8,
+          fill: 'rgba(138, 144, 153, 0.06)',
+          stroke: '#8A9099',
+          strokeWidth: 1,
+          strokeDasharray: '8 4',
+        },
+        label: {
+          x: 12,
+          y: 18,
+          textAnchor: 'start',
+          textVerticalAnchor: 'middle',
+          fontSize: 12,
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+          fill: 'var(--text-muted)',
+          fontWeight: '700',
+          text: 'Task Group',
+          textWrap: { width: 'calc(w - 28)', maxLineCount: 1, ellipsis: true },
+        },
+      },
+    },
+    {
+      markup: [
+        { tagName: 'rect', selector: 'body' },
+        { tagName: 'text', selector: 'label' },
+      ],
+    }
+  );
 
   // --- SequenceParticipant ---
   // A UML sequence diagram participant: a rounded header rectangle with an
@@ -3890,7 +4386,7 @@ export function register() {
   // in a shared off-screen SVG). Called whenever `fragmentLabel` changes and
   // on load via canvas.js migrateNodes().
   {
-    const MEASURE_SVG_ID = 'sf-text-measure-svg';
+    const MEASURE_SVG_ID = 'df-text-measure-svg';
     const TAB_PAD = 12;   // horizontal padding inside the tab
     const TAB_CUT = 10;   // diagonal cut width at the bottom-right
     const TAB_H   = 20;   // tab height (matches y=20 in path)

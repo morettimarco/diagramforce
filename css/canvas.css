@@ -1,5 +1,5 @@
 /* cursor: default prevents text cursor over canvas; position/background set in layout.css */
-.sf-canvas {
+.df-canvas {
   cursor: default;
 }
 
@@ -21,6 +21,13 @@
   pointer-events: all;
 }
 
+/* Data Cloud mapping mode puts a port on EVERY field — revealing them all just
+   because the object is SELECTED is visual clutter. For DataObjects, reveal ports
+   only on object HOVER, never on bare selection (CR). The selected+hover rule wins
+   by specificity so hovering a selected object still shows them. */
+.joint-type-df-dataobject.selected .joint-port { opacity: 0; pointer-events: none; }
+.joint-type-df-dataobject.selected:hover .joint-port { opacity: 1; pointer-events: all; }
+
 /* sf.Link: the external-link icon hit area is a circle button — highlight on hover
    to signal it's clickable (opens the URL). The rest of the element just selects. */
 .joint-element[data-type="sf.Link"] [joint-selector="iconHit"] {
@@ -38,8 +45,11 @@
   stroke-width: 2 !important;
 }
 
-/* Also target the first rect child for shapes that don't use .body selector */
-.joint-element.selected > g > rect:first-child {
+/* Also target the first rect child for shapes that don't use .body selector.
+   Exclude .do-badges-g — the DataObject Data-Cloud category pill is a hollow
+   badge that must NOT pick up the selection stroke when the object is selected
+   (the object's own body highlight comes from the .body rule above). */
+.joint-element.selected > g:not(.do-badges-g) > rect:first-child {
   stroke: var(--selection-color) !important;
   stroke-width: 2 !important;
 }
@@ -87,28 +97,41 @@
  * for vacant/avatar effects in _updateCard) and inline trumps CSS.
  * Without !important the inline value wins and the element refuses to
  * dim, producing the inconsistent "some dim, some don't" behaviour. */
-.joint-link.sf-link-dimmed {
+.joint-link.df-link-dimmed {
   opacity: 0.18 !important;
   transition: opacity 180ms ease-out;
 }
-.joint-link.sf-link-dimmed:hover,
-.joint-link.sf-link-dimmed.selected {
+.joint-link.df-link-dimmed:hover,
+.joint-link.df-link-dimmed.selected {
   opacity: 1 !important;
 }
 
-/* Element dimming — applied to elements that participate in the link
- * graph but aren't connected to the selected element. Less aggressive
- * than the link fade (0.4 vs 0.18) because elements carry more visual
- * weight (filled rectangles vs thin lines) and over-dimming makes them
- * unreadable. Background-only shapes (Zones, Notes, TextLabels) never
- * get this class — selection.js filters them out via `elementsWithLinks`. */
-.joint-element.sf-element-dimmed {
+/* Element dimming — fades non-focused elements. Less aggressive than the
+ * link fade (0.4 vs 0.18) because elements carry more visual weight (filled
+ * rectangles vs thin lines) and over-dimming makes them unreadable. Two
+ * paths in selection.js apply it: element-focus dims linked-but-not-neighbour
+ * elements (via `elementsWithLinks`, so disconnected nodes stay lit); mapping-
+ * flow focus (selecting a mapping connector) dims EVERY DataObject not on the
+ * traced flow (via `type === 'sf.DataObject'`, so even disconnected objects
+ * fade). Background-only shapes (Zones/Layers, Notes, TextLabels) never get
+ * this class in either path. */
+.joint-element.df-element-dimmed {
   opacity: 0.4 !important;
   transition: opacity 180ms ease-out;
 }
-.joint-element.sf-element-dimmed:hover,
-.joint-element.sf-element-dimmed.selected {
+.joint-element.df-element-dimmed:hover,
+.joint-element.df-element-dimmed.selected {
   opacity: 1 !important;
+}
+
+/* Field-level focus (Data Mapping flow tracing) — when a connector/object/field-hover
+ * traces a data lineage, the object stays lit but its rows that aren't on the lineage
+ * fade. More aggressive than object dimming (0.22) so the traced field-thread pops
+ * against its own object's other fields. selection.js toggles `.df-field-dimmed` on the
+ * per-field `.do-field-row` groups. */
+.do-field-row.df-field-dimmed {
+  opacity: 0.22;
+  transition: opacity 160ms ease-out;
 }
 
 /* Hover + selection focus — tint the line in --selection-color so the
@@ -122,7 +145,7 @@
 }
 
 /* Rubber-band selection rectangle */
-.sf-selection-rect {
+.df-selection-rect {
   position: absolute;
   border: 1.5px dashed var(--selection-color);
   background: rgba(53, 120, 229, 0.08);
@@ -131,29 +154,86 @@
   border-radius: 3px;
 }
 
-[data-theme="dark"] .sf-selection-rect {
+[data-theme="dark"] .df-selection-rect {
   background: rgba(218, 78, 85, 0.08);
 }
 
-/* Highlight available connection targets */
-.joint-paper .available-cell .body,
-.joint-paper .available-cell rect {
+/* LINK drag (`.available-cell`, added by JointJS markAvailable) is signalled on the
+ * PORTS only (revealed + amber valid-magnet above), NOT on the object body. The cell
+ * body / header / field-row rects are never magnets (validateMagnet accepts only
+ * `magnet="true"` ports), so stroking them amber during a link drag implied a target
+ * you can't connect to — worst on the many-rect DataObject (Data Model / Data Mapping),
+ * where it drew "yellow lines" across the whole object. So no body outline on link drag.
+ *
+ * STENCIL drag-over keeps the body outline — but on its OWN class (`df-drop-target`,
+ * set by stencil.js refreshDropHighlight) so it's independent of link-drag. It marks the
+ * structured embedding parents (Gantt timeline, sequence participant/actor, RACI Task)
+ * where the drop lands positionally (the free-form groupers use the dashed drop-ghost). */
+.joint-paper .df-drop-target .body,
+.joint-paper .df-drop-target rect {
   stroke: var(--brand-amber) !important;
   stroke-width: 2px !important;
 }
 
-/* Gap 3 (v1.12.0) — empty-canvas onboarding hint. Sits inside the
-   joint-layers group at the viewport centre. Pointer-events:none lets
-   pan + zoom pass through. Fades when present so it doesn't visually
-   compete with the grid. */
-.sf-canvas-hint {
+/* Drop ghost (v1.14.1) — dashed preview of a container's would-be bounds when
+   a dragged/dropped element would be captured here (makes the capture halo +
+   on-drop grow visible). Pointer-events:none; non-scaling stroke keeps the dash
+   weight constant across zoom. */
+.df-drop-ghost__rect {
+  fill: none;
+  stroke: var(--brand-amber);
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+  opacity: 0.85;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Empty-canvas ghost wireframe (v1.15.0, replaces the Gap-3 text hint) — a faint,
+   type-specific best-practice blueprint shown ONLY while the active tab has zero cells.
+   The overlay sits over the (transparent, empty) paper; pointer-events:none lets pan +
+   zoom pass through. View-only: canvas.js toggles `.is-empty` on #canvas-container by
+   cell count and tabs.js sets `data-diagram-type` — the graph / history are never touched.
+   Blueprints use `currentColor` (→ --text-muted) so they adapt to light / dark. */
+.df-canvas-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  pointer-events: none;
+  color: var(--text-muted);
+  user-select: none;
+}
+#canvas-container.is-empty .df-canvas-empty { display: flex; }
+/* Hide the ghost while the read-only Table view owns the canvas area. */
+#canvas-container:has(.df-table-view:not([hidden])) .df-canvas-empty { display: none; }
+.df-canvas-empty__wf {
+  display: none;
+  width: min(44%, 400px);
+  height: auto;
+  opacity: 0.16;
+}
+/* Reveal only the blueprint matching the active diagram type. */
+#canvas-container.is-empty[data-diagram-type="architecture"] .df-canvas-empty__wf[data-wf="architecture"],
+#canvas-container.is-empty[data-diagram-type="process"]      .df-canvas-empty__wf[data-wf="process"],
+#canvas-container.is-empty[data-diagram-type="sequence"]     .df-canvas-empty__wf[data-wf="sequence"],
+#canvas-container.is-empty[data-diagram-type="datamodel"]    .df-canvas-empty__wf[data-wf="datamodel"],
+#canvas-container.is-empty[data-diagram-type="datamapping"]  .df-canvas-empty__wf[data-wf="datamapping"],
+#canvas-container.is-empty[data-diagram-type="gantt"]        .df-canvas-empty__wf[data-wf="gantt"],
+#canvas-container.is-empty[data-diagram-type="org"]          .df-canvas-empty__wf[data-wf="org"] {
+  display: block;
+}
+.df-canvas-empty__caption {
+  margin: 0;
   font-family: var(--font-family);
   font-size: 14px;
   font-weight: 500;
-  fill: var(--text-muted);
-  opacity: 0.55;
+  color: var(--text-muted);
+  opacity: 0.6;
   letter-spacing: 0.3px;
-  user-select: none;
 }
 
 /* CR-6.1: inline markdown inside sf.TextLabel / sf.Note foreignObjects.
@@ -179,12 +259,12 @@ foreignObject[data-md] em { font-style: italic; }
 foreignObject[data-md] del { text-decoration: line-through; }
 
 /* Blinking caret on canvas label */
-.sf-canvas-caret {
-  animation: sf-blink 1s step-end infinite;
+.df-canvas-caret {
+  animation: df-blink 1s step-end infinite;
   pointer-events: none;
 }
 
-@keyframes sf-blink {
+@keyframes df-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
@@ -215,19 +295,19 @@ foreignObject[data-md] del { text-decoration: line-through; }
 }
 
 /* ── Inline text editing overlay ──────────────────────────────── */
-.sf-inline-edit {
+.df-inline-edit {
   position: absolute;
   inset: 0;
   pointer-events: none;
   z-index: 50;
 }
 
-.sf-inline-edit__input {
+.df-inline-edit__input {
   pointer-events: all;
   box-shadow: 0 0 0 3px rgba(53, 120, 229, 0.2);
 }
 
-[data-theme="dark"] .sf-inline-edit__input {
+[data-theme="dark"] .df-inline-edit__input {
   box-shadow: 0 0 0 3px rgba(218, 78, 85, 0.2);
 }
 
@@ -237,14 +317,14 @@ foreignObject[data-md] del { text-decoration: line-through; }
    placing a clone ON TOP of the original line that paints background-
    coloured dashes, effectively "erasing" sections and revealing flowing
    gaps.  The original solid line + markers underneath stays untouched. */
-.sf-flow-overlay {
+.df-flow-overlay {
   stroke: var(--bg-canvas) !important;
   stroke-dasharray: 4 8;
-  animation: sf-flow 0.6s linear infinite;
+  animation: df-flow 0.6s linear infinite;
   pointer-events: none;
 }
 
-@keyframes sf-flow {
+@keyframes df-flow {
   from { stroke-dashoffset: 12; }
   to   { stroke-dashoffset: 0; }
 }
@@ -255,8 +335,204 @@ foreignObject[data-md] del { text-decoration: line-through; }
    stroke-dasharray on the path that carries the markers.  The inline
    stroke-dasharray attribute on the clone is the INVERSE of the user's
    pick (e.g. "8 4" → "4 8") so visible segments equal the first value. */
-.sf-line-style-overlay {
+.df-line-style-overlay {
   stroke: var(--bg-canvas) !important;
   pointer-events: none;
   fill: none;
+}
+
+/* ── Data Mapping table view — read-only Excel/CSV-contract projection ──────── */
+.df-table-view {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-canvas);
+  overflow: hidden;
+  z-index: 6;
+}
+.df-tbl { height: 100%; display: flex; flex-direction: column; }
+.df-tbl__topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 var(--spacing-md);
+  /* Height matches the right-sidebar search header (--panel-header-height) so the
+     two bottom borders form one continuous horizontal rule across the screen. */
+  height: var(--panel-header-height);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border-color);
+  flex: 0 0 auto;
+}
+.df-tbl__title { margin: 0; font-size: 15px; font-weight: 700; color: var(--text-primary); white-space: nowrap; }
+.df-tbl__note { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+/* CSV export — compact icon+label button. The right-hand action group is pushed
+   to the edge by `.df-tbl__push` on its FIRST member only (a blanket margin-left:auto
+   on every button would split the free space BETWEEN them and separate the pair). */
+.df-tbl__push { margin-left: auto; }
+.df-tbl__csv {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-app);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+.df-tbl__csv:hover { color: var(--text-primary); border-color: var(--border-color-strong); }
+.df-tbl__csv svg { flex-shrink: 0; }
+/* Show/Hide Unmapped — Display-menu toggle styling, but inline (not full-width). */
+.df-tbl__toggle.df-toolbar__menu-item {
+  width: auto;
+  height: 30px;
+  margin: 0;
+  white-space: nowrap;
+}
+/* overflow-x:auto for wide technical sheets; -y for tall ones */
+.df-tbl__scroll { flex: 1 1 auto; overflow: auto; }
+.df-tbl__table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+  white-space: nowrap;
+  /* Fill the available width when columns are narrow; the nowrap cells keep their
+     min-content width, so when the 15 columns exceed the viewport the table grows
+     past 100% and .df-tbl__scroll takes over with a horizontal scrollbar. */
+  width: 100%;
+}
+/* Tier 1 — coloured section blocks */
+.df-tbl__sec {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: 8px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+}
+.df-tbl__sec--src { background: #F6B355; }   /* Data Sources — brand amber */
+.df-tbl__sec--map { background: #DA4E55; }   /* Data Mapping — brand red */
+.df-tbl__sec--tgt { background: #1D73C9; }   /* Data Targets — brand blue */
+.df-tbl__sec--mdl { background: #1D73C9; }   /* Data Model (single section) — brand blue */
+/* Tier 2 — column headers (stick just below the section blocks) */
+.df-tbl__cols th {
+  position: sticky;
+  top: 33px;
+  z-index: 2;
+  background: var(--bg-surface-raised);
+  color: var(--text-secondary);
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  border-bottom: 2px solid var(--border-color-strong);
+}
+.df-tbl__table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+}
+.df-tbl__table tbody tr:hover td { background: rgba(127, 127, 127, 0.07); }
+.df-tbl__center { text-align: center; }
+.df-tbl__placeholder { color: var(--text-muted); font-style: italic; }
+/* Deprecated field — its API Name / Label cells render struck-through + dimmed. */
+.df-tbl__strike { text-decoration: line-through; color: var(--text-muted); }
+/* Click-to-sort column headers */
+.df-tbl__th--sortable { cursor: pointer; user-select: none; }
+.df-tbl__th--sortable:hover { color: var(--text-primary); }
+.df-tbl__th--sorted { color: var(--text-primary); }
+.df-tbl__sort-ind { margin-left: 4px; font-size: 9px; opacity: 0.9; }
+/* Data-type mismatch warning badge (Standard mapping across differing types) */
+.df-tbl__warn-wrap { display: inline-flex; vertical-align: -2px; margin-left: 6px; cursor: help; }
+.df-tbl__warn { flex-shrink: 0; }
+/* divider between the blue (source) & orange (target) sections */
+.df-tbl__divider { border-left: 2px solid var(--border-color-strong); }
+.df-tbl__row--unmapped td { color: var(--text-muted); font-style: italic; }
+
+/* ── Inline field-level edit mode (Edit Fields → Save / Cancel) ── */
+/* The Save button reads as the primary action — brand amber (matches the changed-cell tint). */
+.df-tbl__csv--primary {
+  color: #1C1E21;
+  background: var(--brand-amber);
+  border-color: var(--brand-amber);
+  font-weight: 700;
+}
+.df-tbl__csv--primary:hover { color: #1C1E21; filter: brightness(1.06); border-color: var(--brand-amber); }
+/* An editable field cell: the control fills it edge-to-edge (no double padding). */
+.df-tbl__cell--edit { padding: 2px 4px; }
+.df-tbl__input {
+  width: 100%;
+  min-width: 80px;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  font-size: 12.5px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+}
+/* Type picklist — same chrome as the text input; native arrow, slightly wider min. */
+.df-tbl__select { min-width: 96px; cursor: pointer; }
+.df-tbl__input:focus { outline: none; border-color: var(--color-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 25%, transparent); }
+/* In-cell key (PK/FK/FQK) + Nullable checkbox — the app's checkbox glyph (box + tick, tick revealed
+   when .is-checked) as a bare centered button. Same convention as the Display-menu toggle checkboxes. */
+.df-tbl__check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  background: none;
+  border: none;
+  border-radius: var(--border-radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.df-tbl__check:hover { color: var(--text-secondary); }
+.df-tbl__check .df-toolbar__checkbox-tick { display: none; }
+.df-tbl__check.is-checked { color: var(--color-primary); }
+.df-tbl__check.is-checked .df-toolbar__checkbox-tick { display: inline; }
+.df-tbl__check:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+/* A PK / FQK is always mandatory → its Nullable box is locked off. */
+.df-tbl__check--locked { opacity: 0.35; cursor: not-allowed; }
+.df-tbl__check--locked:hover { color: var(--text-muted); }
+/* (#5) A cell whose draft value differs from the session snapshot — brand-amber tint, reset on Save /
+   Cancel. Selector outranks the row :hover background (equal specificity, defined later in the file). */
+.df-tbl__table tbody tr td.df-tbl__cell--changed {
+  background: color-mix(in srgb, var(--brand-amber) 30%, transparent);
+}
+/* Per-row revert column (#4) — a thin leading column; the button shows only on changed rows. */
+.df-tbl__revcol { width: 30px; min-width: 30px; padding: 2px 3px; text-align: center; }
+.df-tbl__revert {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  background: none;
+  border: none;
+  border-radius: var(--border-radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.df-tbl__revert:hover { color: var(--brand-amber); background: color-mix(in srgb, var(--brand-amber) 16%, transparent); }
+.df-tbl__revert:focus-visible { outline: 2px solid var(--brand-amber); outline-offset: 1px; }
+/* The revcol is editable-adjacent chrome, not a read-only data cell — don't dim it. */
+.df-tbl--editing .df-tbl__table tbody td:not(.df-tbl__cell--edit):not(.df-tbl__revcol) { color: var(--text-muted); }
+
+.df-tbl__empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 44px 24px;
+  white-space: normal;
+  font-size: 13px;
 }

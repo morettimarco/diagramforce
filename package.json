@@ -1,14 +1,21 @@
 {
   "name": "diagramforce",
-  "version": "1.0.0",
+  "version": "1.16.1",
   "description": "Visual Salesforce architecture diagram editor",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test 'tests/**/*.test.js'",
+    "test:e2e": "playwright test",
+    "test:all": "npm test && npm run test:e2e",
+    "bump": "node scripts/bump-version.mjs"
   },
   "engines": {
     "node": "20.x"
   },
   "dependencies": {
     "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
   }
 }

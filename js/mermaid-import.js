@@ -11,8 +11,8 @@
 // does NOT use the real mermaid grammar and will not handle every edge case.
 // It aims to cover the most common mermaid snippets produced by LLMs and docs.
 
-import { createElementFromTemplate } from './templates.js?v=1.12.4';
-import { showError, showToast } from './feedback.js?v=1.12.4';
+import { createElementFromComponent } from './components.js?v=1.16.1';
+import { showError, showToast } from './feedback.js?v=1.16.1';
 
 let modules = {};
 
@@ -93,7 +93,7 @@ export function importMermaidText(text) {
     for (const el of parsed.elements) {
       // Sequence-parsed elements already carry absolute positions — honour them.
       const pos = el.position ? { x: el.position.x, y: el.position.y } : { x, y };
-      const cell = createElementFromTemplate(el.template, pos);
+      const cell = createElementFromComponent(el.component, pos);
       if (!cell) continue;
       if (el.size) cell.resize(el.size.width, el.size.height);
       // Sequence actors default to showLifeline=false (standalone UML actor).
@@ -463,7 +463,7 @@ function parseFlowchart(text, targetType) {
         existing.label = label;
         existing.shape = shape;
         existing._labeled = true;
-        existing.template = flowTemplate(label, shape, targetType);
+        existing.component = flowComponent(label, shape, targetType);
       }
       return existing;
     }
@@ -472,7 +472,7 @@ function parseFlowchart(text, targetType) {
       label: label || id,
       shape,
       _labeled: !!label,
-      template: flowTemplate(label || id, shape, targetType),
+      component: flowComponent(label || id, shape, targetType),
     };
     elementsById.set(id, node);
     return node;
@@ -623,8 +623,8 @@ function scanEdge(line, pos) {
   return null;
 }
 
-/** Build a template object for a flowchart node based on shape + target diagram type. */
-function flowTemplate(label, shape, targetType) {
+/** Build a component object for a flowchart node based on shape + target diagram type. */
+function flowComponent(label, shape, targetType) {
   if (targetType === 'architecture') {
     // Everything maps to SimpleNode in architecture
     return { type: 'sf.SimpleNode', label };
@@ -664,21 +664,21 @@ function parseStateDiagram(text) {
   const getStart = () => {
     if (!startId) {
       startId = '__start__';
-      elementsById.set(startId, { id: startId, label: '', template: { type: 'sf.BpmnEvent', label: '', eventType: 'start' } });
+      elementsById.set(startId, { id: startId, label: '', component: { type: 'sf.BpmnEvent', label: '', eventType: 'start' } });
     }
     return startId;
   };
   const getEnd = () => {
     if (!endId) {
       endId = '__end__';
-      elementsById.set(endId, { id: endId, label: '', template: { type: 'sf.BpmnEvent', label: '', eventType: 'end' } });
+      elementsById.set(endId, { id: endId, label: '', component: { type: 'sf.BpmnEvent', label: '', eventType: 'end' } });
     }
     return endId;
   };
   const ensureState = (id) => {
     if (id === '[*]') return null;
     if (elementsById.has(id)) return elementsById.get(id);
-    const node = { id, label: id, template: { type: 'sf.BpmnTask', label: id } };
+    const node = { id, label: id, component: { type: 'sf.BpmnTask', label: id } };
     elementsById.set(id, node);
     return node;
   };
@@ -769,7 +769,7 @@ function parseErDiagram(text) {
     elements.push({
       id: name,
       label: name,
-      template: {
+      component: {
         type: 'sf.DataObject',
         label: name,
         objectName: name,
@@ -935,7 +935,7 @@ const SEQ_CONST = {
   NOTE_GAP: 12,
 };
 
-// Role-colour map mirrors SEQ_ACCENT in templates.js. Actor is kept neutral
+// Role-colour map mirrors SEQ_ACCENT in components.js. Actor is kept neutral
 // grey to match the generic participant default — sequence diagrams read
 // cleaner when only roles with a semantic colour (Salesforce green, API blue,
 // External amber) stand out visually.
@@ -1186,7 +1186,7 @@ function parseSequenceDiagram(text) {
         id: p.id,
         position: { x, y: SEQ_CONST.PARTICIPANT_HEADER_Y },
         size: { width: w, height: totalHeight },
-        template: {
+        component: {
           type: 'sf.SequenceActor',
           label: p.label,
           role: 'actor',
@@ -1200,7 +1200,7 @@ function parseSequenceDiagram(text) {
         id: p.id,
         position: { x, y: SEQ_CONST.PARTICIPANT_HEADER_Y },
         size: { width: w, height: totalHeight },
-        template: {
+        component: {
           type: 'sf.SequenceParticipant',
           label: p.label,
           role: p.role,
@@ -1222,7 +1222,7 @@ function parseSequenceDiagram(text) {
       id: `__frag_${idx}`,
       position: { x, y },
       size: { width: w, height: h },
-      template: {
+      component: {
         type: 'sf.SequenceFragment',
         label: f.type,
         fragmentType: f.type,
@@ -1242,7 +1242,7 @@ function parseSequenceDiagram(text) {
       id: `__act_${idx}`,
       position: { x, y },
       size: { width: SEQ_CONST.ACTIVATION_W, height: h },
-      template: { type: 'sf.SequenceActivation', label: '' },
+      component: { type: 'sf.SequenceActivation', label: '' },
     });
   });
 
@@ -1252,7 +1252,7 @@ function parseSequenceDiagram(text) {
       id: `__note_${idx}`,
       position: { x: n.x, y: n.y },
       size: { width: n.w, height: n.h },
-      template: { type: 'sf.Note', label: n.text },
+      component: { type: 'sf.Note', label: n.text },
     });
   });
 

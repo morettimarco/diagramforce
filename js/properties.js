@@ -1,13 +1,13 @@
 // Properties panel — left sidebar element inspector
 // Properties are grouped into collapsible accordion sections
 
-import { wrapSelectionWithMarker } from './markdown.js?v=1.12.4';
-import { confirmModal, showToast } from './feedback.js?v=1.12.4';
-import { getAllIcons, getIconDataUri } from './icons.js?v=1.12.4';
-import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, syncMobilePanelHeight, canEmbed } from './canvas.js?v=1.12.4';
-import * as stencilModule from './stencil.js?v=1.12.4';
-import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.12.4';
-import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as TEMPLATE_SVG, extractLinkDomain } from './templates.js?v=1.12.4';
+import { wrapSelectionWithMarker } from './markdown.js?v=1.16.1';
+import { confirmModal, showToast, buildModal } from './feedback.js?v=1.16.1';
+import { getAllIcons, getIconDataUri } from './icons.js?v=1.16.1';
+import { Z_BASE, Z_TIER_SPAN, tierNameForType, updateSimpleNodeLayout, updateDataObjectHeaderLayout, syncMobilePanelHeight, canEmbed, applyMappingLinkStyle, applyRelationshipLinkStyle, syncMappingTypeBadge, syncFrequencyLabel } from './canvas.js?v=1.16.1';
+import * as stencilModule from './stencil.js?v=1.16.1';
+import { getPalette, addToPalette, removeFromPalette, onPaletteChange, PALETTE_MAX_SLOTS } from './brand-palette.js?v=1.16.1';
+import { resizeDataObjectToFit, contrastTextColor, getStencilSvgDataUri, SVG as COMPONENT_SVG, extractLinkDomain } from './components.js?v=1.16.1';
 import {
   duplicate as clipboardDuplicate,
   cloneElementWithConnectors,
@@ -16,10 +16,13 @@ import {
   cloneSelectionWithMode,
   countExternalConnectors,
   countExternalConnectedConnectors,
-} from './clipboard.js?v=1.12.4';
-import * as history from './history.js?v=1.12.4';
-import { startImageAddFlow } from './image-component.js?v=1.12.4';
-import { escHtml } from './persistence.js?v=1.12.4';
+} from './clipboard.js?v=1.16.1';
+import * as history from './history.js?v=1.16.1';
+import { startImageAddFlow } from './image-component.js?v=1.16.1';
+import { escHtml, sanitizeFilenamePart } from './util.js?v=1.16.1';
+import { getActiveTabName } from './tabs.js?v=1.16.1';
+import { saveSelectionAsTemplate } from './templates.js?v=1.16.1';
+import { newFid } from './shapes.js?v=1.16.1';
 
 /**
  * Wrap a callback so every mutation inside it (potentially many
@@ -55,6 +58,7 @@ const TYPE_LABELS = {
   'sf.Note':           'Note',
   'sf.Image':          'Image',
   'sf.Task':           'Task',
+  'sf.TaskGroup':      'Task Group',
   'sf.Zone':           'Zone',
   'sf.BpmnEvent':      'Event',
   'sf.BpmnTask':       'Task',
@@ -87,15 +91,42 @@ const TYPE_LABELS = {
   'sf.SequenceFragment':    'Fragment',
 };
 
+/** The user-facing name of a cell (its label), or '' if unnamed. Single source of the
+ *  label-accessor chain the inspector uses — reused by the a11y narrator. */
+export function cellName(cell) {
+  if (!cell) return '';
+  if (cell.isLink?.()) return cell.labels?.()?.[0]?.attrs?.text?.text || '';
+  return cell.get('_savedLabel') || cell.get('objectName')
+    || cell.attr?.('label/text') || cell.attr?.('headerLabel/text') || '';
+}
+
+/** A concise screen-reader description of a cell: type + name (+ endpoints for connectors).
+ *  e.g. "Object: Contact", "Node: Alpha", "Connector from Alpha to Beta". */
+export function describeCell(cell) {
+  if (!cell) return '';
+  if (cell.isLink?.()) {
+    const label = cellName(cell);
+    const from = cellName(cell.getSourceCell?.());
+    const to = cellName(cell.getTargetCell?.());
+    const ends = (from || to) ? ` from ${from || 'a shape'} to ${to || 'a shape'}` : '';
+    return `Connector${label ? ` ${label}` : ''}${ends}`;
+  }
+  const type = cell.get('type') || '';
+  const typeLabel = cell.get('iconMode') ? 'Icon' : (TYPE_LABELS[type] || type.replace('sf.', '') || 'Element');
+  const name = cellName(cell);
+  return `${typeLabel}${name ? `: ${name}` : ''}`;
+}
+
 // Default sizes used by "Auto Size"
 const DEFAULT_SIZES = {
   'sf.SimpleNode':     { width: 180, height: 64 },
   'sf.Container':      { width: 360, height: 240 },
   'sf.Zone':           { width: 400, height: 300 },
+  'sf.TaskGroup':      { width: 640, height: 360 },
   'sf.TextLabel':      { width: 200, height: 32 },
   'sf.Note':           { width: 200, height: 120 },
   'sf.Image':          { width: 240, height: 180 },
-  'sf.Task':           { width: 520, height: 160 },
+  'sf.Task':           { width: 540, height: 160 },
   'sf.BpmnEvent':      { width: 40,  height: 40 },
   'sf.BpmnTask':       { width: 120, height: 60 },
   'sf.BpmnGateway':    { width: 48,  height: 48 },
@@ -108,7 +139,7 @@ const DEFAULT_SIZES = {
   'sf.FlowTerminator': { width: 120, height: 60 },
   'sf.FlowDatabase':   { width: 80,  height: 60 },
   'sf.FlowDocument':   { width: 120, height: 60 },
-  'sf.FlowIO':         { width: 120, height: 60 },
+  'sf.FlowIO':         { width: 140, height: 60 },
   'sf.FlowPredefined': { width: 120, height: 60 },
   'sf.FlowOffPage':    { width: 60,  height: 60 },
   'sf.Annotation':     { width: 100, height: 120 },
@@ -173,6 +204,17 @@ const COLOR_SCHEMA = {
       set: (c, v) => c.attr('label/fill', v) },
   ],
   'sf.Zone': [
+    { label: 'Fill',
+      get: c => c.attr('body/fill'),
+      set: (c, v) => c.attr('body/fill', v) },
+    { label: 'Border',
+      get: c => c.attr('body/stroke'),
+      set: (c, v) => c.attr('body/stroke', v) },
+    { label: 'Label color',
+      get: c => c.attr('label/fill'),
+      set: (c, v) => c.attr('label/fill', v) },
+  ],
+  'sf.TaskGroup': [
     { label: 'Fill',
       get: c => c.attr('body/fill'),
       set: (c, v) => c.attr('body/fill', v) },
@@ -360,6 +402,20 @@ COLOR_SCHEMA['sf.BpmnPool'] = [
 let graph, paper, selection;
 let panelEl, typeBadgeEl, titleEl, bodyEl, footerEl;
 
+// Data Cloud mapping mode — provided by tabs via app.js wiring. The DataObject
+// property panel reveals its Data Cloud section only when this returns true, so
+// the default Data Model panel is unchanged when mapping mode is off.
+let mappingModeGetter = null;
+export function setMappingModeGetter(fn) { mappingModeGetter = fn; }
+export function isMappingMode() { return !!(mappingModeGetter && mappingModeGetter()); }
+
+// Re-render the property panel for the current single selection (used when
+// mapping mode toggles so the Data Cloud section appears/disappears live).
+export function refresh() {
+  const c = getActiveCell();
+  if (c) showProperties(c);
+}
+
 export function init(_graph, _paper, _selection) {
   graph = _graph;
   paper = _paper;
@@ -372,7 +428,7 @@ export function init(_graph, _paper, _selection) {
   footerEl    = document.getElementById('properties-footer');
 
   document.getElementById('btn-close-properties').addEventListener('click', () => {
-    panelEl.classList.add('sf-properties--hidden');
+    panelEl.classList.add('df-properties--hidden');
     restoreStencilAfterProperties();
     selection.clearSelection();
   });
@@ -380,7 +436,7 @@ export function init(_graph, _paper, _selection) {
   selection.onChange((ids) => {
     cleanupCanvasHighlights();
     // Dismiss any inline text editor (trigger blur to save and clean up)
-    const activeEditor = document.querySelector('.sf-inline-edit__input');
+    const activeEditor = document.querySelector('.df-inline-edit__input');
     if (activeEditor) activeEditor.blur();
     if (ids.length === 1) {
       const cell = graph.getCell(ids[0]);
@@ -390,10 +446,19 @@ export function init(_graph, _paper, _selection) {
       showMultiProperties(ids.length);
     } else {
       clearActiveSizeListener();
-      panelEl.classList.add('sf-properties--hidden');
+      panelEl.classList.add('df-properties--hidden');
       footerEl.innerHTML = '';
       restoreStencilAfterProperties();
     }
+  });
+
+  // A freshly-drawn connector is tagged `linkKind:'mapping'` (or reclassified) by canvas's
+  // `link:connect` handler, which can land AFTER the selection has already rendered the panel
+  // with the generic connector fields. Re-render when the SELECTED link's `linkKind` changes so
+  // the mapping-specific fields (Mapping type, Expression / rules) appear immediately — no
+  // re-select needed. One persistent listener; fires only for the active cell, so it's cheap.
+  graph.on('change:linkKind', (cell) => {
+    if (getActiveCell()?.id === cell.id) refresh();
   });
 
   // Double-click on element opens inline text editor on canvas.
@@ -437,14 +502,14 @@ export function init(_graph, _paper, _selection) {
 
   // Dismiss inline editor on blank area click
   paper.on('blank:pointerdown', () => {
-    const editor = document.querySelector('.sf-inline-edit__input');
+    const editor = document.querySelector('.df-inline-edit__input');
     if (editor) editor.blur();
   });
 }
 
 /** Remove any lingering caret highlights from the canvas */
 function cleanupCanvasHighlights() {
-  document.querySelectorAll('.sf-canvas-caret').forEach(el => el.remove());
+  document.querySelectorAll('.df-canvas-caret').forEach(el => el.remove());
 }
 
 // ── Inline canvas text editing ──────────────────────────────────────
@@ -464,14 +529,14 @@ function getInlineEditTarget(cell) {
 
 /** Start inline text editing on the canvas overlay */
 function startInlineEdit(cellView, evt) {
-  document.querySelector('.sf-inline-edit')?.remove();
+  document.querySelector('.df-inline-edit')?.remove();
 
   const cell = cellView.model;
   const type = cell.get('type') || '';
   const target = getInlineEditTarget(cell);
   if (!target) {
     setTimeout(() => {
-      const firstInput = bodyEl.querySelector('.sf-properties__input');
+      const firstInput = bodyEl.querySelector('.df-properties__input');
       if (firstInput) firstInput.focus();
     }, 50);
     return;
@@ -489,7 +554,7 @@ function startInlineEdit(cellView, evt) {
     commit = (newText) => {
       const labels = cell.labels();
       const fontSize = labels?.[0]?.attrs?.text?.fontSize ?? 13;
-      const lineColor = cell.attr('line/stroke') || '#888888';
+      const fillColor = cell.prop('fontColor') || cell.attr('line/stroke') || '#888888';   // Label color override (v1.16.1)
       // Single labels() call so the change emits exactly one `change:labels`
       // event — keeps undo/redo at one entry per edit.
       cell.labels(newText ? [{
@@ -498,7 +563,7 @@ function startInlineEdit(cellView, evt) {
           { tagName: 'text', selector: 'text' },
         ],
         attrs: {
-          text: { text: newText, fill: lineColor, fontSize, fontWeight: 600, fontFamily: 'system-ui, -apple-system, sans-serif', textAnchor: 'middle', textVerticalAnchor: 'middle' },
+          text: { text: newText, fill: fillColor, fontSize, fontWeight: 600, fontFamily: 'system-ui, -apple-system, sans-serif', textAnchor: 'middle', textVerticalAnchor: 'middle' },
           body: { ref: 'text', refWidth: 12, refHeight: 4, refX: -6, refY: -2, fill: 'var(--bg-canvas, #FFFFFF)', stroke: 'none', rx: 2, ry: 2 },
         },
         position: { distance: 0.5, offset: 0 },
@@ -585,10 +650,10 @@ function startInlineEdit(cellView, evt) {
   }
 
   const overlay = document.createElement('div');
-  overlay.className = 'sf-inline-edit';
+  overlay.className = 'df-inline-edit';
 
   const textarea = document.createElement('textarea');
-  textarea.className = 'sf-inline-edit__input';
+  textarea.className = 'df-inline-edit__input';
   textarea.value = currentText;
 
   textarea.style.cssText = `
@@ -687,8 +752,8 @@ function restoreStencilAfterProperties() {
 }
 
 function showProperties(cell) {
-  const wasHidden = panelEl.classList.contains('sf-properties--hidden');
-  panelEl.classList.remove('sf-properties--hidden');
+  const wasHidden = panelEl.classList.contains('df-properties--hidden');
+  panelEl.classList.remove('df-properties--hidden');
   if (wasHidden) hideStencilForProperties();
   syncMobilePanelHeight(panelEl);
   bodyEl.innerHTML = '';
@@ -717,6 +782,7 @@ function showProperties(cell) {
   else if (type === 'sf.TextLabel')  renderTextLabelProps(cell);
   else if (type === 'sf.Note')       renderNoteProps(cell);
   else if (type === 'sf.Zone')       renderZoneProps(cell);
+  else if (type === 'sf.TaskGroup')  renderTaskGroupProps(cell);
   else if (type === 'sf.BpmnEvent')  renderBpmnEventProps(cell);
   else if (type === 'sf.BpmnTask')   renderBpmnTaskProps(cell);
   else if (type === 'sf.BpmnGateway') renderBpmnGatewayProps(cell);
@@ -766,7 +832,7 @@ function clearActiveSizeListener() {
 function bindLiveSizeInputs(cell) {
   clearActiveSizeListener();
   const findInput = (labelText) => {
-    const lbl = [...bodyEl.querySelectorAll('.sf-properties__label')]
+    const lbl = [...bodyEl.querySelectorAll('.df-properties__label')]
       .find(l => l.textContent.trim() === labelText);
     return lbl?.parentElement?.querySelector('input[type="number"]') || null;
   };
@@ -784,8 +850,8 @@ function bindLiveSizeInputs(cell) {
 }
 
 function showMultiProperties(count) {
-  const wasHidden = panelEl.classList.contains('sf-properties--hidden');
-  panelEl.classList.remove('sf-properties--hidden');
+  const wasHidden = panelEl.classList.contains('df-properties--hidden');
+  panelEl.classList.remove('df-properties--hidden');
   if (wasHidden) hideStencilForProperties();
   // Multi-select follows the same convention as single-select: the typeBadge
   // carries the system-supplied identifier (count + "Selected"), the titleEl
@@ -800,12 +866,96 @@ function showMultiProperties(count) {
   const ids = selection.getSelectedIds();
   const cells = ids.map(id => graph.getCell(id)).filter(Boolean);
   const elements = cells.filter(c => c.isElement());
+  const links = cells.filter(c => c.isLink());
+
+  // ── Connectors — shared appearance for the selected links (Colour / Line style / Line
+  // width). Shown for ANY selection that includes links (pure-link or mixed) so many
+  // connectors can be recoloured at once; each control applies to every selected link in ONE
+  // undo step. (Previously a pure-link multi-select read "No elements selected" — no edits.)
+  // refresh() only re-renders a SINGLE-cell panel, so the multi panel re-renders itself by
+  // re-running showMultiProperties — needed when a control changes which fields apply
+  // (Connection type → mapping fields appear/vanish; Mapping type → Expression discloses).
+  const rerenderMulti = () => showMultiProperties(count);
+
+  const renderConnectorSection = () => {
+    if (links.length === 0) return;
+
+    // ── Mapping (Data Cloud) — shown when EVERY selected link is a field→field connector, so a
+    // batch of mappings (e.g. one source field fanned to several DMOs) can take one shared
+    // Connection type / Mapping type / Expression in a single undo step. Mirrors the single-link
+    // Content controls; each applies to every selected mapping link.
+    const isFieldToField = (l) => {
+      const s = l.get('source'), t = l.get('target');
+      return typeof s?.port === 'string' && s.port.startsWith('field-')
+          && typeof t?.port === 'string' && t.port.startsWith('field-');
+    };
+    if (links.every(isFieldToField)) {
+      const mapSec = section(bodyEl, 'Mapping');
+      const kinds = links.map(l => l.prop('linkKind') === 'mapping' ? 'mapping' : 'relationship');
+      addSegmented(mapSec, 'Connection type', kinds[0], [
+        { value: 'relationship', label: 'Relationship' },
+        { value: 'mapping', label: 'Mapping' },
+      ], v => {
+        history.startBatch();
+        try { links.forEach(l => applyLinkConnectionType(l, v)); } finally { history.endBatch(); }
+        rerenderMulti();   // mapping fields appear (→ mapping) or vanish (→ relationship)
+      });
+      if (links.every(l => l.prop('linkKind') === 'mapping')) {
+        const types = links.map(l => MAPPING_TYPES.includes(l.prop('mappingType')) ? l.prop('mappingType') : 'Standard');
+        const sameType = types.every(t => t === types[0]);
+        addSelect(mapSec, 'Mapping type', sameType ? types[0] : 'Standard',
+          MAPPING_TYPES.map(t => ({ value: t, label: t })), v => {
+            history.startBatch();
+            try { links.forEach(l => applyLinkMappingType(l, v)); } finally { history.endBatch(); }
+            rerenderMulti();   // Expression discloses/hides for the new shared type
+          });
+        // Expression / rules — disclosed once the selection shares a single non-Standard type
+        // (the "same field, same transformation across DMOs" case). Blank = mixed: type to set all.
+        if (sameType && types[0] !== 'Standard') {
+          const exprs = links.map(l => l.prop('expressionRule') || l.prop('mappingLabel') || '');
+          const sameExpr = exprs.every(e => e === exprs[0]);
+          addText(mapSec, 'Expression / rules', sameExpr ? exprs[0] : '', v => {
+            history.startBatch();
+            try { links.forEach(l => applyLinkExpression(l, v)); } finally { history.endBatch(); }
+          }, null, sameExpr ? undefined : { placeholder: 'Multiple — type to set all' });
+        }
+      }
+    }
+
+    const sec = section(bodyEl, 'Connectors');
+    const strokes = links.map(l => l.attr('line/stroke')).filter(v => v != null && v !== '');
+    const sameStroke = strokes.length === links.length && strokes.every(s => s === strokes[0]);
+    addColorMulti(sec, 'Color', sameStroke ? strokes[0] : null, v => {
+      history.startBatch();
+      try { links.forEach(l => applyLinkStroke(l, v)); } finally { history.endBatch(); }
+    });
+    const styles = links.map(l => l.prop('lineStyle') || 'none');
+    const sameStyle = styles.every(s => s === styles[0]);
+    addSelect(sec, 'Line style', sameStyle ? styles[0] : 'none', LINK_LINE_STYLE_OPTS, v => {
+      history.startBatch();
+      try { links.forEach(l => applyLinkLineStyle(l, v)); } finally { history.endBatch(); }
+    });
+    const widths = links.map(l => l.attr('line/strokeWidth') ?? 2);
+    const sameWidth = widths.every(w => w === widths[0]);
+    addNumber(sec, 'Line width', sameWidth ? widths[0] : '', v => {
+      history.startBatch();
+      try { links.forEach(l => applyLinkStrokeWidth(l, v)); } finally { history.endBatch(); }
+    });
+  };
 
   if (elements.length === 0) {
-    bodyEl.innerHTML = `<p class="sf-properties__multi-msg">No elements selected.</p>`;
+    // Pure-connector selection — the element-centric sections below don't apply.
+    if (links.length === 0) {
+      bodyEl.innerHTML = `<p class="df-properties__multi-msg">No editable cells selected.</p>`;
+    } else {
+      renderConnectorSection();
+    }
     addDeleteBtn(footerEl, () => { graph.removeCells(cells); selection.clearSelection(); });
     return;
   }
+
+  // Mixed selection (elements + links): connector appearance first, then the element sections.
+  renderConnectorSection();
 
   // ── Colors section — only shown when the selected types have at least
   // one shared color slot. We intersect each type's schema by label so we
@@ -896,40 +1046,58 @@ function showMultiProperties(count) {
 
   // Order: Bring to Front / Send to Back
   const orderRow = document.createElement('div');
-  orderRow.className = 'sf-prop-pair';
+  orderRow.className = 'df-prop-pair';
 
   const multiFrontBtn = document.createElement('button');
-  multiFrontBtn.className = 'sf-properties__btn sf-properties__btn--order';
+  multiFrontBtn.className = 'df-properties__btn df-properties__btn--order';
   multiFrontBtn.innerHTML = `
     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
       <path d="M2 2h12v2H2zM4 6h8v2H4zM6 10h4v4H6z"/>
     </svg>
     Bring to Front`;
   multiFrontBtn.addEventListener('click', () => {
-    elements.forEach(c => {
-      const type = c.get('type');
-      const tierBase = Z_BASE[type] ?? 2000;
-      const peers = graph.getElements().filter(el => !ids.includes(el.id) && el.get('z') >= tierBase && el.get('z') < tierBase + Z_TIER_SPAN);
-      const maxZ = peers.length ? Math.max(...peers.map(el => el.get('z') ?? tierBase)) : tierBase;
-      c.set('z', maxZ + 1);
-    });
+    history.startBatch();
+    try {
+      elements.forEach(c => {
+        const type = c.get('type');
+        const tierBase = Z_BASE[type] ?? 2000;
+        const peers = graph.getElements().filter(el => !ids.includes(el.id) && el.get('z') >= tierBase && el.get('z') < tierBase + Z_TIER_SPAN);
+        const maxZ = peers.length ? Math.max(...peers.map(el => el.get('z') ?? tierBase)) : tierBase;
+        const oldZ = c.get('z'); const newZ = maxZ + 1;
+        if (oldZ === newZ) return;
+        c.set('z', newZ);
+        const id = c.id;
+        history.recordCommand(
+          () => { const cc = graph.getCell(id); if (cc) cc.set('z', oldZ); },
+          () => { const cc = graph.getCell(id); if (cc) cc.set('z', newZ); });
+      });
+    } finally { history.endBatch(); }
   });
 
   const multiBackBtn = document.createElement('button');
-  multiBackBtn.className = 'sf-properties__btn sf-properties__btn--order';
+  multiBackBtn.className = 'df-properties__btn df-properties__btn--order';
   multiBackBtn.innerHTML = `
     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
       <path d="M6 2h4v4H6zM4 8h8v2H4zM2 12h12v2H2z"/>
     </svg>
     Send to Back`;
   multiBackBtn.addEventListener('click', () => {
-    elements.forEach(c => {
-      const type = c.get('type');
-      const tierBase = Z_BASE[type] ?? 2000;
-      const peers = graph.getElements().filter(el => !ids.includes(el.id) && el.get('z') >= tierBase && el.get('z') < tierBase + Z_TIER_SPAN);
-      const minZ = peers.length ? Math.min(...peers.map(el => el.get('z') ?? tierBase)) : tierBase;
-      c.set('z', Math.max(tierBase, minZ - 1));
-    });
+    history.startBatch();
+    try {
+      elements.forEach(c => {
+        const type = c.get('type');
+        const tierBase = Z_BASE[type] ?? 2000;
+        const peers = graph.getElements().filter(el => !ids.includes(el.id) && el.get('z') >= tierBase && el.get('z') < tierBase + Z_TIER_SPAN);
+        const minZ = peers.length ? Math.min(...peers.map(el => el.get('z') ?? tierBase)) : tierBase;
+        const oldZ = c.get('z'); const newZ = Math.max(tierBase, minZ - 1);
+        if (oldZ === newZ) return;
+        c.set('z', newZ);
+        const id = c.id;
+        history.recordCommand(
+          () => { const cc = graph.getCell(id); if (cc) cc.set('z', oldZ); },
+          () => { const cc = graph.getCell(id); if (cc) cc.set('z', newZ); });
+      });
+    } finally { history.endBatch(); }
   });
   orderRow.appendChild(multiFrontBtn);
   orderRow.appendChild(multiBackBtn);
@@ -955,10 +1123,10 @@ function showMultiProperties(count) {
   // Clone strip — primary "Clone" + optional connector-aware sub-buttons,
   // matching the single-element panel.
   const cloneWrap = document.createElement('div');
-  cloneWrap.className = 'sf-clone-strip';
+  cloneWrap.className = 'df-clone-strip';
 
   const primaryClone = document.createElement('button');
-  primaryClone.className = 'sf-properties__btn sf-properties__btn--clone';
+  primaryClone.className = 'df-properties__btn df-properties__btn--clone';
   primaryClone.innerHTML = `${CLONE_ICON_SVG} Clone`;
   primaryClone.addEventListener('click', () => { clipboardDuplicate(); });
   cloneWrap.appendChild(primaryClone);
@@ -968,7 +1136,7 @@ function showMultiProperties(count) {
 
   const addMultiCloneSub = (label, mode) => {
     const sub = document.createElement('button');
-    sub.className = 'sf-properties__btn sf-properties__btn--clone sf-properties__btn--clone-sub';
+    sub.className = 'df-properties__btn df-properties__btn--clone df-properties__btn--clone-sub';
     sub.innerHTML = `${CLONE_ICON_SVG} Clone ${label}`;
     sub.addEventListener('click', () => cloneSelectionWithMode(mode));
     cloneWrap.appendChild(sub);
@@ -982,6 +1150,11 @@ function showMultiProperties(count) {
   }
 
   footerEl.appendChild(cloneWrap);
+
+  // Save as Template — pinned directly below the Clone strip. Shares the
+  // footer-button base (`.df-properties__btn` + shared --convert/--clone
+  // sizing), so it's dimensionally identical to the Clone button above it.
+  addActionBtn(footerEl, 'Save as Template', () => saveSelectionAsTemplate());
 
   // Select All {type} — if selection is a single type, and NOT all of that type are already selected
   const typeCounts = {};
@@ -1077,9 +1250,9 @@ function showMultiProperties(count) {
 
   // Delete All
   const delWrap = document.createElement('div');
-  delWrap.className = 'sf-delete-strip';
+  delWrap.className = 'df-delete-strip';
   const delBtn = document.createElement('button');
-  delBtn.className = 'sf-properties__btn sf-properties__btn--delete';
+  delBtn.className = 'df-properties__btn df-properties__btn--delete';
   delBtn.textContent = 'Delete all';
   delBtn.addEventListener('click', () => { graph.removeCells(cells); selection.clearSelection(); });
   delWrap.appendChild(delBtn);
@@ -1274,6 +1447,7 @@ function renderTextLabelProps(cell) {
   addNumberPair(size,
     'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
     'Height', cell.size().height, h => cell.resize(cell.size().width, h));
+  addRotationField(size, cell);
   addAutoSizeBtn(size, () => {
     const def = DEFAULT_SIZES['sf.TextLabel'];
     cell.resize(def.width, def.height);
@@ -1319,12 +1493,23 @@ function renderLineProps(cell) {
     history.startBatch();
     try {
       cell.set('lineStyle', style);
-      const dashMap = { solid: 'none', dashed: '12 6', dotted: '3 4', breaks: '16 8 2 8' };
+      // Patterns chosen to match the picklist previews 1:1 (the line has
+      // stroke-linecap:round, so `0 6` paints round dots; `16 8` = clean
+      // long-dashes). Previously dotted `3 4` read as small dashes and breaks
+      // `16 8 2 8` was a dash-DOT — neither matched its preview.
+      const dashMap = { solid: 'none', dashed: '12 6', dotted: '0 6', breaks: '16 8' };
       cell.attr('line/strokeDasharray', dashMap[style] || 'none');
     } finally {
       history.endBatch();
     }
   }
+
+  // Content — optional caption rendered above the line. Empty by default.
+  // Markdown supported, with the same shortcuts + hint as the Note description.
+  const content = section(bodyEl, 'Content');
+  const labelInput = addTextarea(content, 'Label', cell.attr('label/text') || '',
+    v => cell.attr('label/text', v));
+  wireMarkdownShortcuts(labelInput, content);
 
   // Appearance — canonical line ordering: Color → Line style → Line width
   // (identity first, then variant, then measurement).
@@ -1338,6 +1523,7 @@ function renderLineProps(cell) {
   addNumberPair(size,
     'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
     'Height', cell.size().height, h => cell.resize(cell.size().width, h));
+  addRotationField(size, cell);
   addAutoSizeBtn(size, () => {
     const def = DEFAULT_SIZES['sf.Line'];
     cell.resize(def.width, def.height);
@@ -1369,7 +1555,7 @@ function renderLinkElementProps(cell) {
   addColor(appearance, 'Border', cell.attr('body/stroke'), v => cell.attr('body/stroke', v));
   addColor(appearance, 'Label color', cell.attr('label/fill'), v => {
     cell.attr('label/fill', v);
-    cell.attr('iconImage/href', getStencilSvgDataUri(TEMPLATE_SVG.linkIcon, v, 20));
+    cell.attr('iconImage/href', getStencilSvgDataUri(COMPONENT_SVG.linkIcon, v, 20));
   });
   addNumber(appearance, 'Font size', cell.attr('label/fontSize') ?? 14,
     v => cell.attr('label/fontSize', v), { min: 6, max: 96 });
@@ -1458,7 +1644,7 @@ function renderImageProps(cell) {
   // Replace image — runs the same pick+resize pipeline used for the initial
   // drop, then swaps the data URI in place.
   const replaceBtn = document.createElement('button');
-  replaceBtn.className = 'sf-properties__btn sf-properties__btn--auto-size';
+  replaceBtn.className = 'df-properties__btn df-properties__btn--auto-size';
   replaceBtn.style.marginTop = '6px';
   replaceBtn.innerHTML = `
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1512,7 +1698,41 @@ function renderZoneProps(cell) {
     titleEl.textContent = v || '';
   });
 
-  // Appearance — canonical order: Fill → Border
+  // Appearance — canonical order: Fill → Border → Label colour
+  const appearance = section(bodyEl, 'Appearance');
+  addColor(appearance, 'Fill',   cell.attr('body/fill'),   v => cell.attr('body/fill', v));
+  addColor(appearance, 'Border', cell.attr('body/stroke'), v => cell.attr('body/stroke', v));
+  addColor(appearance, 'Label color', cell.attr('label/fill') || 'var(--text-muted)', v => cell.attr('label/fill', v));
+
+  // Size & Order
+  const size = section(bodyEl, 'Size & Order');
+  addNumberPair(size,
+    'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
+    'Height', cell.size().height, h => cell.resize(cell.size().width, h));
+  addAutoSizeBtn(size, () => {
+    const def = DEFAULT_SIZES['sf.Zone'];
+    cell.resize(def.width, def.height);
+  });
+  addApplySizeBtn(size, cell);
+  addOrderButtons(size, cell);
+
+  // Delete (in footer)
+  addCloneBtn(footerEl, cell);
+  addDeleteBtn(footerEl, () => { graph.removeCells([cell]); selection.clearSelection(); });
+}
+
+// RACI section grouper — same surface as a Zone (label + fill/border + size), but
+// its own default size and "Task Group" identity. Drop Tasks inside to build a
+// labelled section of RACI rows.
+function renderTaskGroupProps(cell) {
+  // Content
+  const content = section(bodyEl, 'Content');
+  addText(content, 'Label', cell.attr('label/text'), v => {
+    cell.attr('label/text', v);
+    titleEl.textContent = v || '';
+  });
+
+  // Appearance — Fill → Border
   const appearance = section(bodyEl, 'Appearance');
   addColor(appearance, 'Fill',   cell.attr('body/fill'),   v => cell.attr('body/fill', v));
   addColor(appearance, 'Border', cell.attr('body/stroke'), v => cell.attr('body/stroke', v));
@@ -1523,7 +1743,7 @@ function renderZoneProps(cell) {
     'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
     'Height', cell.size().height, h => cell.resize(cell.size().width, h));
   addAutoSizeBtn(size, () => {
-    const def = DEFAULT_SIZES['sf.Zone'];
+    const def = DEFAULT_SIZES['sf.TaskGroup'];
     cell.resize(def.width, def.height);
   });
   addApplySizeBtn(size, cell);
@@ -1781,9 +2001,14 @@ function renderBpmnDataObjectProps(cell) {
   addDeleteBtn(footerEl, () => { graph.removeCells([cell]); selection.clearSelection(); });
 }
 
-// Common Salesforce field types for the type dropdown
-const SF_FIELD_TYPES = [
-  'Auto Number', 'Checkbox', 'Currency', 'Date', 'DateTime', 'Email',
+// Core Salesforce CRM field types + Data Cloud primitives (the shared dictionary used by
+// both the sidebar field editor and the Edit Fields modal). 'Boolean' is the Data Cloud
+// primitive alongside the CRM 'Checkbox'; both live in the Boolean compatibility group.
+// Salesforce / Data Cloud field data types — the canonical picklist used by the
+// DataObject field editor AND, re-exported, by the Data Mapping table edit mode so
+// both surfaces offer the exact same options (single source of truth).
+export const SF_FIELD_TYPES = [
+  'Auto Number', 'Boolean', 'Checkbox', 'Currency', 'Date', 'DateTime', 'Email',
   'Formula', 'ID', 'Lookup', 'Master-Detail', 'Number', 'Percent',
   'Phone', 'Picklist', 'Multi-Picklist', 'Rich Text Area',
   'Text', 'Text Area', 'Long Text Area', 'URL',
@@ -1798,21 +2023,46 @@ function renderDataObjectProps(cell) {
     cell.attr('headerLabel/text', v);
     titleEl.textContent = v || '';
   }, cell, { placeholder: 'Object name' });
+  // Optional contextual header icon — empty by default. Sits under the Label to
+  // match the Node / Container icon picker. Account/Contact/Email/Snowflake etc.
+  // make a large schema scannable. White to match the header label;
+  // updateDataObjectHeaderLayout shows it + shifts the object name right (or
+  // restores the left padding when cleared via the picker's × button → onChange('')).
+  // addIconPicker batches its onChange, so the href + layout attr writes are one undo step.
+  addIconPicker(content, 'Icon', cell.attr('headerIcon/href'),
+    v => { cell.attr('headerIcon/href', v); updateDataObjectHeaderLayout(cell); },
+    () => '#FFFFFF');
 
-  // Appearance — header fill is an appearance property, kept here so DataObject
-  // matches the consistent Content / Appearance / Fields / Size & Order layout
-  // used by every other shape with a coloured header (BpmnPool, Container…).
+  // Data Cloud mapping metadata — shown only in mapping mode so the default
+  // Data Model panel is unchanged when off. Stored as cell attrs (serialize
+  // automatically); unset when blank so empty values aren't persisted.
+  // Data Cloud category (Profile / Engagement / Other) lives in CONTENT — it's the
+  // single object-level mapping attribute, so it no longer warrants its own section.
+  // Shown only in mapping mode; a three-position segmented slider with no segment
+  // active until the user picks one (uncategorised ⇒ no header badge). Category is
+  // optional, so `allowDeselect` lets a click on the active segment clear it back to
+  // uncategorised.
+  if (isMappingMode()) {
+    addSegmented(content, 'Category', cell.get('category') || '', [
+      { value: 'Profile', label: 'Profile' },
+      { value: 'Engagement', label: 'Engagement' },
+      { value: 'Other', label: 'Other' },
+    ], v => { cell.set('category', v); }, { allowDeselect: true });
+  }
+
+  // Fields lead — the rows are a DataObject's primary content, so they sit
+  // directly under Content, ahead of the lighter Appearance (header colour) block.
+  const fieldsSec = section(bodyEl, 'Fields');
+
+  renderFieldEditor(fieldsSec, cell);
+
+  // Appearance — header fill is an appearance property.
   const appearance = section(bodyEl, 'Appearance');
   addColor(appearance, 'Header fill', cell.get('headerColor') || '#1D73C9', v => {
     cell.set('headerColor', v);
     cell.attr('header/fill', v);
     cell.attr('headerCover/fill', v);
   }, { defaultValue: '#1D73C9' });
-
-  // Fields
-  const fieldsSec = section(bodyEl, 'Fields');
-
-  renderFieldEditor(fieldsSec, cell);
 
   // Size & Order
   const size = section(bodyEl, 'Size & Order');
@@ -1830,32 +2080,33 @@ function renderDataObjectProps(cell) {
 function renderFieldEditor(parent, cell) {
   const fields = cell.get('fields') || [];
   const listEl = document.createElement('div');
-  listEl.className = 'sf-field-list';
+  listEl.className = 'df-field-list';
 
   function rebuild() {
     listEl.innerHTML = '';
 
     // Header row
     const hdr = document.createElement('div');
-    hdr.className = 'sf-field-row sf-field-row--header';
+    hdr.className = 'df-field-row df-field-row--header';
     hdr.innerHTML = '<span>Key</span><span>API Name</span><span>Type</span><span></span>';
     listEl.appendChild(hdr);
 
     const currentFields = cell.get('fields') || [];
     currentFields.forEach((field, i) => {
       const row = document.createElement('div');
-      row.className = 'sf-field-row';
+      row.className = 'df-field-row';
 
       // Key type toggle
       const keyBtn = document.createElement('button');
-      keyBtn.className = 'sf-field-key sf-field-key--' + (field.keyType || 'none');
-      keyBtn.textContent = field.keyType === 'pk' ? 'PK' : field.keyType === 'fk' ? 'FK' : '—';
-      keyBtn.title = 'Toggle key: None → PK → FK';
+      keyBtn.className = 'df-field-key df-field-key--' + (field.keyType || 'none');
+      keyBtn.textContent = field.keyType === 'pk' ? 'PK' : field.keyType === 'fk' ? 'FK' : field.keyType === 'fqk' ? 'FQK' : '—';
+      keyBtn.title = 'Toggle key: None → PK → FK → FQK';
       keyBtn.addEventListener('click', () => {
         const cur = field.keyType;
-        const next = cur === 'pk' ? 'fk' : cur === 'fk' ? null : 'pk';
+        const next = cur === 'pk' ? 'fk' : cur === 'fk' ? 'fqk' : cur === 'fqk' ? null : 'pk';
         const updated = [...cell.get('fields')];
-        updated[i] = { ...updated[i], keyType: next };
+        // A primary / fully-qualified key is inherently mandatory — auto-mark required.
+        updated[i] = { ...updated[i], keyType: next, ...(next === 'pk' || next === 'fqk' ? { required: true } : {}) };
         cell.set('fields', updated);
         resizeDataObjectToFit(cell);
         rebuild();
@@ -1864,7 +2115,7 @@ function renderFieldEditor(parent, cell) {
       // API Name input
       const apiInput = document.createElement('input');
       apiInput.type = 'text';
-      apiInput.className = 'sf-field-input sf-field-input--api';
+      apiInput.className = 'df-field-input df-field-input--api';
       apiInput.value = field.apiName || '';
       apiInput.placeholder = 'API Name';
       apiInput.addEventListener('input', () => {
@@ -1875,7 +2126,7 @@ function renderFieldEditor(parent, cell) {
 
       // Type select
       const typeSelect = document.createElement('select');
-      typeSelect.className = 'sf-field-input sf-field-input--type';
+      typeSelect.className = 'df-field-input df-field-input--type';
       // Add current value if it's not in the list
       const allTypes = SF_FIELD_TYPES.includes(field.type) ? SF_FIELD_TYPES : [field.type, ...SF_FIELD_TYPES].filter(Boolean);
       allTypes.forEach(t => {
@@ -1893,7 +2144,7 @@ function renderFieldEditor(parent, cell) {
 
       // Delete button
       const delBtn = document.createElement('button');
-      delBtn.className = 'sf-field-delete';
+      delBtn.className = 'df-field-delete';
       delBtn.textContent = '×';
       delBtn.title = 'Remove field';
       delBtn.addEventListener('click', () => {
@@ -1913,10 +2164,10 @@ function renderFieldEditor(parent, cell) {
 
     // Add field button
     const addBtn = document.createElement('button');
-    addBtn.className = 'sf-properties__btn sf-properties__btn--add-field';
+    addBtn.className = 'df-properties__btn df-properties__btn--add-field';
     addBtn.textContent = '+ Add Field';
     addBtn.addEventListener('click', () => {
-      const updated = [...cell.get('fields'), { label: '', apiName: '', type: 'Text', keyType: null, length: '' }];
+      const updated = [...cell.get('fields'), { label: '', apiName: '', type: 'Text', keyType: null, length: '', sampleValues: '' }];
       cell.set('fields', updated);
       resizeDataObjectToFit(cell);
       rebuild();
@@ -1925,7 +2176,7 @@ function renderFieldEditor(parent, cell) {
 
     // Edit in Table button
     const fullEditBtn = document.createElement('button');
-    fullEditBtn.className = 'sf-properties__btn sf-properties__btn--full-edit';
+    fullEditBtn.className = 'df-properties__btn df-properties__btn--full-edit';
     fullEditBtn.textContent = '⊞ Edit in Table';
     fullEditBtn.addEventListener('click', () => openFieldEditorModal(cell, rebuild));
     listEl.appendChild(fullEditBtn);
@@ -1937,34 +2188,47 @@ function renderFieldEditor(parent, cell) {
 
 /* ── Full Edit Mode modal for DataObject fields ───────────── */
 
+// A compact checkbox toggle matching the Display menu's checkbox (a square that shows
+// a tick when on). Used for the field modal's Required / Deprecated columns
+// instead of raw browser checkboxes, for app-consistent styling.
+function makeFieldCheckToggle(checked, title, extraClass, onChange) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'df-field-modal__check-toggle' + (extraClass ? ' ' + extraClass : '') + (checked ? ' is-checked' : '');
+  btn.title = title;
+  btn.setAttribute('role', 'checkbox');
+  btn.setAttribute('aria-checked', String(checked));
+  btn.innerHTML = '<svg class="df-toolbar__checkbox" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path class="df-toolbar__checkbox-tick" d="M4.5 8l2.5 2.5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  btn.addEventListener('click', () => {
+    const next = !btn.classList.contains('is-checked');
+    btn.classList.toggle('is-checked', next);
+    btn.setAttribute('aria-checked', String(next));
+    onChange(next);
+  });
+  return btn;
+}
+
 function openFieldEditorModal(cell, onClose) {
   // Remove any existing modal
   document.getElementById('field-editor-modal')?.remove();
 
-  const overlay = document.createElement('div');
+  // buildModal owns the scaffold + focus-trap + focus-restore + backdrop/✕/Escape
+  // close. The bespoke borderless ✕ (closeClass + closeHtml) and footer scoping
+  // (footerClass) come from the extended factory API; onClose fires the caller's
+  // callback after teardown (matches the old close()).
+  const { overlay, body: bodyEl, close } = buildModal({
+    title: `Edit Fields — ${cell.get('objectName') || 'Object'}`, // textContent — buildModal escapes
+    dialogClass: 'df-field-modal__dialog',
+    bodyClass: 'df-field-modal__body',
+    footerClass: 'df-field-modal__footer',
+    closeClass: 'df-field-modal__close',
+    closeHtml: '✕',
+    footerHtml: `
+      <button class="df-properties__btn df-properties__btn--add-field df-field-modal__add">+ Add Field</button>
+      <button class="df-modal__btn df-modal__btn--primary df-field-modal__done">Done</button>`,
+    onClose,
+  });
   overlay.id = 'field-editor-modal';
-  overlay.className = 'sf-modal';
-
-  const fields = cell.get('fields') || [];
-
-  overlay.innerHTML = `
-    <div class="sf-modal__overlay sf-field-modal__backdrop"></div>
-    <div class="sf-modal__dialog sf-field-modal__dialog">
-      <div class="sf-modal__header">
-        <h2 class="sf-modal__title">Edit Fields — ${escHtml(cell.get('objectName') || 'Object')}</h2>
-        <button class="sf-modal__close sf-field-modal__close" title="Close">✕</button>
-      </div>
-      <div class="sf-modal__body sf-field-modal__body"></div>
-      <div class="sf-modal__footer sf-field-modal__footer">
-        <button class="sf-properties__btn sf-properties__btn--add-field sf-field-modal__add">+ Add Field</button>
-        <button class="sf-modal__btn sf-modal__btn--primary sf-field-modal__done">Done</button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-
-  const bodyEl = overlay.querySelector('.sf-field-modal__body');
 
   function rebuildModal() {
     bodyEl.innerHTML = '';
@@ -1972,36 +2236,37 @@ function openFieldEditorModal(cell, onClose) {
 
     // Header row
     const hdr = document.createElement('div');
-    hdr.className = 'sf-field-modal__row sf-field-modal__row--header';
-    hdr.innerHTML = '<span class="sf-field-modal__col--handle"></span><span class="sf-field-modal__col--key">Key</span><span class="sf-field-modal__col--api">API Name</span><span class="sf-field-modal__col--label">Label</span><span class="sf-field-modal__col--type">Type</span><span class="sf-field-modal__col--len">Length</span><span class="sf-field-modal__col--flag">Req</span><span class="sf-field-modal__col--flag">Decom</span><span class="sf-field-modal__col--del"></span>';
+    hdr.className = 'df-field-modal__row df-field-modal__row--header';
+    hdr.innerHTML = '<span class="df-field-modal__col--handle"></span><span class="df-field-modal__col--key">Key</span><span class="df-field-modal__col--api">API Name</span><span class="df-field-modal__col--label">Label</span><span class="df-field-modal__col--type">Type</span><span class="df-field-modal__col--len">Length</span><span class="df-field-modal__col--sample">Sample Values</span><span class="df-field-modal__col--req">REQUIRED</span><span class="df-field-modal__col--decom">DEPRECATED</span><span class="df-field-modal__col--del"></span>';
     bodyEl.appendChild(hdr);
 
     currentFields.forEach((field, i) => {
       const row = document.createElement('div');
-      row.className = 'sf-field-modal__row';
+      row.className = 'df-field-modal__row';
       row.dataset.index = i;
 
       // Reorder handle
       const handle = document.createElement('span');
-      handle.className = 'sf-field-modal__col--handle sf-field-modal__handle';
+      handle.className = 'df-field-modal__col--handle df-field-modal__handle';
       handle.innerHTML = '⠿';
       handle.draggable = true;
       handle.addEventListener('dragstart', (e) => {
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', String(i));
-        row.classList.add('sf-field-modal__row--dragging');
+        row.classList.add('df-field-modal__row--dragging');
       });
-      handle.addEventListener('dragend', () => row.classList.remove('sf-field-modal__row--dragging'));
+      handle.addEventListener('dragend', () => row.classList.remove('df-field-modal__row--dragging'));
 
       // Key toggle
       const keyBtn = document.createElement('button');
-      keyBtn.className = 'sf-field-key sf-field-key--' + (field.keyType || 'none') + ' sf-field-modal__col--key';
-      keyBtn.textContent = field.keyType === 'pk' ? 'PK' : field.keyType === 'fk' ? 'FK' : '—';
-      keyBtn.title = 'Toggle key: None → PK → FK';
+      keyBtn.className = 'df-field-key df-field-key--' + (field.keyType || 'none') + ' df-field-modal__col--key';
+      keyBtn.textContent = field.keyType === 'pk' ? 'PK' : field.keyType === 'fk' ? 'FK' : field.keyType === 'fqk' ? 'FQK' : '—';
+      keyBtn.title = 'Toggle key: None → PK → FK → FQK';
       keyBtn.addEventListener('click', () => {
-        const next = field.keyType === 'pk' ? 'fk' : field.keyType === 'fk' ? null : 'pk';
+        const next = field.keyType === 'pk' ? 'fk' : field.keyType === 'fk' ? 'fqk' : field.keyType === 'fqk' ? null : 'pk';
         const updated = [...cell.get('fields')];
-        updated[i] = { ...updated[i], keyType: next };
+        // A primary / fully-qualified key is inherently mandatory — auto-mark required.
+        updated[i] = { ...updated[i], keyType: next, ...(next === 'pk' || next === 'fqk' ? { required: true } : {}) };
         cell.set('fields', updated);
         resizeDataObjectToFit(cell);
         rebuildModal();
@@ -2010,7 +2275,7 @@ function openFieldEditorModal(cell, onClose) {
       // API Name
       const apiInput = document.createElement('input');
       apiInput.type = 'text';
-      apiInput.className = 'sf-field-input sf-field-modal__col--api';
+      apiInput.className = 'df-field-input df-field-modal__col--api';
       apiInput.value = field.apiName || '';
       apiInput.placeholder = 'API Name';
       apiInput.addEventListener('input', () => {
@@ -2022,7 +2287,7 @@ function openFieldEditorModal(cell, onClose) {
       // Label
       const labelInput = document.createElement('input');
       labelInput.type = 'text';
-      labelInput.className = 'sf-field-input sf-field-modal__col--label';
+      labelInput.className = 'df-field-input df-field-modal__col--label';
       labelInput.value = field.label || '';
       labelInput.placeholder = 'Label';
       labelInput.addEventListener('input', () => {
@@ -2033,7 +2298,7 @@ function openFieldEditorModal(cell, onClose) {
 
       // Type
       const typeSelect = document.createElement('select');
-      typeSelect.className = 'sf-field-input sf-field-modal__col--type';
+      typeSelect.className = 'df-field-input df-field-modal__col--type';
       const allTypes = SF_FIELD_TYPES.includes(field.type) ? SF_FIELD_TYPES : [field.type, ...SF_FIELD_TYPES].filter(Boolean);
       allTypes.forEach(t => {
         const opt = document.createElement('option');
@@ -2051,7 +2316,7 @@ function openFieldEditorModal(cell, onClose) {
       // Length
       const lenInput = document.createElement('input');
       lenInput.type = 'text';
-      lenInput.className = 'sf-field-input sf-field-modal__col--len';
+      lenInput.className = 'df-field-input df-field-modal__col--len';
       lenInput.value = field.length || '';
       lenInput.placeholder = '—';
       lenInput.addEventListener('input', () => {
@@ -2060,33 +2325,35 @@ function openFieldEditorModal(cell, onClose) {
         cell.set('fields', updated);
       });
 
-      // Required checkbox
-      const reqCheck = document.createElement('input');
-      reqCheck.type = 'checkbox';
-      reqCheck.className = 'sf-field-modal__check sf-field-modal__col--flag';
-      reqCheck.checked = !!field.required;
-      reqCheck.title = 'Required';
-      reqCheck.addEventListener('change', () => {
+      // Sample values (optional) — representative example values for the field, surfaced in
+      // the Data Mapping table view and CSV exports. Display/export-only: never drawn on the node.
+      const sampleInput = document.createElement('input');
+      sampleInput.type = 'text';
+      sampleInput.className = 'df-field-input df-field-modal__col--sample';
+      sampleInput.value = field.sampleValues || '';
+      sampleInput.placeholder = 'e.g. Acme, Globex';
+      sampleInput.addEventListener('input', () => {
         const updated = [...cell.get('fields')];
-        updated[i] = { ...updated[i], required: reqCheck.checked };
+        updated[i] = { ...updated[i], sampleValues: sampleInput.value };
         cell.set('fields', updated);
       });
 
-      // Decommissioned checkbox
-      const decomCheck = document.createElement('input');
-      decomCheck.type = 'checkbox';
-      decomCheck.className = 'sf-field-modal__check sf-field-modal__col--flag';
-      decomCheck.checked = !!field.decommissioned;
-      decomCheck.title = 'Decommissioned';
-      decomCheck.addEventListener('change', () => {
+      // Required + Deprecated — Display-menu-style checkbox toggles (a tick that
+      // appears when on), not raw browser checkboxes, for app-consistent styling.
+      const reqCheck = makeFieldCheckToggle(!!field.required, 'Required', 'df-field-modal__col--req', on => {
         const updated = [...cell.get('fields')];
-        updated[i] = { ...updated[i], decommissioned: decomCheck.checked };
+        updated[i] = { ...updated[i], required: on };
+        cell.set('fields', updated);
+      });
+      const decomCheck = makeFieldCheckToggle(!!field.deprecated, 'Deprecated', 'df-field-modal__col--decom', on => {
+        const updated = [...cell.get('fields')];
+        updated[i] = { ...updated[i], deprecated: on };
         cell.set('fields', updated);
       });
 
       // Delete button
       const delBtn = document.createElement('button');
-      delBtn.className = 'sf-field-delete sf-field-modal__col--del';
+      delBtn.className = 'df-field-delete df-field-modal__col--del';
       delBtn.textContent = '×';
       delBtn.title = 'Remove field';
       delBtn.addEventListener('click', () => {
@@ -2103,6 +2370,7 @@ function openFieldEditorModal(cell, onClose) {
       row.appendChild(labelInput);
       row.appendChild(typeSelect);
       row.appendChild(lenInput);
+      row.appendChild(sampleInput);
       row.appendChild(reqCheck);
       row.appendChild(decomCheck);
       row.appendChild(delBtn);
@@ -2115,19 +2383,19 @@ function openFieldEditorModal(cell, onClose) {
         const rect = row.getBoundingClientRect();
         const mid = rect.top + rect.height / 2;
         // Clear previous indicators on all rows
-        bodyEl.querySelectorAll('.sf-field-modal__row').forEach(r => {
-          r.classList.remove('sf-field-modal__row--drop-above', 'sf-field-modal__row--drop-below');
+        bodyEl.querySelectorAll('.df-field-modal__row').forEach(r => {
+          r.classList.remove('df-field-modal__row--drop-above', 'df-field-modal__row--drop-below');
         });
         if (e.clientY < mid) {
-          row.classList.add('sf-field-modal__row--drop-above');
+          row.classList.add('df-field-modal__row--drop-above');
         } else {
-          row.classList.add('sf-field-modal__row--drop-below');
+          row.classList.add('df-field-modal__row--drop-below');
         }
       });
       row.addEventListener('dragleave', (e) => {
         // Only remove if leaving the row entirely
         if (!row.contains(e.relatedTarget)) {
-          row.classList.remove('sf-field-modal__row--drop-above', 'sf-field-modal__row--drop-below');
+          row.classList.remove('df-field-modal__row--drop-above', 'df-field-modal__row--drop-below');
         }
       });
       row.addEventListener('drop', (e) => {
@@ -2135,8 +2403,8 @@ function openFieldEditorModal(cell, onClose) {
         const rect = row.getBoundingClientRect();
         const mid = rect.top + rect.height / 2;
         const dropBelow = e.clientY >= mid;
-        bodyEl.querySelectorAll('.sf-field-modal__row').forEach(r => {
-          r.classList.remove('sf-field-modal__row--drop-above', 'sf-field-modal__row--drop-below');
+        bodyEl.querySelectorAll('.df-field-modal__row').forEach(r => {
+          r.classList.remove('df-field-modal__row--drop-above', 'df-field-modal__row--drop-below');
         });
         const fromIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
         let toIdx = dropBelow ? i + 1 : i;
@@ -2158,22 +2426,211 @@ function openFieldEditorModal(cell, onClose) {
   rebuildModal();
 
   // Add field
-  overlay.querySelector('.sf-field-modal__add').addEventListener('click', () => {
+  overlay.querySelector('.df-field-modal__add').addEventListener('click', () => {
     const updated = [...cell.get('fields'), { label: '', apiName: '', type: 'Text', keyType: null, length: '' }];
     cell.set('fields', updated);
     resizeDataObjectToFit(cell);
     rebuildModal();
   });
 
-  // Close handlers
-  function close() {
-    overlay.remove();
-    if (onClose) onClose();
+  // Done closes; backdrop / ✕ / Escape are wired by buildModal.
+  overlay.querySelector('.df-field-modal__done').addEventListener('click', close);
+
+  // Import / Export Fields (CSV) — a persistent panel between the (rebuilt) field list
+  // and the footer. Three exports/imports + a paste box; importing OVERWRITES every
+  // field on this object (behind a confirmation), so the round-trip is: export →
+  // edit in a spreadsheet → re-import.
+  const dialog = overlay.querySelector('.df-field-modal__dialog');
+  const footer = overlay.querySelector('.df-field-modal__footer');
+  if (dialog && footer) {
+    const objLabel = cell.get('objectName') || 'Object';
+    const panel = document.createElement('details');
+    panel.className = 'df-csv-tools';
+    panel.innerHTML = `
+      <summary class="df-csv-tools__summary">Import / Export Fields (CSV)</summary>
+      <div class="df-csv-tools__body">
+        <div class="df-csv-tools__row">
+          <button type="button" class="df-modal__btn df-csv-tools__btn df-csv-tools__sample">Export Sample CSV</button>
+          <button type="button" class="df-modal__btn df-csv-tools__btn df-csv-tools__export">Export Fields to CSV</button>
+          <button type="button" class="df-modal__btn df-csv-tools__btn df-csv-tools__import-file">Import Fields from CSV…</button>
+          <button type="button" class="df-modal__btn df-csv-tools__btn df-csv-tools__import-paste">Import Fields from Paste</button>
+        </div>
+        <textarea class="df-csv-tools__textarea" rows="4" spellcheck="false" placeholder="API Name,Label,Type,Length,Required,Deprecated,Key,Sample Values&#10;Id,Record ID,ID,,Yes,No,PK,003Ax00000ABCDE&#10;AccountId,Account,Lookup,,Yes,No,FK,001Ax00000XYZab&#10;Email__c,Email,Email,,No,No,,jane@example.com"></textarea>
+        <p class="df-csv-tools__hint">Paste rows in the box above, then <strong>Import Fields from Paste</strong>. Columns: <strong>API&nbsp;Name, Label, Type, Length, Required, Deprecated, Key, Sample&nbsp;Values</strong> — a header row is auto-detected; importing <strong>overwrites every field</strong> on this object. Grab the Sample CSV for the full list of valid Type / Key values.</p>
+        <span class="df-csv-tools__status" aria-live="polite"></span>
+        <input type="file" accept=".csv,text/csv" class="df-csv-tools__file" hidden>
+      </div>`;
+    dialog.insertBefore(panel, footer);
+
+    const status = panel.querySelector('.df-csv-tools__status');
+    const ta = panel.querySelector('.df-csv-tools__textarea');
+    const fileInput = panel.querySelector('.df-csv-tools__file');
+    const setStatus = (msg, err) => { status.textContent = msg; status.classList.toggle('df-csv-tools__status--err', !!err); };
+
+    // Import = OVERWRITE, behind a confirmation. The whole ingestion (field replace +
+    // auto-resize) is wrapped in ONE explicit history batch so it collapses to a single
+    // undo entry — flushPendingDragCommit folds the debounce-merged change:fields/size
+    // into the open batch before it closes.
+    const doImport = async (text) => {
+      const parsed = parseBulkFields(text);
+      if (!parsed.length) { setStatus('No valid rows found — check the format (see Sample CSV).', true); return; }
+      const prevCount = (cell.get('fields') || []).length;
+      const ok = await confirmModal({
+        title: 'Overwrite fields?',
+        message: `This replaces all ${prevCount} field${prevCount === 1 ? '' : 's'} on “${objLabel}” with ${parsed.length} imported field${parsed.length === 1 ? '' : 's'}. You can undo it afterwards.`,
+        okLabel: 'Overwrite',
+        cancelLabel: 'Cancel',
+        tone: 'danger',
+      });
+      if (!ok) { setStatus('Import cancelled.'); return; }
+      history.startBatch();
+      try {
+        cell.set('fields', parsed);              // OVERWRITE the whole field list
+        resizeDataObjectToFit(cell);
+        history.flushPendingDragCommit();        // fold field + size changes into this batch
+      } finally {
+        history.endBatch();
+      }
+      ta.value = '';
+      setStatus(`Imported ${parsed.length} field${parsed.length === 1 ? '' : 's'} (replaced ${prevCount}).`);
+      rebuildModal();
+    };
+
+    // Filesystem-safe, cross-platform filenames (df_ prefix; `_` between sections, `-`
+    // within — tab + object names normalised via sanitizeFilenamePart).
+    const tabPart = sanitizeFilenamePart(getActiveTabName(), 'tab');
+    const objPart = sanitizeFilenamePart(objLabel, 'object');
+    panel.querySelector('.df-csv-tools__sample').addEventListener('click', () => downloadCsv('df_object-sample.csv', buildSampleFieldsCsv()));
+    panel.querySelector('.df-csv-tools__export').addEventListener('click', () => downloadCsv(`df_${tabPart}_${objPart}_fields.csv`, fieldsToCsv(cell.get('fields') || [])));
+    panel.querySelector('.df-csv-tools__import-file').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => { doImport(String(reader.result || '')); fileInput.value = ''; };
+      reader.onerror = () => { setStatus('Could not read that file.', true); fileInput.value = ''; };
+      reader.readAsText(file);
+    });
+    panel.querySelector('.df-csv-tools__import-paste').addEventListener('click', () => {
+      if (!ta.value.trim()) { setStatus('Paste some CSV rows first.', true); return; }
+      doImport(ta.value);
+    });
   }
-  overlay.querySelector('.sf-field-modal__backdrop').addEventListener('click', close);
-  overlay.querySelector('.sf-field-modal__close').addEventListener('click', close);
-  overlay.querySelector('.sf-field-modal__done').addEventListener('click', close);
-  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+}
+
+// Field ↔ CSV columns (the full set the editor exposes), in a fixed order shared by
+// the Sample, Export, and Import paths.
+const FIELD_CSV_COLUMNS = ['API Name', 'Label', 'Type', 'Length', 'Required', 'Deprecated', 'Key', 'Sample Values'];
+const csvCell = v => { const s = String(v ?? '').trim(); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+const keyToCsv = k => k === 'pk' ? 'PK' : k === 'fk' ? 'FK' : k === 'fqk' ? 'FQK' : '';
+
+function fieldsToCsv(fields) {
+  const rows = (fields || []).map(f => [
+    f.apiName || '', f.label || '', f.type || '', f.length || '',
+    f.required ? 'Yes' : 'No', f.deprecated ? 'Yes' : 'No', keyToCsv(f.keyType), f.sampleValues || '',
+  ]);
+  return '﻿' + [FIELD_CSV_COLUMNS, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n');
+}
+
+// A documentation-grade template: canonical PK/FK/FQK rows up top, then one row per
+// remaining Salesforce field type so every valid Type value is spelled out, plus a
+// Required + a Deprecated example.
+function buildSampleFieldsCsv() {
+  const canonical = [
+    ['Id', 'Record ID', 'ID', '', 'Yes', 'No', 'PK', '003Ax00000ABCDE'],
+    ['AccountId', 'Account', 'Lookup', '', 'Yes', 'No', 'FK', '001Ax00000XYZab'],
+    ['UnifiedId__c', 'Unified Profile Key', 'Text', '255', 'No', 'No', 'FQK', 'john.doe@example.com'],
+  ];
+  const used = new Set(canonical.map(r => r[2]));
+  const rest = SF_FIELD_TYPES.filter(t => !used.has(t)).map(t => {
+    const api = t.replace(/[^a-z0-9]+/gi, '') + '__c';
+    const len = /text|char|area/i.test(t) ? '255' : '';
+    return [api, `${t} Example`, t, len, 'No', 'No', '', ''];
+  });
+  const all = [...canonical, ...rest];
+  if (all.length) all[all.length - 1][5] = 'Yes';   // last row demonstrates Deprecated
+  return '﻿' + [FIELD_CSV_COLUMNS, ...all].map(r => r.map(csvCell).join(',')).join('\r\n');
+}
+
+function downloadCsv(filename, text) {
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Parse a CSV/TSV block into a FULL replacement field list. Delimiter = tab if any
+// line has one, else comma. A header row (first cell is a known header token) maps
+// columns by name; otherwise positional API Name, Label, Type, Length, Required,
+// Deprecated, Key. Type falls back to the first cell that reads as a known SF
+// type (then Text); Required/Deprecated accept Yes/true/1/x. Fresh fids per row.
+function parseBulkFields(text) {
+  const out = [];
+  const lines = String(text || '').split(/\r?\n/).filter(l => l.trim());
+  if (!lines.length) return out;
+  const delim = lines.some(l => l.includes('\t')) ? '\t' : ',';
+  const split = l => l.split(delim).map(s => s.trim());
+  const typeOf = v => SF_FIELD_TYPES.find(t => t.toLowerCase() === String(v).toLowerCase());
+  const keyOf = v => {
+    const k = String(v).toLowerCase().trim();
+    if (k === 'pk' || /primary/.test(k)) return 'pk';
+    if (k === 'fk' || /foreign/.test(k)) return 'fk';
+    if (k === 'fqk' || /qualified/.test(k)) return 'fqk';
+    return null;
+  };
+  const truthy = v => /^(y|yes|true|1|x|✓)$/i.test(String(v).trim());
+
+  const firstLower = split(lines[0]).map(s => s.toLowerCase());
+  const HEADER_FIRST = ['api name', 'api_name', 'apiname', 'api', 'name', 'field', 'field name', 'field api name'];
+  let start = 0;
+  let map = { api: 0, label: 1, type: 2, length: 3, required: 4, decom: 5, key: 6, sample: 7 };   // positional default
+  if (HEADER_FIRST.includes(firstLower[0])) {
+    start = 1;
+    const find = re => firstLower.findIndex(h => re.test(h));
+    map = {
+      api: Math.max(0, find(/api|^name$|^field/)),
+      label: find(/label|display/),
+      type: find(/type/),
+      length: find(/len/),
+      required: find(/req/),
+      decom: find(/deprecat|decom/),   // new "Deprecated" header + legacy "Decommissioned"
+      key: find(/key|pk|fk|fqk/),
+      sample: find(/sample|example/),
+    };
+  }
+
+  const seen = new Set();
+  for (let i = start; i < lines.length; i++) {
+    const cols = split(lines[i]);
+    const api = sanitizeFieldValue((map.api >= 0 ? cols[map.api] : cols[0]) || '');
+    if (!api) continue;
+    let type = (map.type >= 0 ? typeOf(cols[map.type]) : null) || '';
+    if (!type) { for (let j = 0; j < cols.length; j++) { if (j === map.api) continue; const m = typeOf(cols[j]); if (m) { type = m; break; } } }
+    if (!type) type = 'Text';
+    const label = sanitizeFieldValue((map.label >= 0 && cols[map.label]) ? cols[map.label] : api);
+    const length = sanitizeFieldValue((map.length >= 0 && cols[map.length]) ? cols[map.length] : '', 32);
+    const deprecated = map.decom >= 0 ? truthy(cols[map.decom]) : false;
+    let keyType = map.key >= 0 ? keyOf(cols[map.key]) : null;
+    if (!keyType) { for (let j = 0; j < cols.length; j++) { const k = keyOf(cols[j]); if (k) { keyType = k; break; } } }
+    // A PK / FQK is inherently mandatory; otherwise honour the Required column.
+    const required = (keyType === 'pk' || keyType === 'fqk') ? true : (map.required >= 0 ? truthy(cols[map.required]) : false);
+    const sampleValues = sanitizeFieldValue((map.sample >= 0 && cols[map.sample]) ? cols[map.sample] : '');
+    const fid = newFid(seen); seen.add(fid);   // stable synthetic identity per imported row
+    out.push({ label, apiName: api, type, keyType, length, required, deprecated, sampleValues, fid });
+  }
+  return out;
+}
+
+// Sanitise a pasted/imported field string — parity with sanitizeGraphJSON for untrusted
+// input: drop control + zero-width chars, neutralise script-bearing URIs, trim, and cap
+// length so a hostile paste can't inject markup, bloat the model, or break the renderer.
+function sanitizeFieldValue(s, maxLen = 255) {
+  let v = String(s ?? '').replace(/[\u0000-\u001F\u007F\u200B-\u200D\uFEFF]/g, '');
+  if (/^\s*(javascript|vbscript)\s*:|^\s*data\s*:\s*text\/html/i.test(v)) v = '';
+  v = v.trim();
+  return v.length > maxLen ? v.slice(0, maxLen) : v;
 }
 
 function renderFlowShapeProps(cell) {
@@ -2255,6 +2712,10 @@ function renderAnnotationProps(cell) {
     }
   });
 
+  // Note: the annotation label is auto-kept horizontal regardless of the
+  // bracket's rotation (sf.AnnotationView counters the element angle), so no
+  // manual text-rotation control is needed.
+
   // Appearance
   const appearance = section(bodyEl, 'Appearance');
   addColor(appearance, 'Bracket color', cell.attr('bracket/stroke'), v => cell.attr('bracket/stroke', v));
@@ -2265,6 +2726,7 @@ function renderAnnotationProps(cell) {
   addNumberPair(size,
     'Width',  cell.size().width,  w => cell.resize(w, cell.size().height),
     'Height', cell.size().height, h => cell.resize(cell.size().width, h));
+  addRotationField(size, cell);
   addAutoSizeBtn(size, () => {
     const def = DEFAULT_SIZES['sf.Annotation'];
     cell.resize(def.width, def.height);
@@ -2370,11 +2832,11 @@ function renderGanttMarkerProps(cell) {
 
   // Direction toggle
   const dirRow = document.createElement('div');
-  dirRow.className = 'sf-prop-pair';
+  dirRow.className = 'df-prop-pair';
   const isDown = cell.get('pointDown') === true;
 
   const upBtn = document.createElement('button');
-  upBtn.className = 'sf-properties__btn sf-properties__btn--order';
+  upBtn.className = 'df-properties__btn df-properties__btn--order';
   upBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><polygon points="8,2 14,14 2,14"/></svg> Point Up`;
   upBtn.style.opacity = isDown ? '0.5' : '1';
   upBtn.addEventListener('click', () => {
@@ -2387,7 +2849,7 @@ function renderGanttMarkerProps(cell) {
   });
 
   const downBtn = document.createElement('button');
-  downBtn.className = 'sf-properties__btn sf-properties__btn--order';
+  downBtn.className = 'df-properties__btn df-properties__btn--order';
   downBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><polygon points="2,2 14,2 8,14"/></svg> Point Down`;
   downBtn.style.opacity = isDown ? '1' : '0.5';
   downBtn.addEventListener('click', () => {
@@ -2601,13 +3063,13 @@ function renderOrgPersonProps(cell) {
 
   // Photo upload
   const photoField = document.createElement('div');
-  photoField.className = 'sf-prop-field';
+  photoField.className = 'df-prop-field';
   const photoLabel = document.createElement('div');
-  photoLabel.className = 'sf-properties__label';
+  photoLabel.className = 'df-properties__label';
   photoLabel.textContent = 'Photo';
 
   const photoControls = document.createElement('div');
-  photoControls.className = 'sf-prop-pair';
+  photoControls.className = 'df-prop-pair';
 
   const hasImage = !!cell.get('imageUrl');
 
@@ -2616,11 +3078,11 @@ function renderOrgPersonProps(cell) {
   const ICON_REMOVE = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h10M6 4V2.5A.5.5 0 016.5 2h3a.5.5 0 01.5.5V4M4.5 4l.5 9.5h6l.5-9.5"/></svg>`;
 
   const uploadBtn = document.createElement('button');
-  uploadBtn.className = 'sf-properties__btn sf-properties__btn--order';
+  uploadBtn.className = 'df-properties__btn df-properties__btn--order';
   uploadBtn.innerHTML = hasImage ? `${ICON_CHANGE} Change` : `${ICON_UPLOAD} Upload`;
 
   const clearBtn = document.createElement('button');
-  clearBtn.className = 'sf-properties__btn sf-properties__btn--order';
+  clearBtn.className = 'df-properties__btn df-properties__btn--order';
   clearBtn.innerHTML = `${ICON_REMOVE} Remove`;
 
   // Full-width upload when no image, 50/50 pair when image exists
@@ -2702,17 +3164,17 @@ function renderOrgPersonProps(cell) {
   const detailSec = section(bodyEl, 'Details');
 
   function buildDetailList() {
-    detailSec.querySelectorAll('.sf-detail-row, .sf-detail-add').forEach(r => r.remove());
+    detailSec.querySelectorAll('.df-detail-row, .df-detail-add').forEach(r => r.remove());
 
     detailsState.forEach((entry, idx) => {
       const row = document.createElement('div');
-      row.className = 'sf-detail-row';
+      row.className = 'df-detail-row';
       row.draggable = true;
       row.dataset.idx = String(idx);
 
       // Drag handle
       const handle = document.createElement('span');
-      handle.className = 'sf-detail-row__handle';
+      handle.className = 'df-detail-row__handle';
       handle.innerHTML = '⠿';
       handle.title = 'Drag to reorder';
       row.appendChild(handle);
@@ -2720,7 +3182,7 @@ function renderOrgPersonProps(cell) {
       // Label input — plain text, freely editable
       const labelInput = document.createElement('input');
       labelInput.type = 'text';
-      labelInput.className = 'sf-properties__input sf-detail-row__label-input';
+      labelInput.className = 'df-properties__input df-detail-row__label-input';
       labelInput.value = entry.label;
       labelInput.placeholder = 'Label';
       labelInput.addEventListener('input', () => {
@@ -2732,7 +3194,7 @@ function renderOrgPersonProps(cell) {
       // Value input
       const valueInput = document.createElement('input');
       valueInput.type = 'text';
-      valueInput.className = 'sf-properties__input';
+      valueInput.className = 'df-properties__input';
       valueInput.value = entry.value;
       valueInput.placeholder = 'Value';
       valueInput.addEventListener('input', () => {
@@ -2744,7 +3206,7 @@ function renderOrgPersonProps(cell) {
       // Remove button
       const removeBtn = document.createElement('button');
       removeBtn.type = 'button';
-      removeBtn.className = 'sf-detail-row__remove';
+      removeBtn.className = 'df-detail-row__remove';
       removeBtn.innerHTML = '×';
       removeBtn.title = 'Remove';
       removeBtn.addEventListener('click', () => {
@@ -2757,23 +3219,23 @@ function renderOrgPersonProps(cell) {
       // Drag-and-drop to reorder
       row.addEventListener('dragstart', (e) => {
         e.dataTransfer.effectAllowed = 'move';
-        row.classList.add('sf-detail-row--dragging');
+        row.classList.add('df-detail-row--dragging');
       });
       row.addEventListener('dragend', () => {
-        row.classList.remove('sf-detail-row--dragging');
+        row.classList.remove('df-detail-row--dragging');
       });
       row.addEventListener('dragover', (e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        row.classList.add('sf-detail-row--over');
+        row.classList.add('df-detail-row--over');
       });
       row.addEventListener('dragleave', () => {
-        row.classList.remove('sf-detail-row--over');
+        row.classList.remove('df-detail-row--over');
       });
       row.addEventListener('drop', (e) => {
         e.preventDefault();
-        row.classList.remove('sf-detail-row--over');
-        const draggingEl = detailSec.querySelector('.sf-detail-row--dragging');
+        row.classList.remove('df-detail-row--over');
+        const draggingEl = detailSec.querySelector('.df-detail-row--dragging');
         if (!draggingEl || draggingEl === row) return;
         const fromIdx = parseInt(draggingEl.dataset.idx, 10);
         const toIdx = parseInt(row.dataset.idx, 10);
@@ -2790,7 +3252,7 @@ function renderOrgPersonProps(cell) {
     // + Add detail button
     const addBtn = document.createElement('button');
     addBtn.type = 'button';
-    addBtn.className = 'sf-properties__btn sf-properties__btn--auto-size sf-detail-add';
+    addBtn.className = 'df-properties__btn df-properties__btn--auto-size df-detail-add';
     addBtn.style.marginTop = '6px';
     addBtn.innerHTML = `
       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
@@ -2800,9 +3262,9 @@ function renderOrgPersonProps(cell) {
       commitDetails();
       buildDetailList();
       // Focus the new label input so the user starts typing immediately
-      const rows = detailSec.querySelectorAll('.sf-detail-row');
+      const rows = detailSec.querySelectorAll('.df-detail-row');
       const last = rows[rows.length - 1];
-      last?.querySelector('.sf-detail-row__label-input')?.focus();
+      last?.querySelector('.df-detail-row__label-input')?.focus();
     });
     detailSec.appendChild(addBtn);
   }
@@ -3070,79 +3532,204 @@ function renderSequenceFragmentProps(cell) {
   addDeleteBtn(footerEl, () => { graph.removeCells([cell]); selection.clearSelection(); });
 }
 
+// ── Shared connector-appearance setters ───────────────────────────────────────
+// Used by BOTH the single-link panel (renderLinkProps) and the multi-select Connectors
+// section so a one-link edit and a many-link edit behave identically. None of these opens a
+// history batch — the CALLER wraps (one undo step per edit, however many links it touches).
+
+// Connector line-style picklist (Solid / Dashed / Dotted) — em-space gap then a sample.
+// `lineStyle` is a top-level prop (a bg-coloured overlay clone paints the dashes; the real
+// path stays solid so arrow/ER markers render crisp on Safari — see startLineStyleOverlays).
+const LINK_LINE_STYLE_OPTS = (() => {
+  const G = '   ';
+  return [
+    { value: 'none', label: `Solid${G}─────` },
+    { value: '8 4',  label: `Dashed${G}╌ ╌ ╌ ╌ ╌` },
+    { value: '2 4',  label: `Dotted${G}· · · · · · ·` },
+  ];
+})();
+
+// Line colour. Arrow markers auto-inherit from the line; ER/stub markers carry an explicit
+// stroke that must track it; a mapping badge re-tints; and the link's SVG group is re-inserted
+// to dodge Safari's <marker> cache (full attrs replacement + sync render — see applyMarker).
+function applyLinkStroke(cell, v) {
+  const allAttrs = JSON.parse(JSON.stringify(cell.get('attrs') || {}));
+  if (!allAttrs.line) allAttrs.line = {};
+  allAttrs.line.stroke = v;
+  const sm = allAttrs.line.sourceMarker;
+  if (sm && sm.stroke && sm.stroke !== 'none') sm.stroke = v;
+  const tm = allAttrs.line.targetMarker;
+  if (tm && tm.stroke && tm.stroke !== 'none') tm.stroke = v;
+  cell.set('attrs', allAttrs);
+  if (cell.prop('linkKind') === 'mapping') syncMappingTypeBadge(cell);
+  paper.updateViews();
+  const view = paper.findViewByModel(cell);
+  if (view?.el?.parentNode) {
+    const parent = view.el.parentNode;
+    const next = view.el.nextSibling;
+    parent.removeChild(view.el);
+    if (next) parent.insertBefore(view.el, next);
+    else parent.appendChild(view.el);
+  }
+}
+
+// Line width. A plain "None" stub end (`M 0 0 L -12 0`) is a continuation of the line, so it
+// tracks the width; decorated ends (arrow / crow's foot) keep their own weight.
+function applyLinkStrokeWidth(cell, v) {
+  cell.attr('line/strokeWidth', v);
+  for (const end of ['sourceMarker', 'targetMarker']) {
+    if (cell.attr(`line/${end}`)?.d === 'M 0 0 L -12 0') cell.attr(`line/${end}/stroke-width`, v);
+  }
+}
+
+// Line style → the `lineStyle` prop (never `line/strokeDasharray`, which is force-cleared as
+// defence-in-depth so the real path stays solid for crisp Safari markers).
+function applyLinkLineStyle(cell, v) {
+  cell.prop('lineStyle', v === 'none' ? null : v);
+  if (cell.attr('line/strokeDasharray')) cell.attr('line/strokeDasharray', null);
+}
+
+// ── Shared Data Cloud mapping setters (single-link panel + multi-select Mapping section) ──
+// The 5-value transform picklist, shared so single + multi stay in lockstep.
+const MAPPING_TYPES = ['Standard', 'Formula', 'Streaming Transform', 'Batch Transform', 'Calculated Insight'];
+
+// Connection type for a field→field link: mapping ↔ relationship. Swaps `linkKind` and the
+// whole router/connector/marker style. No history batch and no panel re-render — the caller
+// owns both (it must re-render to disclose/hide the mapping fields).
+function applyLinkConnectionType(cell, v) {
+  if (v === 'mapping') { cell.prop('linkKind', 'mapping'); applyMappingLinkStyle(cell); }
+  else { cell.prop('linkKind', null); applyRelationshipLinkStyle(cell); }
+}
+// Mapping transform type (Standard / Formula / …) + its connector code badge (F / ST / BT / CI).
+function applyLinkMappingType(cell, v) {
+  cell.prop('mappingType', v);
+  syncMappingTypeBadge(cell);
+}
+// Expression / rule note (non-Standard types) → table Expression column + badge hover tooltip.
+function applyLinkExpression(cell, v) {
+  cell.prop('expressionRule', v || '');
+  syncMappingTypeBadge(cell);
+}
+// Font colour (v1.16.1) — one control for ALL of a connector's text: the user label, the frequency
+// overlay text, AND its clock icon. Stored as the `fontColor` prop; recolours the existing user label in
+// place and re-derives the frequency overlay (syncFrequencyLabel reads `fontColor`).
+function applyLinkFontColor(cell, v) {
+  cell.prop('fontColor', v);
+  const labels = cell.labels() || [];
+  const idx = labels.findIndex(l => !(l?.attrs?.badgeBox) && !(l?.attrs?.freqText));   // the on-line user label
+  if (idx >= 0) cell.label(idx, { attrs: { text: { fill: v } } });
+  syncFrequencyLabel(cell);
+}
+
 function renderLinkProps(cell) {
   // Content — primary text only (Font size moved to Appearance for
   // consistency with every other shape's typography placement).
   const labelSec = section(bodyEl, 'Content');
-  const currentLabel = cell.labels()?.[0]?.attrs?.text?.text ?? '';
-  const currentLabelSize = cell.labels()?.[0]?.attrs?.text?.fontSize ?? 13;
+  // A mapping link may also carry a mapping-type code badge (selector `badgeBox`), and an
+  // architecture link a frequency overlay (selector `freqText`). Read the USER label past
+  // both, and preserve them when the primary label is edited.
+  const isBadge = l => !!(l?.attrs?.badgeBox);
+  const isFreq = l => !!(l?.attrs?.freqText);
+  const userLabel = (cell.labels() || []).find(l => !isBadge(l) && !isFreq(l));
+  const currentLabel = userLabel?.attrs?.text?.text ?? '';
+  const currentLabelSize = userLabel?.attrs?.text?.fontSize ?? 13;
   addText(labelSec, 'Label', currentLabel, v => {
-    const fontSize = cell.labels()?.[0]?.attrs?.text?.fontSize ?? 13;
-    const lineColor = cell.attr('line/stroke') || '#888888';
-    cell.labels(v ? [{
+    const fontSize = (cell.labels() || []).find(l => !isBadge(l) && !isFreq(l))?.attrs?.text?.fontSize ?? 13;
+    // Font colour (v1.16.1) overrides the line-stroke default for the label text.
+    const fillColor = cell.prop('fontColor') || cell.attr('line/stroke') || '#888888';
+    // Keep the non-user labels (mapping badge + frequency overlay) when the label changes.
+    const others = (cell.labels() || []).filter(l => isBadge(l) || isFreq(l));
+    const arr = [];
+    if (v) arr.push({
       markup: [
         { tagName: 'rect', selector: 'body' },
         { tagName: 'text', selector: 'text' },
       ],
       attrs: {
-        text: { text: v, fill: lineColor, fontSize, fontWeight: 600, fontFamily: 'system-ui, -apple-system, sans-serif', textAnchor: 'middle', textVerticalAnchor: 'middle' },
+        text: { text: v, fill: fillColor, fontSize, fontWeight: 600, fontFamily: 'system-ui, -apple-system, sans-serif', textAnchor: 'middle', textVerticalAnchor: 'middle' },
         body: { ref: 'text', refWidth: 12, refHeight: 4, refX: -6, refY: -2, fill: 'var(--bg-canvas, #FFFFFF)', stroke: 'none', rx: 2, ry: 2 },
       },
       position: { distance: 0.5, offset: 0 },
-    }] : []);
+    });
+    arr.push(...others);   // keep the F/ST/BT/CI badge and/or the frequency overlay
+    cell.labels(arr);
     titleEl.textContent = v || '';
   });
+
+  // Architecture only: integration-frequency overlay (clock icon + muted text below the
+  // line). `connectionFrequency` is the authoritative prop; syncFrequencyLabel derives the
+  // secondary label. addText already coalesces a focus session into one undo entry, so no
+  // explicit history batch is needed (matches the Label setter).
+  const isArchitecture = document.getElementById('canvas-container')?.dataset.diagramType === 'architecture';
+  if (isArchitecture) {
+    addText(labelSec, 'Frequency', cell.prop('connectionFrequency') || '', v => {
+      cell.prop('connectionFrequency', v || '');
+      syncFrequencyLabel(cell);
+    }, cell, { placeholder: 'Real-time / Hourly / Daily' });
+  }
+
+  // Connection type is meaningful ONLY for a field→field link (a DataObject field
+  // port on both ends): that link is a Data Cloud field mapping by default but can be
+  // toggled to a plain ER relationship via a two-value slider. Every other connector
+  // is just a relationship/line — no toggle is shown.
+  const src = cell.get('source'); const tgt = cell.get('target');
+  const isFieldToField = typeof src?.port === 'string' && src.port.startsWith('field-')
+    && typeof tgt?.port === 'string' && tgt.port.startsWith('field-');
+  if (isFieldToField) {
+    const isMapping = cell.prop('linkKind') === 'mapping';
+    addSegmented(labelSec, 'Connection type', isMapping ? 'mapping' : 'relationship', [
+      { value: 'relationship', label: 'Relationship' },
+      { value: 'mapping', label: 'Mapping' },
+    ], v => {
+      // One history step for the whole switch — it mutates linkKind + several attrs +
+      // router + connector + connectionPoints (shared with the multi-select Mapping section).
+      history.startBatch();
+      try { applyLinkConnectionType(cell, v); } finally { history.endBatch(); }
+      refresh();
+    });
+
+    // Data Cloud mapping properties — only meaningful for an ACTIVE field mapping.
+    // Grouped under Content: the transform Mapping Type (a 5-value picklist), plus a
+    // progressively-disclosed Expression note. Both feed the table view's MAPPING
+    // TYPE / Mapping Label columns; non-Standard types also drop a code badge (F / ST
+    // / BT / CI) on the connector's target stub via syncMappingTypeBadge.
+    if (cell.prop('linkKind') === 'mapping') {
+      const curType = MAPPING_TYPES.includes(cell.prop('mappingType')) ? cell.prop('mappingType') : 'Standard';
+      addSelect(labelSec, 'Mapping type', curType,
+        MAPPING_TYPES.map(t => ({ value: t, label: t })),
+        v => {
+          history.startBatch();
+          try { applyLinkMappingType(cell, v); } finally { history.endBatch(); }
+          refresh();   // re-render so the Expression field shows/hides for the new type
+        });
+      // Progressive disclosure: any non-Standard (computed) transform exposes the
+      // Expression / rules note, bound to `expressionRule` → table Expression / Rule column.
+      if (curType !== 'Standard') {
+        addText(labelSec, 'Expression / rules', cell.prop('expressionRule') || cell.prop('mappingLabel') || '', v => {
+          history.startBatch();
+          try { applyLinkExpression(cell, v); } finally { history.endBatch(); }
+        });
+      }
+    }
+  }
 
   // Appearance
   const appearance = section(bodyEl, 'Appearance');
   addColor(appearance, 'Color', cell.attr('line/stroke') ?? '#888888',
     v => {
-      // Full attrs replacement with sync rendering for Safari compatibility.
-      // Arrow markers (no explicit fill/stroke) auto-inherit from line stroke.
-      // ER markers with explicit stroke need manual sync.
-      const allAttrs = JSON.parse(JSON.stringify(cell.get('attrs') || {}));
-      if (!allAttrs.line) allAttrs.line = {};
-      allAttrs.line.stroke = v;
-      const sm = allAttrs.line.sourceMarker;
-      if (sm && sm.stroke && sm.stroke !== 'none') sm.stroke = v;
-      const tm = allAttrs.line.targetMarker;
-      if (tm && tm.stroke && tm.stroke !== 'none') tm.stroke = v;
-      cell.set('attrs', allAttrs);
-      paper.updateViews();
-      // Safari SVG marker cache workaround — see applyMarker() below for the
-      // why. Same DOM re-insert pattern.
-      const view = paper.findViewByModel(cell);
-      if (view?.el?.parentNode) {
-        const parent = view.el.parentNode;
-        const next = view.el.nextSibling;
-        parent.removeChild(view.el);
-        if (next) parent.insertBefore(view.el, next);
-        else parent.appendChild(view.el);
-      }
+      // attrs + (mapping) badge label = one undo step; shared with the multi-select panel.
+      history.startBatch();
+      try { applyLinkStroke(cell, v); } finally { history.endBatch(); }
     });
-  // Same name → em-space gap → line-sample convention as
-  // renderLineProps, minus 'breaks' (links use only the three standard
-  // dash patterns).
-  const EM = ' ';
-  const GAP = EM + EM + EM;
-  addSelect(appearance, 'Line style', cell.prop('lineStyle') || 'none', [
-    { value: 'none', label: `Solid${GAP}─────` },
-    { value: '8 4',  label: `Dashed${GAP}╌ ╌ ╌ ╌ ╌` },
-    { value: '2 4',  label: `Dotted${GAP}· · · · · · ·` },
-  ], v => {
-    // The line style is stored on a custom `lineStyle` prop — NOT on
-    // `line/strokeDasharray` — so the rendered line always stays solid
-    // (keeping arrow/ER markers crisp in Safari, which otherwise
-    // propagates dasharray into marker content at the renderer level).
-    // canvas.js' startLineStyleOverlays() paints a bg-coloured clone that
-    // "erases" stripes to simulate the dash pattern.
-    cell.prop('lineStyle', v === 'none' ? null : v);
-    // Defence in depth: make sure the native line dasharray never lands
-    // on the real path, even if some legacy code path writes it.
-    if (cell.attr('line/strokeDasharray')) cell.attr('line/strokeDasharray', null);
-  });
+  // Label color (v1.16.1) — recolours the label + frequency text + clock together; defaults to the line
+  // color. Reset (↺) snaps back to the current line stroke. One undo step (label fill + freq rebuild).
+  addColor(appearance, 'Label color', cell.prop('fontColor') || cell.attr('line/stroke') || '#888888',
+    v => { history.startBatch(); try { applyLinkFontColor(cell, v); } finally { history.endBatch(); } },
+    { defaultValue: cell.attr('line/stroke') || '#888888' });
+  addSelect(appearance, 'Line style', cell.prop('lineStyle') || 'none', LINK_LINE_STYLE_OPTS,
+    v => applyLinkLineStyle(cell, v));
   addNumber(appearance, 'Line width', cell.attr('line/strokeWidth') ?? 2,
-    v => cell.attr('line/strokeWidth', v));
+    v => applyLinkStrokeWidth(cell, v));
   // Font size — connector label typography. Lives in Appearance for
   // consistency with the universal convention (text content in Content;
   // text styling in Appearance).
@@ -3153,6 +3740,7 @@ function renderLinkProps(cell) {
     }
   }, { min: 8, max: 24 });
   const stroke = cell.attr('line/stroke') || '#333333';
+  const lineWidth = cell.attr('line/strokeWidth') ?? 2; // None stub follows the line weight
   // ER crow's foot markers — negative-x convention (toward element).
   // Crow's foot prongs fan out toward negative-x (toward the entity).
   // Explicit fill/stroke is set because ER markers are open paths (no
@@ -3166,7 +3754,7 @@ function renderLinkProps(cell) {
   // dasharray.
   const markerDefs = {
     // None: simple stub line extending toward element (fills the connectionPoint gap)
-    none:        { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: stroke, 'stroke-width': 2, 'stroke-dasharray': 'none' },
+    none:        { type: 'path', d: 'M 0 0 L -12 0', fill: 'none', stroke: stroke, 'stroke-width': lineWidth, 'stroke-dasharray': 'none' },
     // Arrow: NO explicit fill/stroke — JointJS auto-inherits from line stroke
     // and auto-trims the line at the marker boundary. Using JointJS native
     // coordinate convention: tip at negative-x, base at x=0.
@@ -3279,9 +3867,29 @@ function renderLinkProps(cell) {
     applyMarker(cell, 'targetMarker', markerDefs[v]);
   }, { strokeColor: lineStroke });
 
+  // Reverse direction + Simplify path — generic link actions available on EVERY
+  // connector (any diagram type), stacked at the foot of Appearance with Reverse
+  // directly above Simplify, sharing one button style.
+  const reverseBtn = document.createElement('button');
+  reverseBtn.className = 'df-properties__btn df-properties__btn--auto-size';
+  reverseBtn.style.marginTop = '6px';
+  reverseBtn.innerHTML = `
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+      <path d="M2 5 L13 5 M10 2 L13 5 L10 8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M14 11 L3 11 M6 8 L3 11 L6 14" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    Reverse direction`;
+  reverseBtn.addEventListener('click', () => {
+    // Swap endpoints — the link redraws in the opposite direction (markers follow
+    // their ends). A single set keeps it one undo step.
+    const s = cell.get('source'); const t = cell.get('target');
+    cell.set({ source: t, target: s });
+  });
+  appearance.appendChild(reverseBtn);
+
   // Simplify path button
   const simplifyBtn = document.createElement('button');
-  simplifyBtn.className = 'sf-properties__btn sf-properties__btn--auto-size';
+  simplifyBtn.className = 'df-properties__btn df-properties__btn--auto-size';
   simplifyBtn.style.marginTop = '6px';
   simplifyBtn.innerHTML = `
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -3312,19 +3920,19 @@ function renderLinkProps(cell) {
 
 function section(parent, title, open = true) {
   const wrap = document.createElement('div');
-  wrap.className = 'sf-section' + (open ? '' : ' sf-section--collapsed');
+  wrap.className = 'df-section' + (open ? '' : ' df-section--collapsed');
 
   const hdr = document.createElement('div');
-  hdr.className = 'sf-section__header';
+  hdr.className = 'df-section__header';
   hdr.innerHTML = `
     <span>${title}</span>
-    <svg class="sf-section__chevron" viewBox="0 0 10 6" xmlns="http://www.w3.org/2000/svg">
+    <svg class="df-section__chevron" viewBox="0 0 10 6" xmlns="http://www.w3.org/2000/svg">
       <path d="M0 0 L5 6 L10 0 Z"/>
     </svg>`;
-  hdr.addEventListener('click', () => wrap.classList.toggle('sf-section--collapsed'));
+  hdr.addEventListener('click', () => wrap.classList.toggle('df-section--collapsed'));
 
   const body = document.createElement('div');
-  body.className = 'sf-section__body';
+  body.className = 'df-section__body';
 
   wrap.appendChild(hdr);
   wrap.appendChild(body);
@@ -3378,8 +3986,8 @@ function addOrderButtons(sec, cell) {
   // Order-specific modifier (v1.12.1) lets us visually group the buttons
   // with the hint below them rather than with whatever sits above
   // (typically the Width / Height inputs). Pure CSS-side change — the
-  // base `.sf-prop-pair` flex behaviour is preserved.
-  btnRow.className = 'sf-prop-pair sf-prop-pair--order';
+  // base `.df-prop-pair` flex behaviour is preserved.
+  btnRow.className = 'df-prop-pair df-prop-pair--order';
 
   const tierBase = Z_BASE[type] ?? 20000;
   const tierMax  = tierBase + Z_TIER_SPAN;
@@ -3392,7 +4000,7 @@ function addOrderButtons(sec, cell) {
 
   // Bring to Front
   const frontBtn = document.createElement('button');
-  frontBtn.className = 'sf-properties__btn sf-properties__btn--order';
+  frontBtn.className = 'df-properties__btn df-properties__btn--order';
   frontBtn.innerHTML = `
     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
       <path d="M2 2h12v2H2zM4 6h8v2H4zM6 10h4v4H6z"/>
@@ -3404,12 +4012,21 @@ function addOrderButtons(sec, cell) {
     const maxZ = peers.length
       ? Math.max(...peers.map(el => el.get('z') ?? tierBase))
       : tierBase;
-    cell.set('z', maxZ + 1);
+    const oldZ = cell.get('z');
+    const newZ = maxZ + 1;
+    if (oldZ === newZ) return;
+    cell.set('z', newZ);
+    // `z` is auto-managed by the canvas tier system (no blanket change:z listener),
+    // so record this explicit reorder ourselves to make it undoable.
+    history.recordCommand(
+      () => { const c = graph.getCell(cell.id); if (c) c.set('z', oldZ); },
+      () => { const c = graph.getCell(cell.id); if (c) c.set('z', newZ); },
+    );
   });
 
   // Send to Back
   const backBtn = document.createElement('button');
-  backBtn.className = 'sf-properties__btn sf-properties__btn--order';
+  backBtn.className = 'df-properties__btn df-properties__btn--order';
   backBtn.innerHTML = `
     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
       <path d="M6 2h4v4H6zM4 8h8v2H4zM2 12h12v2H2z"/>
@@ -3421,7 +4038,14 @@ function addOrderButtons(sec, cell) {
     const minZ = peers.length
       ? Math.min(...peers.map(el => el.get('z') ?? tierBase))
       : tierBase;
-    cell.set('z', Math.max(tierBase, minZ - 1));
+    const oldZ = cell.get('z');
+    const newZ = Math.max(tierBase, minZ - 1);
+    if (oldZ === newZ) return;
+    cell.set('z', newZ);
+    history.recordCommand(
+      () => { const c = graph.getCell(cell.id); if (c) c.set('z', oldZ); },
+      () => { const c = graph.getCell(cell.id); if (c) c.set('z', newZ); },
+    );
   });
 
   btnRow.appendChild(frontBtn);
@@ -3432,7 +4056,7 @@ function addOrderButtons(sec, cell) {
   // the scope is the footnote. Previously rendered above, which competed
   // visually with the Width input directly above the section.
   const hint = document.createElement('div');
-  hint.className = 'sf-prop-order-hint';
+  hint.className = 'df-prop-order-hint';
   hint.textContent = `Move within other ${peerLabel}`;
   sec.appendChild(hint);
 }
@@ -3441,9 +4065,9 @@ function addOrderButtons(sec, cell) {
 
 function addActionBtn(parent, label, onClick) {
   const wrap = document.createElement('div');
-  wrap.className = 'sf-convert-strip';
+  wrap.className = 'df-convert-strip';
   const btn = document.createElement('button');
-  btn.className = 'sf-properties__btn sf-properties__btn--convert';
+  btn.className = 'df-properties__btn df-properties__btn--convert';
   btn.textContent = label;
   btn.addEventListener('click', onClick);
   wrap.appendChild(btn);
@@ -3452,9 +4076,9 @@ function addActionBtn(parent, label, onClick) {
 
 function addConvertBtn(parent, label, onClick) {
   const wrap = document.createElement('div');
-  wrap.className = 'sf-convert-strip';
+  wrap.className = 'df-convert-strip';
   const btn = document.createElement('button');
-  btn.className = 'sf-properties__btn sf-properties__btn--convert';
+  btn.className = 'df-properties__btn df-properties__btn--convert';
   btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
     <path d="M1 4h11l-3-3M15 12H4l3 3"/>
   </svg> ${label}`;
@@ -3490,12 +4114,12 @@ function cloneCellPlain(cell) {
 
 function addCloneBtn(parent, cell) {
   const wrap = document.createElement('div');
-  wrap.className = 'sf-clone-strip';
+  wrap.className = 'df-clone-strip';
 
   // Always show a primary "Clone" button (plain duplicate — element only,
   // or parallel connector for links).
   const primary = document.createElement('button');
-  primary.className = 'sf-properties__btn sf-properties__btn--clone';
+  primary.className = 'df-properties__btn df-properties__btn--clone';
   primary.innerHTML = `${CLONE_ICON_SVG} Clone`;
   primary.addEventListener('click', () => cloneCellPlain(cell));
   wrap.appendChild(primary);
@@ -3508,7 +4132,7 @@ function addCloneBtn(parent, cell) {
 
     const addSubBtn = (label, mode) => {
       const sub = document.createElement('button');
-      sub.className = 'sf-properties__btn sf-properties__btn--clone sf-properties__btn--clone-sub';
+      sub.className = 'df-properties__btn df-properties__btn--clone df-properties__btn--clone-sub';
       sub.innerHTML = `${CLONE_ICON_SVG} Clone ${label}`;
       sub.addEventListener('click', () => cloneElementWithConnectors(cell, mode));
       wrap.appendChild(sub);
@@ -3532,9 +4156,9 @@ function addCloneBtn(parent, cell) {
 
 function addDeleteBtn(parent, onClick) {
   const wrap = document.createElement('div');
-  wrap.className = 'sf-delete-strip';
+  wrap.className = 'df-delete-strip';
   const btn = document.createElement('button');
-  btn.className = 'sf-properties__btn sf-properties__btn--delete';
+  btn.className = 'df-properties__btn df-properties__btn--delete';
   btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
     <path d="M3 4h10M6 4V2.5A.5.5 0 016.5 2h3a.5.5 0 01.5.5V4M4.5 4l.5 9.5h6l.5-9.5M7 7v4M9 7v4"/>
   </svg> Delete`;
@@ -3547,10 +4171,10 @@ function addDeleteBtn(parent, onClick) {
 
 function field(parent, label) {
   const f = document.createElement('div');
-  f.className = 'sf-prop-field';
+  f.className = 'df-prop-field';
   if (label) {
     const l = document.createElement('div');
-    l.className = 'sf-properties__label';
+    l.className = 'df-properties__label';
     l.textContent = label;
     f.appendChild(l);
   }
@@ -3596,7 +4220,7 @@ function wireMarkdownShortcuts(inputEl, hintParent) {
   });
   if (hintParent) {
     const hint = document.createElement('div');
-    hint.className = 'sf-properties__hint';
+    hint.className = 'df-properties__hint';
     hint.innerHTML = 'Supports <strong>**bold**</strong>, <em>*italic*</em>, <del>~~strike~~</del>, <code>`code`</code>';
     hintParent.appendChild(hint);
   }
@@ -3605,7 +4229,7 @@ function wireMarkdownShortcuts(inputEl, hintParent) {
 function addText(parent, label, value, onChange, cell, opts) {
   const f = field(parent, label);
   const input = document.createElement('textarea');
-  input.className = 'sf-properties__input sf-properties__text-input';
+  input.className = 'df-properties__input df-properties__text-input';
   input.value = value ?? '';
   if (opts?.placeholder) input.placeholder = opts.placeholder;
   input.rows = 1;
@@ -3687,7 +4311,7 @@ function wireCanvasLabelHighlight(input, cell) {
     if (!view) return;
 
     caretEl = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    caretEl.setAttribute('class', 'sf-canvas-caret');
+    caretEl.setAttribute('class', 'df-canvas-caret');
     caretEl.setAttribute('stroke', 'var(--selection-color)');
     caretEl.setAttribute('stroke-width', '1.5');
     view.el.appendChild(caretEl);
@@ -3722,7 +4346,7 @@ function addDate(parent, label, value, onChange) {
   // Visible text input showing DD/MM/YYYY (manual entry)
   const display = document.createElement('input');
   display.type = 'text';
-  display.className = 'sf-properties__input';
+  display.className = 'df-properties__input';
   display.placeholder = 'DD/MM/YYYY';
   display.style.flex = '1';
 
@@ -3784,7 +4408,7 @@ function addDate(parent, label, value, onChange) {
 function addTextarea(parent, label, value, onChange, opts) {
   const f = field(parent, label);
   const ta = document.createElement('textarea');
-  ta.className = 'sf-properties__input sf-properties__textarea';
+  ta.className = 'df-properties__input df-properties__textarea';
   ta.value = value ?? '';
   if (opts?.placeholder) ta.placeholder = opts.placeholder;
   // Auto-size: show one more line than current text
@@ -3816,10 +4440,10 @@ function addTextarea(parent, label, value, onChange, opts) {
 function addChipInput(parent, label, values, onChange) {
   const f = field(parent, label);
   const wrap = document.createElement('div');
-  wrap.className = 'sf-chip-input';
+  wrap.className = 'df-chip-input';
   const input = document.createElement('input');
   input.type = 'text';
-  input.className = 'sf-chip-input__input';
+  input.className = 'df-chip-input__input';
   let chips = Array.isArray(values) ? [...values] : [];
 
   const commitInput = () => {
@@ -3836,14 +4460,14 @@ function addChipInput(parent, label, values, onChange) {
 
   const renderChips = () => {
     // Remove all existing chip elements (keep the input at the end)
-    [...wrap.querySelectorAll('.sf-chip')].forEach(c => c.remove());
+    [...wrap.querySelectorAll('.df-chip')].forEach(c => c.remove());
     for (const tag of chips) {
       const chip = document.createElement('span');
-      chip.className = 'sf-chip';
+      chip.className = 'df-chip';
       chip.textContent = tag;
       const x = document.createElement('button');
       x.type = 'button';
-      x.className = 'sf-chip__remove';
+      x.className = 'df-chip__remove';
       x.setAttribute('aria-label', `Remove ${tag}`);
       x.textContent = '×';
       x.addEventListener('click', (e) => {
@@ -3886,19 +4510,19 @@ function addChipInput(parent, label, values, onChange) {
 function addRaciPicker(parent, label, value, onChange) {
   const f = field(parent, label);
   const grid = document.createElement('div');
-  grid.className = 'sf-raci-picker';
+  grid.className = 'df-raci-picker';
   const state = { R: !!value?.R, A: !!value?.A, C: !!value?.C, I: !!value?.I };
   const NAMES = { R: 'Responsible', A: 'Accountable', C: 'Consulted', I: 'Informed' };
   for (const key of ['R', 'A', 'C', 'I']) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'sf-raci-picker__btn' + (state[key] ? ' sf-raci-picker__btn--active' : '');
+    btn.className = 'df-raci-picker__btn' + (state[key] ? ' df-raci-picker__btn--active' : '');
     btn.dataset.raci = key;
     btn.title = NAMES[key];
     btn.textContent = key;
     btn.addEventListener('click', () => {
       state[key] = !state[key];
-      btn.classList.toggle('sf-raci-picker__btn--active', state[key]);
+      btn.classList.toggle('df-raci-picker__btn--active', state[key]);
       onChange({ ...state });
     });
     grid.appendChild(btn);
@@ -3914,18 +4538,18 @@ function addColor(parent, label, value, onChange, opts = {}) {
 
   const f = field(parent, label);
   const row = document.createElement('div');
-  row.className = 'sf-prop-color-row';
+  row.className = 'df-prop-color-row';
 
   const hex = toHex(value);
 
   const swatch = document.createElement('input');
   swatch.type = 'color';
-  swatch.className = 'sf-properties__color';
+  swatch.className = 'df-properties__color';
   swatch.value = hex;
 
   const textInput = document.createElement('input');
   textInput.type = 'text';
-  textInput.className = 'sf-properties__input';
+  textInput.className = 'df-properties__input';
   // Always display as hex — never raw CSS vars or rgba strings
   textInput.value = value ? hex : '';
 
@@ -3938,7 +4562,12 @@ function addColor(parent, label, value, onChange, opts = {}) {
   // and fires the onChange. The button is dimmed when the current value
   // already matches the default so users can see the "nothing to reset"
   // state at a glance.
-  const defaultHex = opts.defaultValue ? toHex(opts.defaultValue) : null;
+  // Revert target: an explicit default if the field declares one (e.g. brand blue for
+  // a Header fill), otherwise the value the field opened with — so EVERY colour input
+  // can snap back to where it started. `resetRaw` keeps the original raw string
+  // (rgba/var) so reverting restores translucency exactly, not a flattened hex.
+  const resetRaw = opts.defaultValue != null ? opts.defaultValue : value;
+  const defaultHex = resetRaw ? toHex(resetRaw) : null;
   let resetBtn = null;
   const refreshResetState = () => {
     if (!resetBtn) return;
@@ -3964,8 +4593,8 @@ function addColor(parent, label, value, onChange, opts = {}) {
       [3, 4, 6, 8].includes(stripped.length);
     if (!isValidHex && raw !== '') {
       textInput.value = lastValid;
-      textInput.classList.add('sf-properties__input--invalid');
-      setTimeout(() => textInput.classList.remove('sf-properties__input--invalid'), 400);
+      textInput.classList.add('df-properties__input--invalid');
+      setTimeout(() => textInput.classList.remove('df-properties__input--invalid'), 400);
       return;
     }
     const h = toHex(raw);
@@ -3982,9 +4611,9 @@ function addColor(parent, label, value, onChange, opts = {}) {
   if (defaultHex) {
     resetBtn = document.createElement('button');
     resetBtn.type = 'button';
-    resetBtn.className = 'sf-prop-color-reset';
-    resetBtn.title = `Reset to default (${defaultHex})`;
-    resetBtn.setAttribute('aria-label', 'Reset colour to default');
+    resetBtn.className = 'df-prop-color-reset';
+    resetBtn.title = `${opts.defaultValue != null ? 'Reset to default' : 'Revert to original'} (${defaultHex})`;
+    resetBtn.setAttribute('aria-label', 'Reset color to default');
     // Counter-clockwise arrow ↺ — matches the visual idiom users already
     // associate with "reset" / "undo" without conflicting with the toolbar
     // undo icon.
@@ -3994,7 +4623,7 @@ function addColor(parent, label, value, onChange, opts = {}) {
       swatch.value = defaultHex;
       textInput.value = defaultHex;
       lastValid = defaultHex;
-      batched(defaultHex);
+      batched(resetRaw);
       refreshResetState();
     });
     row.appendChild(resetBtn);
@@ -4008,7 +4637,7 @@ function addColor(parent, label, value, onChange, opts = {}) {
   // bank the current color for reuse.  Subscribes to onPaletteChange so
   // multiple open pickers (e.g., Fill + Border + Label) stay in sync.
   const paletteRow = document.createElement('div');
-  paletteRow.className = 'sf-prop-palette-strip';
+  paletteRow.className = 'df-prop-palette-strip';
   f.appendChild(paletteRow);
 
   const applySwatch = (hex) => {
@@ -4025,17 +4654,17 @@ function addColor(parent, label, value, onChange, opts = {}) {
     for (const hex of palette) {
       const item = document.createElement('button');
       item.type = 'button';
-      item.className = 'sf-prop-palette-swatch';
+      item.className = 'df-prop-palette-swatch';
       item.style.backgroundColor = hex;
       item.title = hex;
       item.setAttribute('aria-label', `Apply ${hex}`);
       item.addEventListener('click', (e) => {
-        if (e.target.classList.contains('sf-prop-palette-swatch__remove')) return;
+        if (e.target.classList.contains('df-prop-palette-swatch__remove')) return;
         applySwatch(hex);
       });
       // × remove button — visible on hover/focus only via CSS.
       const remove = document.createElement('span');
-      remove.className = 'sf-prop-palette-swatch__remove';
+      remove.className = 'df-prop-palette-swatch__remove';
       remove.textContent = '×';
       remove.setAttribute('role', 'button');
       remove.setAttribute('aria-label', `Remove ${hex} from palette`);
@@ -4053,12 +4682,12 @@ function addColor(parent, label, value, onChange, opts = {}) {
     // which is desirable behaviour we explicitly support).
     const saveBtn = document.createElement('button');
     saveBtn.type = 'button';
-    saveBtn.className = 'sf-prop-palette-save';
+    saveBtn.className = 'df-prop-palette-save';
     saveBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
-    saveBtn.setAttribute('aria-label', 'Save current colour to palette');
+    saveBtn.setAttribute('aria-label', 'Save current color to palette');
     saveBtn.title = palette.length >= PALETTE_MAX_SLOTS
       ? `Palette full (${PALETTE_MAX_SLOTS}) — saving will replace the oldest`
-      : 'Save current colour to palette';
+      : 'Save current color to palette';
     saveBtn.addEventListener('click', () => {
       const ok = addToPalette(lastValid);
       if (ok) showToast(`Saved ${lastValid.toUpperCase()} to palette`, { duration: 1400 });
@@ -4101,25 +4730,25 @@ function addColorMulti(parent, label, value, onChange) {
 
   const f = field(parent, label);
   const row = document.createElement('div');
-  row.className = 'sf-prop-color-row';
+  row.className = 'df-prop-color-row';
 
   const mixed = value == null;
   const hex = mixed ? '#000000' : toHex(value);
 
   const swatch = document.createElement('input');
   swatch.type = 'color';
-  swatch.className = 'sf-properties__color';
+  swatch.className = 'df-properties__color';
   swatch.value = hex;
-  if (mixed) swatch.classList.add('sf-properties__color--mixed');
+  if (mixed) swatch.classList.add('df-properties__color--mixed');
 
   const textInput = document.createElement('input');
   textInput.type = 'text';
-  textInput.className = 'sf-properties__input';
+  textInput.className = 'df-properties__input';
   textInput.value = mixed ? '' : hex;
   if (mixed) textInput.placeholder = 'Multiple';
 
   const clearMixed = () => {
-    swatch.classList.remove('sf-properties__color--mixed');
+    swatch.classList.remove('df-properties__color--mixed');
     textInput.placeholder = '';
   };
 
@@ -4153,7 +4782,7 @@ function addNumber(parent, label, value, onChange, opts = {}) {
   const f = field(parent, label);
   const input = document.createElement('input');
   input.type = 'number';
-  input.className = 'sf-properties__input';
+  input.className = 'df-properties__input';
   input.value = value ?? 0;
   input.min = min;
   if (max != null) input.max = max;
@@ -4187,20 +4816,20 @@ function addNumberPair(parent, labelA, valueA, onChangeA, labelB, valueB, onChan
   const maxA = opts.maxA;
   const maxB = opts.maxB;
   const pair = document.createElement('div');
-  pair.className = 'sf-prop-pair';
+  pair.className = 'df-prop-pair';
 
   [
     [labelA, valueA, onChangeA, minA, maxA],
     [labelB, valueB, onChangeB, minB, maxB],
   ].forEach(([lbl, val, onCh, lo, hi]) => {
     const f = document.createElement('div');
-    f.className = 'sf-prop-field';
+    f.className = 'df-prop-field';
     const l = document.createElement('div');
-    l.className = 'sf-properties__label';
+    l.className = 'df-properties__label';
     l.textContent = lbl;
     const inp = document.createElement('input');
     inp.type = 'number';
-    inp.className = 'sf-properties__input';
+    inp.className = 'df-properties__input';
     inp.value = val ?? 0;
     inp.min = lo;
     if (hi != null) inp.max = hi;
@@ -4223,9 +4852,52 @@ function addNumberPair(parent, labelA, valueA, onChangeA, labelB, valueB, onChan
   parent.appendChild(pair);
 }
 
+// Generic rotation control: a degrees input + a quick "+90°" button. The caller
+// supplies how to read/write the angle. Currently drives the shape Rotation
+// (native `angle`); history merges a whole interaction (spinner / typing /
+// repeated +90) into ONE undo step (see js/history.js change:angle).
+function rotationField(parent, label, getDeg, setDeg) {
+  const norm = a => ((Math.round(a) % 360) + 360) % 360;
+  const f = field(parent, label);
+  f.classList.add('df-prop-rotation');
+  const row = document.createElement('div');
+  row.className = 'df-prop-rotation-row';
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'df-properties__input';
+  input.min = 0; input.max = 360;
+  input.value = String(norm(getDeg() || 0));
+  let lastValid = input.value;
+  input.addEventListener('change', () => {
+    const raw = parseFloat(input.value);
+    if (isNaN(raw)) { input.value = lastValid; return; }
+    const v = norm(raw);
+    input.value = String(v); lastValid = input.value;
+    setDeg(v);
+  });
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'df-prop-rotate-90';
+  btn.textContent = '+90°';
+  btn.title = 'Rotate 90° clockwise';
+  btn.addEventListener('click', () => {
+    const v = norm((getDeg() || 0) + 90);
+    setDeg(v);
+    input.value = String(v); lastValid = input.value;
+  });
+  row.appendChild(input);
+  row.appendChild(btn);
+  f.appendChild(row);
+}
+
+// Shape rotation — writes the native `angle` via cell.rotate().
+function addRotationField(parent, cell) {
+  rotationField(parent, 'Rotation', () => cell.angle(), v => cell.rotate(v, true));
+}
+
 function addAutoSizeBtn(parent, onClick) {
   const btn = document.createElement('button');
-  btn.className = 'sf-properties__btn sf-properties__btn--auto-size';
+  btn.className = 'df-properties__btn df-properties__btn--auto-size';
   btn.innerHTML = `
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
       <path d="M1 1h5v2H3v3H1V1zm9 0h5v5h-2V3h-3V1zM1 10h2v3h3v2H1v-5zm12 3h-3v2h5v-5h-2v3z"/>
@@ -4240,6 +4912,7 @@ const TYPE_PLURALS = {
   'sf.SimpleNode':     'Nodes',
   'sf.Container':      'Containers',
   'sf.Zone':           'Zones',
+  'sf.TaskGroup':      'Task Groups',
   'sf.Note':           'Notes',
   'sf.BpmnEvent':      'Events',
   'sf.BpmnTask':       'Tasks',
@@ -4270,7 +4943,7 @@ function addApplySizeBtn(parent, cell) {
   const type = cell.get('type');
   const typePlural = TYPE_PLURALS[type] || 'Shapes';
   const btn = document.createElement('button');
-  btn.className = 'sf-properties__btn sf-properties__btn--apply-size';
+  btn.className = 'df-properties__btn df-properties__btn--apply-size';
   btn.innerHTML = `
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
       <path d="M1 1h5v2H3v3H1V1zm9 0h5v5h-2V3h-3V1zM1 10h2v3h3v2H1v-5zm12 3h-3v2h5v-5h-2v3z"/>
@@ -4325,10 +4998,10 @@ function addApplySizeBtn(parent, cell) {
 function addNumberWithSuffix(parent, label, value, suffix, onChange) {
   const f = field(parent, label);
   const row = document.createElement('div');
-  row.className = 'sf-prop-input-with-suffix';
+  row.className = 'df-prop-input-with-suffix';
   const input = document.createElement('input');
   input.type = 'number';
-  input.className = 'sf-properties__input';
+  input.className = 'df-properties__input';
   input.value = value ?? 0;
   input.min = 1;
   input.addEventListener('change', () => {
@@ -4336,7 +5009,7 @@ function addNumberWithSuffix(parent, label, value, suffix, onChange) {
     if (!isNaN(v) && v > 0) onChange(v);
   });
   const span = document.createElement('span');
-  span.className = 'sf-properties__input-suffix';
+  span.className = 'df-properties__input-suffix';
   span.textContent = suffix;
   row.appendChild(input);
   row.appendChild(span);
@@ -4345,7 +5018,7 @@ function addNumberWithSuffix(parent, label, value, suffix, onChange) {
 
 function renderTimelineTaskEditor(parent, cell) {
   const listEl = document.createElement('div');
-  listEl.className = 'sf-timeline-task-list';
+  listEl.className = 'df-timeline-task-list';
 
   // Drag state
   let dragIdx = null;
@@ -4357,14 +5030,14 @@ function renderTimelineTaskEditor(parent, cell) {
     currentTasks.forEach((task, i) => {
       const row = document.createElement('div');
       const isTask = task.type !== 'group';
-      row.className = 'sf-timeline-task-row'
-        + (isTask ? ' sf-timeline-task-row--task' : '')
-        + (!isTask ? ' sf-timeline-task-row--group' : '');
+      row.className = 'df-timeline-task-row'
+        + (isTask ? ' df-timeline-task-row--task' : '')
+        + (!isTask ? ' df-timeline-task-row--group' : '');
       row.dataset.index = i;
 
       // Drag handle
       const dragHandle = document.createElement('span');
-      dragHandle.className = 'sf-timeline-task-drag';
+      dragHandle.className = 'df-timeline-task-drag';
       dragHandle.innerHTML = '<svg viewBox="0 0 10 14" fill="currentColor"><circle cx="3" cy="2" r="1.2"/><circle cx="7" cy="2" r="1.2"/><circle cx="3" cy="7" r="1.2"/><circle cx="7" cy="7" r="1.2"/><circle cx="3" cy="12" r="1.2"/><circle cx="7" cy="12" r="1.2"/></svg>';
       dragHandle.draggable = true;
       dragHandle.addEventListener('dragstart', (evt) => {
@@ -4376,7 +5049,7 @@ function renderTimelineTaskEditor(parent, cell) {
       dragHandle.addEventListener('dragend', () => {
         dragIdx = null;
         row.style.opacity = '';
-        listEl.querySelectorAll('.sf-timeline-task-row--drag-over').forEach(r => r.classList.remove('sf-timeline-task-row--drag-over'));
+        listEl.querySelectorAll('.df-timeline-task-row--drag-over').forEach(r => r.classList.remove('df-timeline-task-row--drag-over'));
       });
       row.appendChild(dragHandle);
 
@@ -4384,14 +5057,14 @@ function renderTimelineTaskEditor(parent, cell) {
       row.addEventListener('dragover', (evt) => {
         evt.preventDefault();
         evt.dataTransfer.dropEffect = 'move';
-        row.classList.add('sf-timeline-task-row--drag-over');
+        row.classList.add('df-timeline-task-row--drag-over');
       });
       row.addEventListener('dragleave', () => {
-        row.classList.remove('sf-timeline-task-row--drag-over');
+        row.classList.remove('df-timeline-task-row--drag-over');
       });
       row.addEventListener('drop', (evt) => {
         evt.preventDefault();
-        row.classList.remove('sf-timeline-task-row--drag-over');
+        row.classList.remove('df-timeline-task-row--drag-over');
         const fromIdx = parseInt(evt.dataTransfer.getData('text/plain'), 10);
         const toIdx = i;
         if (isNaN(fromIdx) || fromIdx === toIdx) return;
@@ -4414,7 +5087,7 @@ function renderTimelineTaskEditor(parent, cell) {
       // Color indicator
       const colorBtn = document.createElement('input');
       colorBtn.type = 'color';
-      colorBtn.className = 'sf-timeline-task-color';
+      colorBtn.className = 'df-timeline-task-color';
       colorBtn.value = toHex(task.color || '#1D73C9');
       colorBtn.addEventListener('input', () => {
         const updated = [...cell.get('tasks')];
@@ -4426,7 +5099,7 @@ function renderTimelineTaskEditor(parent, cell) {
       // Label input
       const labelInput = document.createElement('input');
       labelInput.type = 'text';
-      labelInput.className = 'sf-properties__input sf-timeline-task-label';
+      labelInput.className = 'df-properties__input df-timeline-task-label';
       labelInput.value = task.label || '';
       labelInput.placeholder = task.type === 'group' ? 'Group name' : 'Task name';
       labelInput.addEventListener('input', () => {
@@ -4438,7 +5111,7 @@ function renderTimelineTaskEditor(parent, cell) {
 
       // Delete button
       const delBtn = document.createElement('button');
-      delBtn.className = 'sf-field-delete';
+      delBtn.className = 'df-field-delete';
       delBtn.textContent = '×';
       delBtn.title = 'Remove';
       delBtn.addEventListener('click', () => {
@@ -4460,10 +5133,10 @@ function renderTimelineTaskEditor(parent, cell) {
 
     // Add buttons
     const btnRow = document.createElement('div');
-    btnRow.className = 'sf-timeline-task-actions';
+    btnRow.className = 'df-timeline-task-actions';
 
     const addGroupBtn = document.createElement('button');
-    addGroupBtn.className = 'sf-properties__btn sf-properties__btn--add-field';
+    addGroupBtn.className = 'df-properties__btn df-properties__btn--add-field';
     addGroupBtn.textContent = '+ Group';
     addGroupBtn.addEventListener('click', () => {
       const updated = [...cell.get('tasks')];
@@ -4474,7 +5147,7 @@ function renderTimelineTaskEditor(parent, cell) {
     });
 
     const addTaskBtn = document.createElement('button');
-    addTaskBtn.className = 'sf-properties__btn sf-properties__btn--add-field';
+    addTaskBtn.className = 'df-properties__btn df-properties__btn--add-field';
     addTaskBtn.textContent = '+ Task';
     addTaskBtn.addEventListener('click', () => {
       const updated = [...cell.get('tasks')];
@@ -4495,19 +5168,19 @@ function renderTimelineTaskEditor(parent, cell) {
 }
 
 // Slide/switch toggle for boolean properties. `value` is a boolean; onChange
-// fires with the new boolean. Styled via `.sf-properties__toggle*` CSS.
+// fires with the new boolean. Styled via `.df-properties__toggle*` CSS.
 function addToggle(parent, label, value, onChange) {
   const f = field(parent, label);
   const wrap = document.createElement('label');
-  wrap.className = 'sf-properties__toggle';
+  wrap.className = 'df-properties__toggle';
   const input = document.createElement('input');
   input.type = 'checkbox';
-  input.className = 'sf-properties__toggle-input';
+  input.className = 'df-properties__toggle-input';
   input.checked = !!value;
   const track = document.createElement('span');
-  track.className = 'sf-properties__toggle-track';
+  track.className = 'df-properties__toggle-track';
   const thumb = document.createElement('span');
-  thumb.className = 'sf-properties__toggle-thumb';
+  thumb.className = 'df-properties__toggle-thumb';
   track.appendChild(thumb);
   wrap.appendChild(input);
   wrap.appendChild(track);
@@ -4520,28 +5193,36 @@ function addToggle(parent, label, value, onChange) {
 // so each state has an explicit name (e.g. "Show" / "Hide"). `options` is
 // `[{ value, label }, ...]`; `onChange` fires with the selected value when
 // the user picks a different one.
-function addSegmented(parent, label, value, options, onChange) {
+function addSegmented(parent, label, value, options, onChange, opts = {}) {
   const f = field(parent, label);
   const wrap = document.createElement('div');
-  wrap.className = 'sf-properties__segmented';
+  wrap.className = 'df-properties__segmented';
   wrap.setAttribute('role', 'radiogroup');
   const buttons = [];
+  const clearAll = () => buttons.forEach(b => {
+    b.classList.remove('df-properties__segmented-option--active');
+    b.setAttribute('aria-checked', 'false');
+  });
   options.forEach(opt => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'sf-properties__segmented-option';
+    btn.className = 'df-properties__segmented-option';
     btn.textContent = opt.label;
     btn.setAttribute('role', 'radio');
     const isActive = opt.value === value;
     btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
-    if (isActive) btn.classList.add('sf-properties__segmented-option--active');
+    if (isActive) btn.classList.add('df-properties__segmented-option--active');
     btn.addEventListener('click', () => {
-      if (btn.classList.contains('sf-properties__segmented-option--active')) return;
-      buttons.forEach(b => {
-        b.classList.remove('sf-properties__segmented-option--active');
-        b.setAttribute('aria-checked', 'false');
-      });
-      btn.classList.add('sf-properties__segmented-option--active');
+      if (btn.classList.contains('df-properties__segmented-option--active')) {
+        // Re-clicking the active segment clears the choice — only where the control
+        // models an optional value (allowDeselect); binary sliders stay no-op.
+        if (!opts.allowDeselect) return;
+        clearAll();
+        onChange(opts.deselectValue ?? '');
+        return;
+      }
+      clearAll();
+      btn.classList.add('df-properties__segmented-option--active');
       btn.setAttribute('aria-checked', 'true');
       onChange(opt.value);
     });
@@ -4552,9 +5233,13 @@ function addSegmented(parent, label, value, options, onChange) {
 }
 
 function addSelect(parent, label, value, options, onChange) {
+  // Discrete control: one `change` per action. Batch onChange so a type switch that
+  // also repaints multiple attrs (e.g. BpmnEvent / Gateway / SequenceFragment) is ONE
+  // undo step — the type prop + every attr land together.
+  onChange = asUndoBatch(onChange);
   const f = field(parent, label);
   const sel = document.createElement('select');
-  sel.className = 'sf-properties__select';
+  sel.className = 'df-properties__select';
   options.forEach(opt => {
     const o = document.createElement('option');
     o.value = opt.value;
@@ -4566,10 +5251,29 @@ function addSelect(parent, label, value, options, onChange) {
   f.appendChild(sel);
 }
 
+// Extensible picklist: free-text input backed by a <datalist> of suggestions.
+// Lets users pick a standard tier (Source/DLO/DMO…) or type a custom one,
+// avoiding the fragmentation of pure free text without a rigid enum.
+function addDatalist(parent, label, value, suggestions, onChange) {
+  const f = field(parent, label);
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'df-properties__input';
+  input.value = value || '';
+  const listId = 'df-dl-' + Math.random().toString(36).slice(2, 9);
+  const dl = document.createElement('datalist');
+  dl.id = listId;
+  suggestions.forEach(s => { const o = document.createElement('option'); o.value = s; dl.appendChild(o); });
+  input.setAttribute('list', listId);
+  input.addEventListener('input', () => onChange(input.value));
+  f.appendChild(input);
+  f.appendChild(dl);
+}
+
 function addMarkerPicker(parent, label, current, options, svgs, onChange, opts = {}) {
   const f = field(parent, label);
   const wrap = document.createElement('div');
-  wrap.className = 'sf-marker-picker';
+  wrap.className = 'df-marker-picker';
   // Gap 11 (v1.12.0) — when the caller passes the active line stroke, paint
   // the thumbnail SVGs in that colour by setting the wrapper's `color`
   // CSS property. The thumbs already use `currentColor` for stroke/fill,
@@ -4579,7 +5283,7 @@ function addMarkerPicker(parent, label, current, options, svgs, onChange, opts =
 
   // Current selected display
   const btn = document.createElement('button');
-  btn.className = 'sf-marker-picker__btn';
+  btn.className = 'df-marker-picker__btn';
   const updateBtn = (val) => {
     const opt = options.find(o => o.value === val) || options[0];
     const svg = svgs[val] || '';
@@ -4591,19 +5295,19 @@ function addMarkerPicker(parent, label, current, options, svgs, onChange, opts =
 
   // Dropdown list
   const list = document.createElement('div');
-  list.className = 'sf-marker-picker__list';
+  list.className = 'df-marker-picker__list';
   list.style.display = 'none';
   options.forEach(opt => {
     const item = document.createElement('button');
-    item.className = 'sf-marker-picker__item';
-    if (opt.value === current) item.classList.add('sf-marker-picker__item--active');
+    item.className = 'df-marker-picker__item';
+    if (opt.value === current) item.classList.add('df-marker-picker__item--active');
     const svg = svgs[opt.value] || '';
     item.innerHTML = svg
       ? `<svg width="32" height="18" viewBox="0 0 36 18">${svg}</svg><span>${opt.label}</span>`
       : `<span>${opt.label}</span>`;
     item.addEventListener('click', () => {
-      list.querySelectorAll('.sf-marker-picker__item--active').forEach(el => el.classList.remove('sf-marker-picker__item--active'));
-      item.classList.add('sf-marker-picker__item--active');
+      list.querySelectorAll('.df-marker-picker__item--active').forEach(el => el.classList.remove('df-marker-picker__item--active'));
+      item.classList.add('df-marker-picker__item--active');
       updateBtn(opt.value);
       list.style.display = 'none';
       onChange(opt.value);
@@ -4626,6 +5330,10 @@ function addMarkerPicker(parent, label, current, options, svgs, onChange, opts =
 }
 
 function addIconPicker(parent, label, currentHref, onChange, iconColorGetter) {
+  // Discrete control: batch onChange so the icon href + any layout attr writes the
+  // caller makes (e.g. updateSimpleNodeLayout / updateDataObjectHeaderLayout) collapse
+  // into ONE undo step — for the Node, Container, and DataObject header icon pickers.
+  onChange = asUndoBatch(onChange);
   const f = field(parent, label);
 
   // Detect current icon name from href (data URI contains data-icon-id attribute)
@@ -4646,19 +5354,19 @@ function addIconPicker(parent, label, currentHref, onChange, iconColorGetter) {
   wrap.style.position = 'relative';
 
   const inputRow = document.createElement('div');
-  inputRow.className = 'sf-prop-icon-preview';
+  inputRow.className = 'df-prop-icon-preview';
   inputRow.style.cursor = 'text';
 
   const swatch = document.createElement('div');
-  swatch.className = 'sf-prop-icon-swatch';
+  swatch.className = 'df-prop-icon-swatch';
 
   const search = document.createElement('input');
   search.type = 'text';
-  search.className = 'sf-prop-icon-search-input';
+  search.className = 'df-prop-icon-search-input';
   search.placeholder = 'Search icons\u2026';
 
   const clearBtn = document.createElement('button');
-  clearBtn.className = 'sf-prop-icon-clear';
+  clearBtn.className = 'df-prop-icon-clear';
   clearBtn.innerHTML = '\u00D7';
   clearBtn.title = 'Remove icon';
   clearBtn.type = 'button';
@@ -4827,7 +5535,10 @@ function preserveParentEmbedding(oldCell, newCell) {
   const parent = graph.getCell(parentId);
   if (!parent) return;
   if (!canEmbed(parent.get('type'), newCell.get('type'))) return;
-  parent.embed(newCell);
+  // Suppress change:parent recording — the conversion's add(newCell) command already
+  // captures the embedded state in its JSON (re-captured on undo with `parent`), so the
+  // embed round-trips via the add/remove pair without a separate command.
+  history.suppressEmbedTracking(() => parent.embed(newCell));
 }
 
 function convertToContainer(cell) {
@@ -4847,11 +5558,14 @@ function convertToContainer(cell) {
       accentFill:     { fill: fillColor },
     },
   });
-  graph.addCell(container);
-  preserveParentEmbedding(cell, container);
-  reconnectLinks(connections, container.id);
-  cell.remove();
-  selection.selectOnly(container.id);
+  history.startBatch();   // add + reconnect + remove = ONE undo step
+  try {
+    graph.addCell(container);
+    preserveParentEmbedding(cell, container);
+    reconnectLinks(connections, container.id);
+    cell.remove();
+    selection.selectOnly(container.id);
+  } finally { history.endBatch(); }
 }
 
 function convertToNode(cell) {
@@ -4871,12 +5585,15 @@ function convertToNode(cell) {
       body:     { fill: fillColor },
     },
   });
-  graph.addCell(node);
-  updateSimpleNodeLayout(node);
-  preserveParentEmbedding(cell, node);
-  reconnectLinks(connections, node.id);
-  cell.remove();
-  selection.selectOnly(node.id);
+  history.startBatch();   // add + layout + reconnect + remove = ONE undo step
+  try {
+    graph.addCell(node);
+    updateSimpleNodeLayout(node);
+    preserveParentEmbedding(cell, node);
+    reconnectLinks(connections, node.id);
+    cell.remove();
+    selection.selectOnly(node.id);
+  } finally { history.endBatch(); }
 }
 
 function convertToIcon(cell) {
@@ -4900,11 +5617,14 @@ function convertToIcon(cell) {
       subtitle: { text: '', visibility: 'hidden' },
     },
   });
-  graph.addCell(node);
-  preserveParentEmbedding(cell, node);
-  reconnectLinks(connections, node.id);
-  cell.remove();
-  selection.selectOnly(node.id);
+  history.startBatch();   // add + reconnect + remove = ONE undo step (depth-safe if a convert-all batch is already open)
+  try {
+    graph.addCell(node);
+    preserveParentEmbedding(cell, node);
+    reconnectLinks(connections, node.id);
+    cell.remove();
+    selection.selectOnly(node.id);
+  } finally { history.endBatch(); }
 }
 
 function convertContainerToIcon(cell) {
@@ -4927,11 +5647,14 @@ function convertContainerToIcon(cell) {
       subtitle: { text: '', visibility: 'hidden' },
     },
   });
-  graph.addCell(node);
-  preserveParentEmbedding(cell, node);
-  reconnectLinks(connections, node.id);
-  cell.remove();
-  selection.selectOnly(node.id);
+  history.startBatch();   // add + reconnect + remove = ONE undo step (depth-safe if a convert-all batch is already open)
+  try {
+    graph.addCell(node);
+    preserveParentEmbedding(cell, node);
+    reconnectLinks(connections, node.id);
+    cell.remove();
+    selection.selectOnly(node.id);
+  } finally { history.endBatch(); }
 }
 
 function convertFromIcon(cell) {
@@ -4954,11 +5677,14 @@ function convertFromIcon(cell) {
       subtitle: { text: savedSubtitle, visibility: 'visible' },
     },
   });
-  graph.addCell(node);
-  preserveParentEmbedding(cell, node);
-  reconnectLinks(connections, node.id);
-  cell.remove();
-  selection.selectOnly(node.id);
+  history.startBatch();   // add + reconnect + remove = ONE undo step (depth-safe if a convert-all batch is already open)
+  try {
+    graph.addCell(node);
+    preserveParentEmbedding(cell, node);
+    reconnectLinks(connections, node.id);
+    cell.remove();
+    selection.selectOnly(node.id);
+  } finally { history.endBatch(); }
 }
 
 // ── Utility ─────────────────────────────────────────────────────────
@@ -4977,12 +5703,21 @@ function toHex(color) {
     const [, r, g, b] = color.match(/^(.)(.)(.)/);
     return `#${r}${r}${g}${g}${b}${b}`;
   }
-  // CSS variable, rgba, named color — parse via canvas
+  // CSS variable, rgb()/rgba(), named color — resolve via canvas. Canvas returns a
+  // #rrggbb for opaque colours but an `rgba(r, g, b, a)` string when alpha < 1 — pull
+  // the channels and drop alpha rather than falling through to #000000 (which made a
+  // translucent fill, e.g. a Zone/Layer tint, read as black in the picker).
   try {
     const ctx = document.createElement('canvas').getContext('2d');
     ctx.fillStyle = color;
-    const hex = ctx.fillStyle;
-    return /^#[0-9a-f]{6}$/i.test(hex) ? hex : '#000000';
+    const resolved = ctx.fillStyle;
+    if (/^#[0-9a-f]{6}$/i.test(resolved)) return resolved;
+    const m = resolved.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (m) {
+      const h = n => Math.max(0, Math.min(255, +n)).toString(16).padStart(2, '0');
+      return `#${h(m[1])}${h(m[2])}${h(m[3])}`;
+    }
+    return '#000000';
   } catch {
     return '#000000';
   }

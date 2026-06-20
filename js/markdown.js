@@ -3,13 +3,16 @@
 // A deliberately tiny subset:
 //   **bold**     → <strong>bold</strong>
 //   *italic*     → <em>italic</em>
-//   _italic_     → <em>italic</em>
 //   ~~strike~~   → <del>strike</del>
 //   `code`       → <code>code</code>
 //
+// NOTE: underscores are deliberately NOT markdown markers — `_` renders
+// literally so system field/object names (`My_Field__c`, `Account__r`) are
+// never italicised. The hint under the input advertises only `*` / `**`.
+//
 // Security invariant: the raw input passes through escHtml() BEFORE any regex
-// substitutions, so user text can never inject markup. Only the literal six
-// tokens above are recognised and only the four whitelisted tags are produced.
+// substitutions, so user text can never inject markup. Only the whitelisted
+// markers above are recognised and only the four whitelisted tags are produced.
 // No tag has attributes, so attribute-based XSS vectors are also closed off.
 //
 // The regex pass order is fixed and intentional (per CR-6.1):
@@ -18,20 +21,10 @@
 // `<em>*word*</em>`. Code last is suboptimal in theory (markers inside a
 // `` `code` `` block also get interpreted), but matches the CR spec exactly.
 
-/**
- * HTML-escape a string so the markdown pass can safely emit it into innerHTML.
- * Kept inline (rather than imported from persistence.js) so this module has
- * zero internal dependencies — anything that wants to format text just needs
- * to import `parseMarkdown`.
- */
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+// escHtml is the shared security primitive (js/util.js — itself dependency-free,
+// so this module gains no transitive deps). It runs FIRST in parseMarkdown so
+// user text can never inject markup.
+import { escHtml } from './util.js?v=1.16.1';
 
 /**
  * Convert plain text with inline markdown markers to HTML. Safe for innerHTML.
@@ -39,7 +32,8 @@ function escHtml(str) {
  * - Bold and italic are non-greedy and don't span newlines (the `.` doesn't
  *   match `\n` by default), so unbalanced markers across lines aren't
  *   swallowed.
- * - Underscore italic is supported alongside `*` italic so `_foo_` works.
+ * - Underscore (`_`) is NOT a marker — it renders literally, so system field
+ *   names like `My_Field__c` are never mangled.
  * - Empty / non-string input returns an empty string.
  */
 export function parseMarkdown(text) {
@@ -48,7 +42,6 @@ export function parseMarkdown(text) {
   // Order matters: bold → italic → strike → code. See header note.
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/(?:^|(?<=[^*]))\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
-  html = html.replace(/_(.+?)_/g, '<em>$1</em>');
   html = html.replace(/~~(.+?)~~/g, '<del>$1</del>');
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   // Convert hard line breaks to <br> AFTER inline-mark substitution so the

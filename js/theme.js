@@ -17,10 +17,6 @@ export function toggle() {
   localStorage.setItem(STORAGE_KEY, currentTheme);
 }
 
-export function getTheme() {
-  return currentTheme;
-}
-
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
 }

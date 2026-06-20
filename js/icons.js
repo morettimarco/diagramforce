@@ -49,17 +49,6 @@ export function getAllIcons() {
   return iconRegistry;
 }
 
-export function searchIcons(query) {
-  const q = query.toLowerCase();
-  return iconRegistry.filter(icon =>
-    icon.name.toLowerCase().includes(q) ||
-    icon.category.toLowerCase().includes(q)
-  );
-}
-
-export function getIconsByCategory(category) {
-  return iconRegistry.filter(icon => icon.category === category);
-}
 
 export function getCategories() {
   // Include 'diagrams' if stencil icons have been registered
@@ -142,11 +131,14 @@ export function normalizeViewBoxes() {
   }
 
   svg.remove();
-}
 
-/** Return the normalized (cropped) viewBox for an icon, or empty string if not computed. */
-export function getNormalizedViewBox(iconId) {
-  return normalizedViewBoxes.get(iconId) || '';
+  // Re-render existing <use> instances so they adopt the freshly-cropped symbol viewBoxes. Some
+  // engines snapshot a referenced <symbol> at first paint and DON'T re-read a later `viewBox`
+  // change — which leaves standard-sprite icons (cropped from a 1000px canvas, so ~30% smaller
+  // before normalization) rendering tiny next to utility icons, most visibly in the Save menu
+  // (`#save` vs the `code_playground`/`quip_sheet` Export icons). Clone+replace is a listener-free
+  // refresh. Runs before the stencil mounts, so only the page chrome's `<use>`s exist here.
+  document.querySelectorAll('use').forEach((u) => u.replaceWith(u.cloneNode(true)));
 }
 
 // Generate a data URI for an SLDS icon to use as JointJS <image> href.
